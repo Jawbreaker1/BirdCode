@@ -1,0 +1,26 @@
+[workspace]
+resolver = "3"
+members = [
+  "apps/cli",
+  "apps/daemon",
+  "apps/desktop/src-tauri",
+  "crates/backends",
+  "crates/client",
+  "crates/prompting",
+  "crates/protocol",
+  "crates/runtime",
+  "crates/store",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.92"
+license = "UNLICENSED"
+authors = ["BirdCode contributors"]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"

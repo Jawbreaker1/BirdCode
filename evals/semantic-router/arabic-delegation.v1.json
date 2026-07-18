@@ -1,0 +1,23 @@
+{
+  "id": "semantic-router.arabic-delegation",
+  "version": 1,
+  "user_request": "افحص المستودع من دون تعديل أي ملف. وزّع مراجعة سجل الأحداث، وأمان LM Studio، وعزل الصلاحيات على وكلاء فرعيين مستقلين، ثم لخّص الأدلة.",
+  "repository_context": {
+    "workspace": "BirdCode",
+    "independent_areas": [
+      "crates/store",
+      "crates/backends",
+      "permission boundaries"
+    ],
+    "constraint": "مراجعة للقراءة فقط مع أدلة قابلة للتحقق."
+  },
+  "expected_action": "inspect",
+  "expected_strategy": "delegate",
+  "expected_required_access": "read_only",
+  "required_evidence_sections": ["request", "repository"],
+  "min_clarification_questions": 0,
+  "max_clarification_questions": 0,
+  "min_suggested_subtasks": 2,
+  "max_suggested_subtasks": 4,
+  "max_output_tokens": 512
+}

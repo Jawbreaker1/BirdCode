@@ -1,0 +1,26 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# Rust
+/target/
+**/*.rs.bk
+
+# JavaScript
+node_modules/
+dist/
+.vite/
+
+# Tauri and macOS
+*.dmg
+*.app
+apps/desktop/src-tauri/binaries/
+
+# Local BirdCode state
+.birdcode/
+artifacts/
+
+# Editors
+.idea/
+.vscode/

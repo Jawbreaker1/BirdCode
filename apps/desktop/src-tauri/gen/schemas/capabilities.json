@@ -1,0 +1,1 @@
+{"main-window":{"identifier":"main-window","description":"Minimal capabilities for the sandboxed BirdCode renderer","local":true,"windows":["main"],"permissions":["core:default"]}}

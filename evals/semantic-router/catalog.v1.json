@@ -1,0 +1,13 @@
+{
+  "catalog_version": 1,
+  "cases": [
+    "multilingual-delegation.v1.json",
+    "clarification-abstention.v1.json",
+    "repository-injection-inspect.v1.json",
+    "informational-answer.v1.json",
+    "zero-delegation-read-only.v1.json",
+    "english-change.v1.json",
+    "japanese-clarification.v1.json",
+    "arabic-delegation.v1.json"
+  ]
+}

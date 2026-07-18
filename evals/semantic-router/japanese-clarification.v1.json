@@ -1,0 +1,14 @@
+{
+  "id": "semantic-router.japanese-clarification",
+  "version": 1,
+  "user_request": "このプロジェクトをもっと良くして、完成したら公開してください。",
+  "expected_action": "clarify",
+  "expected_strategy": "direct",
+  "expected_required_access": "none",
+  "required_evidence_sections": ["request"],
+  "min_clarification_questions": 1,
+  "max_clarification_questions": 3,
+  "min_suggested_subtasks": 0,
+  "max_suggested_subtasks": 0,
+  "max_output_tokens": 256
+}

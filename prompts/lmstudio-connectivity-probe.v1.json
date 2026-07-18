@@ -1,0 +1,40 @@
+{
+  "id": "lmstudio.connectivity_probe",
+  "version": 1,
+  "declared_role": "backend_connectivity_evaluation",
+  "input_schema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  },
+  "messages": [
+    {
+      "role": "system",
+      "content": "This is a connectivity evaluation. Return only the requested structured result."
+    },
+    {
+      "role": "user",
+      "content": "Svara med statusen ready och språket sv. 日本語とالعربيةを含む入力も保持できます。"
+    }
+  ],
+  "output": {
+    "name": "connectivity_result",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "const": "ready"
+        },
+        "language": {
+          "const": "sv"
+        }
+      },
+      "required": [
+        "status",
+        "language"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "max_output_tokens": 64
+}

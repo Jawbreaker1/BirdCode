@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://birdcode.local/schemas/prompt-manifest-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_schema_version",
+    "id",
+    "version",
+    "role",
+    "purpose",
+    "system_policy",
+    "input_schema",
+    "generation_schema",
+    "output_schema"
+  ],
+  "properties": {
+    "manifest_schema_version": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 5
+    },
+    "role": {
+      "const": "system"
+    },
+    "purpose": {
+      "type": "string",
+      "minLength": 1
+    },
+    "system_policy": {
+      "type": "string",
+      "minLength": 1
+    },
+    "input_schema": {
+      "type": "object"
+    },
+    "generation_schema": {
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    }
+  }
+}

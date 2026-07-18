@@ -1,0 +1,18 @@
+[package]
+name = "birdcode-runtime"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+birdcode-protocol = { path = "../protocol" }
+birdcode-store = { path = "../store" }
+
+[dev-dependencies]
+tempfile = "3.23.0"
+
+[lints]
+workspace = true
