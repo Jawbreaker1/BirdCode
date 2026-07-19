@@ -131,6 +131,14 @@ reproducible:
   CLI persistence smoke, and native ARM64 app/DMG verification. A separate
   read-only coding-agent review found no open P0-P2 defects in its declared
   scope. [Read the retained release-gate review](docs/reviews/2026-07-19-foundation-review.md).
+- **The typed validation-plane gate is green.** Source commit
+  `405ff2d5e51e4adeb7ec4159cc5d33f41590e2ec` passed 18/18 adversarial
+  validation tests and the expanded 212-execution Rust workspace gate, plus the
+  existing 9 GUI tests, strict linting, CLI smoke, and native ARM64 app/DMG
+  checks. The retained review includes exact artifact hashes, same-lineage
+  audit limits, and a hash-bound local Gemma secondary review. This proves the
+  contract foundation—not any process or platform adapter.
+  [Read the validation-plane release gate](docs/reviews/2026-07-19-validation-plane-review.md).
 - **Failures are retained too.** [The report history](evals/reports/) preserves
   four earlier failing snapshots instead of replacing them with the green run.
 - **Scope matters.** This proves the standalone router against this nine-case
