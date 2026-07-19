@@ -204,6 +204,10 @@ delegation. Expectations include required and forbidden evidence sections and
 bounded clarification/subtask counts, not only route labels. A single case can
 be selected explicitly by adding:
 
+Expected subtask counts are evaluator-only scoring metadata, separate from the
+prompted runtime delegation limit. The runtime limit defaults to four; only the
+versioned zero-delegation fixture sets it to zero.
+
 ```sh
 --case semantic-router.arabic-delegation
 ```
@@ -216,9 +220,13 @@ runner/platform identity, LM Studio version and evidence source, the selected
 model's bounded identity/quantization evidence, SHA-256 digests of the complete
 discovery response bodies, credential-free endpoints, raw inference evidence,
 prompt/case digests, and validated or rejected semantic output. The runner
-prints the exact final report SHA-256. Existing reports are never overwritten,
-and full LM Studio model inventories, local model paths, and unrelated model
-configuration are not copied into reports.
+also records the runtime delegation limit and prints the exact final report
+SHA-256. Case identifiers and expectations remain evaluator/report metadata
+and are never compiled into model input; model-visible data provenance uses
+only opaque, reproducible `eval-fixture:<case SHA-256>:<ordinal>` identifiers.
+Existing reports are never overwritten, and full LM Studio model inventories,
+local model paths, and unrelated model configuration are not copied into
+reports.
 
 Optional configuration:
 

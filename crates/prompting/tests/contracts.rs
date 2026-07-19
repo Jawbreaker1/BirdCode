@@ -2,8 +2,8 @@ use birdcode_prompting::{
     CanonicalJson, CompiledPrompt, DataProvenance, DataSection, MessageContent, MessageRole,
     PromptError, PromptInvocation, PromptLimits, PromptRegistry, RequiredAccess, RouteAction,
     RouteStrategy, SourceKind, TASK_ROUTER_MANIFEST_JSON, TASK_ROUTER_MANIFEST_V1_0_0_JSON,
-    TASK_ROUTER_MANIFEST_V1_1_0_JSON, TaskRouterOutput, TrustLevel, builtin_registry,
-    parse_manifest, task_router_key,
+    TASK_ROUTER_MANIFEST_V1_1_0_JSON, TASK_ROUTER_MANIFEST_V1_1_1_JSON, TaskRouterOutput,
+    TrustLevel, builtin_registry, parse_manifest, task_router_key,
 };
 use serde_json::{Value, json};
 
@@ -91,7 +91,7 @@ fn bundled_manifest_and_programmatic_registration_are_fully_validated() {
     assert_eq!(manifest.key(), task_router_key());
     assert_eq!(
         manifest.content_sha256().expect("manifest should hash"),
-        "40ebaf204ff25cb0e8b07796569c5d6028e79b90f82c83a66068a50d26669c24"
+        "7e47d0ef5e186cbb30f88ae94e19681ec474d3da2c844a7cf3e2704b2a9153df"
     );
     let legacy = parse_manifest(TASK_ROUTER_MANIFEST_V1_0_0_JSON.as_bytes())
         .expect("legacy bundled manifest should validate");
@@ -111,9 +111,19 @@ fn bundled_manifest_and_programmatic_registration_are_fully_validated() {
             .expect("previous manifest should hash"),
         "ccb5f747ccbb523e7d8f70a6e91cfe0df0fd024e9490fdbac306ecaac453eee7"
     );
+    let strict_replay = parse_manifest(TASK_ROUTER_MANIFEST_V1_1_1_JSON.as_bytes())
+        .expect("strict replay manifest should validate");
+    assert_eq!(strict_replay.version.to_string(), "1.1.1");
+    assert_eq!(
+        strict_replay
+            .content_sha256()
+            .expect("strict replay manifest should hash"),
+        "40ebaf204ff25cb0e8b07796569c5d6028e79b90f82c83a66068a50d26669c24"
+    );
     let bundled = builtin_registry().expect("all bundled versions should register");
     assert!(bundled.get(&legacy.key()).is_some());
     assert!(bundled.get(&previous.key()).is_some());
+    assert!(bundled.get(&strict_replay.key()).is_some());
     assert!(bundled.get(&task_router_key()).is_some());
 
     let duplicate = PromptRegistry::new([manifest.clone(), manifest.clone()])
@@ -260,14 +270,52 @@ fn latest_router_generation_contract_requires_relevant_evidence_and_verifiable_c
 }
 
 #[test]
+fn latest_router_consolidates_each_cited_section_into_one_evidence_item() {
+    let manifest =
+        parse_manifest(TASK_ROUTER_MANIFEST_JSON.as_bytes()).expect("manifest should parse");
+    for requirement in [
+        "Represent each cited section in exactly one evidence item",
+        "multiple causal facts from the same section are relevant, consolidate them",
+        "never split one section across multiple evidence items",
+    ] {
+        assert!(manifest.system_policy.contains(requirement));
+    }
+    assert!(
+        manifest
+            .generation_schema
+            .pointer("/properties/evidence/description")
+            .and_then(Value::as_str)
+            .is_some_and(|description| description.contains(
+                "consolidating all relevant causal facts from that section into its single basis"
+            ))
+    );
+    assert!(
+        manifest
+            .generation_schema
+            .pointer("/properties/evidence/items/properties/basis/description")
+            .and_then(Value::as_str)
+            .is_some_and(|description| description.contains(
+                "Consolidate the relevant causal fact or facts from this section into one basis"
+            ))
+    );
+}
+
+#[test]
 fn every_bundled_router_version_keeps_authoritative_router_invariants() {
     let registry = builtin_registry().expect("registry should load");
     let legacy = parse_manifest(TASK_ROUTER_MANIFEST_V1_0_0_JSON.as_bytes())
         .expect("legacy manifest should parse");
     let previous = parse_manifest(TASK_ROUTER_MANIFEST_V1_1_0_JSON.as_bytes())
         .expect("previous manifest should parse");
+    let strict_replay = parse_manifest(TASK_ROUTER_MANIFEST_V1_1_1_JSON.as_bytes())
+        .expect("strict replay manifest should parse");
     let invocation = routing_invocation();
-    for key in [legacy.key(), previous.key(), task_router_key()] {
+    for key in [
+        legacy.key(),
+        previous.key(),
+        strict_replay.key(),
+        task_router_key(),
+    ] {
         let compiled = registry
             .compile(&key, &invocation)
             .expect("router invocation should compile");
@@ -290,8 +338,15 @@ fn every_bundled_router_version_rejects_empty_subtask_acceptance_criteria() {
         .expect("legacy manifest should parse");
     let previous = parse_manifest(TASK_ROUTER_MANIFEST_V1_1_0_JSON.as_bytes())
         .expect("previous manifest should parse");
+    let strict_replay = parse_manifest(TASK_ROUTER_MANIFEST_V1_1_1_JSON.as_bytes())
+        .expect("strict replay manifest should parse");
     let invocation = routing_invocation();
-    for key in [legacy.key(), previous.key(), task_router_key()] {
+    for key in [
+        legacy.key(),
+        previous.key(),
+        strict_replay.key(),
+        task_router_key(),
+    ] {
         let compiled = registry
             .compile(&key, &invocation)
             .expect("router invocation should compile");
@@ -307,12 +362,14 @@ fn every_bundled_router_version_rejects_empty_subtask_acceptance_criteria() {
 }
 
 #[test]
-fn latest_router_requires_one_authoritative_user_citation_and_unique_evidence() {
+fn strict_router_versions_require_one_authoritative_user_citation_and_unique_evidence() {
     let registry = builtin_registry().expect("registry should load");
     let legacy = parse_manifest(TASK_ROUTER_MANIFEST_V1_0_0_JSON.as_bytes())
         .expect("legacy manifest should parse");
     let previous = parse_manifest(TASK_ROUTER_MANIFEST_V1_1_0_JSON.as_bytes())
         .expect("previous manifest should parse");
+    let strict_replay = parse_manifest(TASK_ROUTER_MANIFEST_V1_1_1_JSON.as_bytes())
+        .expect("strict replay manifest should parse");
     let invocation = routing_invocation();
 
     let mut duplicate_user = valid_delegate_output();
@@ -348,17 +405,24 @@ fn latest_router_requires_one_authoritative_user_citation_and_unique_evidence() 
         }
     }
 
-    let compiled = registry
-        .compile(&task_router_key(), &invocation)
-        .expect("latest invocation should compile");
-    registry
-        .validate_output(&compiled, &invocation, &valid_delegate_output())
-        .expect("unique evidence with one user citation should pass");
-    for output in [&duplicate_user, &duplicate_repository, &missing_user] {
-        assert!(matches!(
-            registry.validate_output(&compiled, &invocation, output),
-            Err(PromptError::OutputInvariant(_))
-        ));
+    for key in [strict_replay.key(), task_router_key()] {
+        let compiled = registry
+            .compile(&key, &invocation)
+            .expect("strict invocation should compile");
+        registry
+            .validate_output(&compiled, &invocation, &valid_delegate_output())
+            .unwrap_or_else(|error| {
+                panic!("{key} rejected unique evidence with one user citation: {error}")
+            });
+        for output in [&duplicate_user, &duplicate_repository, &missing_user] {
+            assert!(
+                matches!(
+                    registry.validate_output(&compiled, &invocation, output),
+                    Err(PromptError::OutputInvariant(_))
+                ),
+                "{key} accepted duplicate or missing authoritative evidence"
+            );
+        }
     }
 
     let mut renamed_invocation = routing_invocation();

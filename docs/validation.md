@@ -40,6 +40,10 @@ sections and bounded clarification/subtask counts in addition to the three
 route axes. Its pure catalog and comparison tests live in a normal Cargo test
 target and therefore run under `cargo test --workspace`.
 
+Expected subtask maxima are evaluator-only scoring metadata. They are separate
+from the model-visible runtime delegation cap, which defaults to four and is
+zero only in the explicitly versioned zero-delegation fixture.
+
 Live inference requires a create-new report path that is reserved with valid,
 synced JSON before the first HTTP request. The reservation is finalized as a
 complete `passed` or `failed` report before the process returns success or a
@@ -50,10 +54,13 @@ evidence, SHA-256 digests of the complete discovery response bodies, raw
 inference evidence, manifest and schema hashes, raw case-file digests,
 canonical prompt-input digests, and validated or rejected output. Full model
 inventories, unrelated model configuration, and local model paths are omitted.
-Configured URL user information is rejected; every retained endpoint is also
-credential-, query-, and fragment-free. Existing evidence cannot be overwritten
-accidentally, and discovery, inference, validation, and expectation failures are
-retained before a nonzero exit.
+The report retains each case identifier, expectation, and runtime limit, but
+case identifiers and expectations are never compiled into model input.
+Model-visible data provenance uses only reproducible opaque identifiers of the
+form `eval-fixture:<case SHA-256>:<ordinal>`. Configured URL user information is
+rejected; every retained endpoint is also credential-, query-, and fragment-free.
+Existing evidence cannot be overwritten accidentally, and discovery, inference,
+validation, and expectation failures are retained before a nonzero exit.
 
 Sol/Ultra can generate, critique, or compare work, but never serves as the only
 authority for its own output. Independent agents, alternative providers, and

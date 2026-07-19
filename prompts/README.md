@@ -20,9 +20,10 @@ text.
 
 Currently implemented production prompt:
 
-- `semantic-task-router/1.1.1/manifest.json` is the current router, while
-  `semantic-task-router/1.0.0/manifest.json` and
-  `semantic-task-router/1.1.0/manifest.json` remain bundled for exact replay
+- `semantic-task-router/1.1.2/manifest.json` is the current router, while
+  `semantic-task-router/1.0.0/manifest.json`,
+  `semantic-task-router/1.1.0/manifest.json`, and
+  `semantic-task-router/1.1.1/manifest.json` remain bundled for exact replay
   of historical sessions. The current router classifies an action
   (`clarify`, `answer`, `inspect`, or `change`), an execution strategy
   (`direct` or `delegate`), and the action-derived access requirement. It
@@ -30,7 +31,9 @@ Currently implemented production prompt:
   mechanically bounded subtask proposals. Evidence is an audit trail of
   materially influential sections rather than an inventory of sections merely
   examined: unrelated context is omitted, while rejected embedded instructions
-  remain cited when the trust-boundary decision affects routing. Every
+  remain cited when the trust-boundary decision affects routing. All causal
+  facts from one cited section are consolidated into that section's single
+  evidence item. Every
   delegated subtask has an externally checkable completion criterion instead
   of a circular restatement of its objective. Delegation cannot broaden the
   parent route's access.

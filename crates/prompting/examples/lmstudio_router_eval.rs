@@ -5,6 +5,8 @@ use birdcode_backends::{
     ReasoningSetting, SecretToken, StructuredInferenceRequest, StructuredInferenceResponse,
     StructuredOutputSpec,
 };
+#[cfg(test)]
+use birdcode_prompting::MessageProvenance;
 use birdcode_prompting::{
     CanonicalJson, CompiledMessage, CompiledPrompt, DataProvenance, DataSection, MessageContent,
     MessageRole, PromptInvocation, PromptLimits, PromptRegistry, RequiredAccess, RouteAction,
@@ -27,7 +29,11 @@ use url::Url;
 const DEFAULT_URL: &str = "http://127.0.0.1:1234/";
 const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 const ROUTER_MAX_CLARIFICATION_QUESTIONS: u32 = 3;
-const EVAL_CATALOG: &str = include_str!("../../../evals/semantic-router/catalog.v2.json");
+const EVAL_CATALOG: &str = include_str!("../../../evals/semantic-router/catalog.v3.json");
+
+const fn default_runtime_max_suggested_subtasks() -> u32 {
+    PromptLimits::DEFAULT.max_suggested_subtasks
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -54,6 +60,8 @@ struct EvalCase {
     max_clarification_questions: u32,
     min_suggested_subtasks: u32,
     max_suggested_subtasks: u32,
+    #[serde(default = "default_runtime_max_suggested_subtasks")]
+    runtime_max_suggested_subtasks: u32,
     max_output_tokens: u32,
     #[serde(skip)]
     content_sha256: String,
@@ -476,6 +484,12 @@ fn case_report_base(case: &EvalCase, status: &'static str) -> Map<String, Value>
         Value::String(format!("{}@{}", case.id, case.version)),
     );
     report.insert("status".to_owned(), Value::String(status.to_owned()));
+    report.insert(
+        "runtime_limits".to_owned(),
+        serde_json::json!({
+            "max_suggested_subtasks": case.runtime_max_suggested_subtasks,
+        }),
+    );
     report.insert("expected".to_owned(), expected_case(case));
     report
 }
@@ -996,7 +1010,7 @@ fn inference_endpoint_without_auth(base_url: &Url) -> Result<String, io::Error> 
 
 fn load_cases() -> Result<Vec<EvalCase>, Box<dyn Error>> {
     let catalog: EvalCatalog = serde_json::from_str(EVAL_CATALOG)?;
-    if catalog.catalog_version != 2 || catalog.cases.is_empty() {
+    if catalog.catalog_version != 3 || catalog.cases.is_empty() {
         return Err(io::Error::other("unsupported or empty semantic-router eval catalog").into());
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../evals/semantic-router");
@@ -1053,7 +1067,8 @@ fn validate_case_expectations(case: &EvalCase) -> Result<(), Box<dyn Error>> {
     if case.min_clarification_questions > case.max_clarification_questions
         || case.max_clarification_questions > ROUTER_MAX_CLARIFICATION_QUESTIONS
         || case.min_suggested_subtasks > case.max_suggested_subtasks
-        || case.max_suggested_subtasks > PromptLimits::DEFAULT.max_suggested_subtasks
+        || case.runtime_max_suggested_subtasks > PromptLimits::DEFAULT.max_suggested_subtasks
+        || case.max_suggested_subtasks > case.runtime_max_suggested_subtasks
     {
         return Err(
             io::Error::other(format!("eval {} has invalid expectation ranges", case.id)).into(),
@@ -1182,7 +1197,7 @@ fn invocation_for(case: &EvalCase) -> PromptInvocation {
         trust: TrustLevel::User,
         provenance: DataProvenance {
             source_kind: SourceKind::User,
-            source_id: format!("eval:{}@{}:request", case.id, case.version),
+            source_id: eval_fixture_source_id(case, 0),
             artifact_sha256: None,
             event_id: None,
         },
@@ -1194,14 +1209,21 @@ fn invocation_for(case: &EvalCase) -> PromptInvocation {
             trust: TrustLevel::Repository,
             provenance: DataProvenance {
                 source_kind: SourceKind::Repository,
-                source_id: format!("eval:{}@{}:repository", case.id, case.version),
+                source_id: eval_fixture_source_id(case, 1),
                 artifact_sha256: None,
                 event_id: None,
             },
             payload: repository_context.clone(),
         });
     }
-    PromptInvocation::with_limits(sections, PromptLimits::new(case.max_suggested_subtasks))
+    PromptInvocation::with_limits(
+        sections,
+        PromptLimits::new(case.runtime_max_suggested_subtasks),
+    )
+}
+
+fn eval_fixture_source_id(case: &EvalCase, ordinal: usize) -> String {
+    format!("eval-fixture:{}:{ordinal}", case.content_sha256)
 }
 
 fn reasoning_setting_for(
@@ -1357,6 +1379,110 @@ mod tests {
                 .max_suggested_subtasks,
             0
         );
+    }
+
+    #[test]
+    fn compiled_eval_model_input_uses_only_opaque_fixture_provenance() {
+        let cases = load_cases().expect("bundled eval catalog should load");
+        let registry = builtin_registry().expect("registry should load");
+        for case in &cases {
+            let invocation = invocation_for(case);
+            for (ordinal, section) in invocation.sections.iter().enumerate() {
+                assert_eq!(
+                    section.provenance.source_id,
+                    format!("eval-fixture:{}:{ordinal}", case.content_sha256)
+                );
+            }
+            let compiled = registry
+                .compile(&task_router_key(), &invocation)
+                .expect("case should compile");
+            let compiled_source_ids = compiled
+                .messages
+                .iter()
+                .filter_map(|message| match &message.provenance {
+                    MessageProvenance::Data { source } => Some(source.source_id.as_str()),
+                    MessageProvenance::Manifest { .. }
+                    | MessageProvenance::RuntimeConstraints { .. } => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                compiled_source_ids,
+                invocation
+                    .sections
+                    .iter()
+                    .map(|section| section.provenance.source_id.as_str())
+                    .collect::<Vec<_>>()
+            );
+
+            let label = case
+                .id
+                .rsplit_once('.')
+                .map_or(case.id.as_str(), |(_, label)| label);
+            let encoded = serde_json::to_string(&compiled).expect("compiled prompt should encode");
+            assert!(!encoded.contains(&case.id));
+            assert!(!encoded.contains(label));
+            for message in &compiled.messages {
+                let encoded = serde_json::to_string(message).expect("message should encode");
+                assert!(!encoded.contains(&case.id));
+                assert!(!encoded.contains(label));
+            }
+
+            assert_eq!(
+                case_report_base(case, "passed")["eval"],
+                format!("{}@{}", case.id, case.version)
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_delegation_limits_are_independent_from_expected_counts() {
+        let cases = load_cases().expect("bundled eval catalog should load");
+        let default_limit = PromptLimits::DEFAULT.max_suggested_subtasks;
+        let mut zero_limit_cases = 0;
+        let mut normal_direct_cases = 0;
+        let mut normal_delegate_cases = 0;
+
+        for case in &cases {
+            let invocation = invocation_for(case);
+            assert_eq!(
+                invocation.limits.max_suggested_subtasks,
+                case.runtime_max_suggested_subtasks
+            );
+            assert_eq!(
+                case_report_base(case, "passed")["runtime_limits"]["max_suggested_subtasks"],
+                case.runtime_max_suggested_subtasks
+            );
+            if case.runtime_max_suggested_subtasks == 0 {
+                zero_limit_cases += 1;
+                assert_eq!(case.version, 2);
+                assert_eq!(case.expected_strategy, RouteStrategy::Direct);
+                assert_eq!(case.max_suggested_subtasks, 0);
+            } else {
+                assert_eq!(case.runtime_max_suggested_subtasks, default_limit);
+                match case.expected_strategy {
+                    RouteStrategy::Direct => {
+                        normal_direct_cases += 1;
+                        assert_eq!(case.max_suggested_subtasks, 0);
+                        assert_ne!(
+                            invocation.limits.max_suggested_subtasks,
+                            case.max_suggested_subtasks
+                        );
+                    }
+                    RouteStrategy::Delegate => normal_delegate_cases += 1,
+                }
+            }
+        }
+        assert_eq!(zero_limit_cases, 1);
+        assert!(normal_direct_cases > 0);
+        assert!(normal_delegate_cases > 0);
+
+        let mut invalid_cases = load_cases().expect("bundled eval catalog should load");
+        let zero_limit = invalid_cases
+            .iter_mut()
+            .find(|case| case.runtime_max_suggested_subtasks == 0)
+            .expect("one explicit zero-limit case should exist");
+        zero_limit.max_suggested_subtasks = 1;
+        assert!(validate_case_expectations(zero_limit).is_err());
     }
 
     #[test]
