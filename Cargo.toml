@@ -6,6 +6,7 @@ members = [
   "apps/desktop/src-tauri",
   "crates/backends",
   "crates/client",
+  "crates/orchestrator",
   "crates/prompting",
   "crates/protocol",
   "crates/runtime",

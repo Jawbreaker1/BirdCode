@@ -6,6 +6,14 @@ prompt-contract, and mock-HTTP backend checks. A standalone LM Studio semantic
 router evaluation exists; comparable multi-backend run orchestration is not yet
 wired into the daemon.
 
+The provider-neutral router executor has deterministic fake-backend coverage
+for first-pass acceptance, multi-section duplicate repair in one extra call,
+semantic-field locking, unique-evidence preservation, non-repairable concurrent
+violations, malformed/missing/extra/blank patches, backend failures, journal
+failures, prompt-key scoping, causal repair provenance, sensitive-input
+projection, and the hard two-call maximum. These tests do not claim that the
+standalone live LM Studio eval currently uses the repair executor.
+
 Codex with the best available Sol/Ultra configuration is used as an independent
 development reference and is planned as an optional comparison backend in the
 product.

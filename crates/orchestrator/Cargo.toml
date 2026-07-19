@@ -1,0 +1,22 @@
+[package]
+name = "birdcode-orchestrator"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+birdcode-backends = { path = "../backends" }
+birdcode-prompting = { path = "../prompting" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+sha2 = "0.10.9"
+thiserror = "2.0.18"
+
+[dev-dependencies]
+tokio = { version = "1.53.0", features = ["macros", "rt-multi-thread", "sync"] }
+
+[lints]
+workspace = true

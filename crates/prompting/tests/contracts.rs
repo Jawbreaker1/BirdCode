@@ -1,10 +1,10 @@
 use birdcode_prompting::{
     CanonicalJson, CompiledPrompt, DataProvenance, DataSection, MessageContent, MessageRole,
     PromptError, PromptInvocation, PromptLimits, PromptRegistry, RequiredAccess, RouteAction,
-    RouteStrategy, SourceKind, TASK_ROUTER_MANIFEST_JSON, TASK_ROUTER_MANIFEST_V1_0_0_JSON,
-    TASK_ROUTER_MANIFEST_V1_1_0_JSON, TASK_ROUTER_MANIFEST_V1_1_1_JSON,
-    TASK_ROUTER_MANIFEST_V1_1_2_JSON, TaskRouterOutput, TrustLevel, builtin_registry,
-    parse_manifest, task_router_key,
+    RouteStrategy, RouterInvariantViolation, SourceKind, TASK_ROUTER_MANIFEST_JSON,
+    TASK_ROUTER_MANIFEST_V1_0_0_JSON, TASK_ROUTER_MANIFEST_V1_1_0_JSON,
+    TASK_ROUTER_MANIFEST_V1_1_1_JSON, TASK_ROUTER_MANIFEST_V1_1_2_JSON, TaskRouterOutput,
+    TrustLevel, builtin_registry, parse_manifest, task_router_key,
 };
 use serde_json::{Value, json};
 
@@ -480,6 +480,46 @@ fn strict_router_versions_require_one_authoritative_user_citation_and_unique_evi
     registry
         .validate_output(&renamed_compiled, &renamed_invocation, &renamed_output)
         .expect("user citation must be derived from invocation trust, not a fixed section name");
+}
+
+#[test]
+fn router_invariants_are_typed_collected_and_canonical_for_duplicate_user_evidence() {
+    let invocation = routing_invocation();
+    let (registry, compiled) = compile(&invocation);
+    let mut candidate = valid_delegate_output();
+    candidate["evidence"] = json!([
+        {"section": "repository", "basis": "First repository fact."},
+        {"section": "request", "basis": "First request fact."},
+        {"section": "repository", "basis": "Second repository fact."},
+        {"section": "request", "basis": "   "}
+    ]);
+
+    let PromptError::OutputInvariant(violations) = registry
+        .validate_output(&compiled, &invocation, &candidate)
+        .expect_err("candidate has duplicate and blank evidence")
+    else {
+        panic!("router defects must use the typed invariant report")
+    };
+    let duplicate_sections = violations
+        .iter()
+        .filter_map(|violation| match violation {
+            RouterInvariantViolation::DuplicateEvidenceSection { section, .. } => {
+                Some(section.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(duplicate_sections, ["repository", "request"]);
+    assert!(violations.iter().any(|violation| matches!(
+        violation,
+        RouterInvariantViolation::BlankEvidenceField { index: 3 }
+    )));
+    assert!(!violations.iter().any(|violation| matches!(
+        violation,
+        RouterInvariantViolation::UserEvidenceCitationCount { .. }
+    )));
+    let serialized = serde_json::to_value(&violations).expect("violations serialize");
+    assert_eq!(serialized[0]["index"], 3);
 }
 
 #[test]

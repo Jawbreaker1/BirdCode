@@ -21,6 +21,6 @@ pub use manifest::{
     TASK_ROUTER_MANIFEST_V1_1_2_JSON, builtin_registry, parse_manifest,
 };
 pub use router::{
-    RequiredAccess, RouteAction, RouteEvidence, RouteStrategy, SuggestedSubtask, TaskRouterOutput,
-    task_router_key,
+    RequiredAccess, RouteAction, RouteEvidence, RouteStrategy, RouterInvariantViolation,
+    SuggestedSubtask, TaskRouterOutput, task_router_key,
 };

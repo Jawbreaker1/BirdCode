@@ -72,6 +72,23 @@ schema for provider grammar engines and the full authoritative output schema.
 Provider-constrained JSON is accepted only after the full local schema and
 cross-field invariants validate it against the original runtime invocation.
 
+The implemented portable router executor permits at most two structured model
+calls: one normal route and, only when the collect-all invariant report contains
+nothing except duplicate evidence sections, one evidence-consolidation repair.
+The repair input is an untrusted projection of duplicate section names and
+bases; it contains no original request/repository payloads or semantic route
+fields. The repair output is a patch rather than another route, so action,
+strategy, access, confidence, questions, subtasks, and unique evidence remain
+mechanically locked. The complete original route contract is validated again
+after patch application, with no further retry.
+
+Every backend response or error is retained with its compiled prompt, requested
+model, reasoning setting, token ceiling, and phase before orchestration can
+continue. Repair records are SHA-256-bound to the exact initial assistant text.
+`crates/orchestrator` exposes an injectable journal boundary that fails closed;
+its bundled journal is intentionally in-memory. Wiring that boundary to the
+durable event/artifact store remains daemon integration work.
+
 ## Subagents
 
 Subagents are isolated actors with their own causal event branches, mailboxes,

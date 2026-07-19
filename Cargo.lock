@@ -193,6 +193,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "birdcode-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "birdcode-backends",
+ "birdcode-prompting",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "birdcode-prompting"
 version = "0.1.0"
 dependencies = [

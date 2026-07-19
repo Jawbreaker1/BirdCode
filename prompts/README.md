@@ -18,7 +18,7 @@ separate canonical JSON system message, and each input section as a separate
 canonical JSON user message; payload text is never interpolated into policy
 text.
 
-Currently implemented production prompt:
+Currently implemented production prompts:
 
 - `semantic-task-router/1.1.3/manifest.json` is the current router, while
   `semantic-task-router/1.0.0/manifest.json`,
@@ -42,3 +42,13 @@ Currently implemented production prompt:
   of its objective. Delegation cannot broaden the parent route's access.
   `PromptInvocation.limits.max_suggested_subtasks` defaults to four and may
   lower the accepted per-invocation delegation cap.
+
+- `semantic-task-router-repair/1.0.0/manifest.json` is an immutable,
+  evidence-only repair contract used by `crates/orchestrator`. It receives an
+  untrusted, SHA-256-bound projection containing only duplicate section names
+  and their model-generated bases. Its output can contain only one consolidated
+  `section`/`basis` replacement per supplied group. Original request and
+  repository payloads, evaluator labels, route axes, questions, and subtasks
+  are deliberately absent. The orchestrator—not the prompt—checks exact
+  membership and order, preserves every unique evidence item mechanically,
+  applies the patch once, and revalidates the complete original router output.

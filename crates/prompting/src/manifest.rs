@@ -44,8 +44,8 @@ pub enum PromptError {
     TrustBoundary { section: String },
     #[error("compiled prompt does not match registered manifest {0}")]
     CompiledPromptMismatch(PromptKey),
-    #[error("model output violates a deterministic invariant: {0}")]
-    OutputInvariant(String),
+    #[error("model output violates semantic-router invariants: {0:?}")]
+    OutputInvariant(Vec<crate::router::RouterInvariantViolation>),
     #[error("generation schema contains an invalid dynamic directive: {0}")]
     GenerationSchemaDirective(String),
 }

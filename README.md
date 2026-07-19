@@ -11,7 +11,7 @@
   decisions and deterministic Rust code enforces boundaries.
 </p>
 
-<p align="center"><code>macOS ARM64 first</code> · <code>Rust + Tauri</code> · <code>LM Studio</code> · <code>pre-alpha</code></p>
+<p align="center"><code>macOS ARM64 first</code> · <code>Rust + Tauri</code> · <code>LM Studio</code> · <code>pre-alpha</code> · <code>UNLICENSED</code></p>
 
 BirdCode is being built for developers who want the power of a modern coding
 agent without surrendering the runtime, history, context strategy, or backend
@@ -21,9 +21,10 @@ subagents, and support for both local models and external agent backends.
 
 The project is currently at the **foundation milestone**. Its local daemon,
 protocol, persistence layer, desktop health shell, CLI probes, typed prompt
-compiler, semantic router, and LM Studio adapter are real and testable. The
-agent execution loop is not wired yet, so BirdCode is not currently a usable
-replacement for Codex or another production coding agent.
+compiler, semantic router, standalone router executor, and LM Studio adapter
+are real and testable. The agent execution loop is not wired yet, so BirdCode
+is not currently a usable replacement for Codex or another production coding
+agent.
 
 ## Why BirdCode
 
@@ -79,7 +80,8 @@ Apple Silicon.
 | Rust CLI | Implemented subset | `doctor` and a durable create/reload session smoke path through the same daemon client |
 | Local daemon and client | Implemented foundation | Typed, bounded JSON-lines over stdio, exact protocol negotiation, request deadlines, and conservative reconnect behavior |
 | Durable store | Implemented foundation | Append-only events, bounded paging, checkpointed upgrades, O(1) run-state projection, closed-world schema health, and verified content-addressed artifacts |
-| Semantic task router | Implemented standalone | LLM-classified action, access, and delegation strategy with typed provenance, strict validation, and no heuristic fallback |
+| Semantic task router | Implemented standalone | LLM-classified action, access, and delegation strategy with typed collect-all validation and no heuristic fallback |
+| Standalone router executor | Implemented standalone | First-pass routing plus at most one typed, patch-only evidence repair; fake-backend tested and not daemon-wired |
 | LM Studio backend | Implemented standalone | Read-only discovery plus strict structured inference with bounded HTTP behavior and versioned, retained eval reports |
 | Agent execution loop | **Not wired** | Run specifications can be persisted, but no backend is invoked by the daemon |
 | Context compilation and compaction | Designed | Architecture and invariants are documented; runtime implementation remains |
@@ -89,9 +91,10 @@ Apple Silicon.
 | Local Codex bridge | Planned | Clean-room adapter direction is documented; no product integration exists yet |
 | Windows and Linux | Planned | Core boundaries are portable, but builds and platform behavior are not yet verified |
 
-The semantic router and LM Studio backend currently run through standalone
-tests and evaluation tools. They do **not** yet appear as daemon capabilities in
-the GUI or CLI.
+The semantic router, its portable executor, and the LM Studio backend currently
+run through standalone tests and evaluation tools. The executor is
+fake-backend validated; it is not connected to the live LM Studio eval and none
+of these components yet appears as a daemon capability in the GUI or CLI.
 
 ## Architecture
 
@@ -107,8 +110,10 @@ flowchart LR
     Runtime --> Store["SQLite event log + artifact store"]
 
     Prompting["Typed prompt compiler<br/>semantic task router"] -->|"standalone live eval"| LMStudio["LM Studio adapter"]
+    Prompting --> RouterExecutor["Portable router executor<br/>one evidence-only repair"]
+    RouterExecutor -->|"provider-neutral; fake-backend validated"| ModelBackend["Model backend contract"]
 
-    Runtime -. "next: real run execution" .-> AgentLoop["Agent loop"]
+    Runtime -.->|"next: real run execution"| AgentLoop["Agent loop"]
     AgentLoop -.-> Prompting
     AgentLoop -.-> LMStudio
     AgentLoop -.-> Context["Context compiler + compaction"]
@@ -261,7 +266,19 @@ The implemented task router returns three independent axes:
 Repository text and tool output remain separately labelled data with explicit
 trust and provenance. Provider-constrained JSON is accepted only after full
 local schema validation and cross-field checks against the original runtime
-invocation. See [the prompt format](prompts/README.md).
+invocation. Router invariants are returned as a typed collect-all report, so a
+duplicate citation cannot hide a simultaneous non-repairable defect.
+
+The standalone router executor permits exactly one narrow LLM repair only when
+*every* local violation is a duplicate evidence section. The repair model sees
+only duplicate section names and their model-generated bases, returns a minimal
+replacement patch, and cannot express action, strategy, access, confidence,
+questions, or subtasks. BirdCode preserves unique evidence mechanically and
+revalidates the complete original router contract after applying the patch. A
+caller-provided attempt journal must acknowledge the initial result before any
+repair and the repair result before acceptance. The bundled journal is
+explicitly in-memory, not a claim of durable persistence. See
+[the prompt format](prompts/README.md).
 
 ## Security principles
 
@@ -286,8 +303,10 @@ foundation already enforces several important boundaries:
   write/read/fsync/hash canaries without scanning an unbounded event history;
 - normalized backend events cannot be committed without a bounded,
   content-addressed, hash-verified raw backend artifact;
-- semantic output never bypasses deterministic permission, budget, schema, or
-  state-transition validation; and
+- standalone router output is schema- and invariant-validated before
+  acceptance; no semantic output is currently connected to tools, and future
+  execution paths must additionally pass deterministic permission, budget,
+  and state-transition checks; and
 - Codex compatibility work follows a clean-room boundary based on public
   documentation and observable behavior.
 
@@ -316,10 +335,11 @@ signed by Tauri so the nested daemon and application bundle can be verified
 locally. It is not Developer ID signed or notarized; those are separate
 distribution gates for a public release.
 
-Important behavior is also compared against Codex using the strongest
-available Sol/Ultra configuration with equivalent inputs, repository state,
-permissions, budgets, and acceptance criteria. An LLM is never the sole judge
-of its own output; deterministic checks and independent review remain
+Immutable development snapshots are independently reviewed with the strongest
+available Codex Sol/Ultra configuration. Each retained review records its
+source commit, acceptance gate, findings, and limitations; it is a comparison
+signal, not a security certification. An LLM is never the sole judge of its
+own output, so deterministic checks and focused independent review remain
 authoritative wherever possible.
 
 ## Repository map
@@ -334,6 +354,7 @@ crates/runtime     Portable mechanical runtime state transitions
 crates/store       SQLite event log and content-addressed artifacts
 crates/prompting   Versioned prompt registry, compiler, and semantic router
 crates/backends    Provider-neutral model contract and LM Studio adapter
+crates/orchestrator Provider-neutral standalone routing and typed repair
 prompts            Application prompt manifests and schemas
 evals              Versioned semantic evaluation cases
 docs               Target architecture and validation policy

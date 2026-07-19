@@ -60,6 +60,88 @@ pub struct TaskRouterOutput {
     pub suggested_subtasks: Vec<SuggestedSubtask>,
 }
 
+/// A machine-readable failure of the semantic router's local contract.
+///
+/// These variants are deliberately independent of rendered error text. An
+/// orchestrator may use the exact variant to decide whether a bounded repair
+/// is safe, while retaining every simultaneous violation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RouterInvariantViolation {
+    TooManySuggestedSubtasks {
+        maximum: u32,
+        actual: u32,
+    },
+    RequiredAccessMismatch {
+        action: RouteAction,
+        expected: RequiredAccess,
+        actual: RequiredAccess,
+    },
+    DelegateForUnsupportedAction {
+        action: RouteAction,
+    },
+    ClarificationQuestionPresenceMismatch {
+        action: RouteAction,
+    },
+    SuggestedSubtaskPresenceMismatch {
+        strategy: RouteStrategy,
+    },
+    BlankEvidenceField {
+        index: u32,
+    },
+    UnknownEvidenceSection {
+        index: u32,
+        section: String,
+    },
+    DuplicateEvidenceSection {
+        section: String,
+        occurrences: u32,
+    },
+    UserSectionCount {
+        actual: u32,
+    },
+    UserEvidenceCitationCount {
+        section: String,
+        actual: u32,
+    },
+    BlankClarificationQuestion {
+        index: u32,
+    },
+    SubtaskAccessExceedsRoute {
+        index: u32,
+        id: String,
+    },
+    BlankSubtaskId {
+        index: u32,
+    },
+    BlankSubtaskObjective {
+        index: u32,
+        id: String,
+    },
+    BlankAcceptanceCriterion {
+        subtask_index: u32,
+        criterion_index: u32,
+        id: String,
+    },
+    BlankDependency {
+        subtask_index: u32,
+        dependency_index: u32,
+        id: String,
+    },
+    DuplicateSubtaskId {
+        id: String,
+        occurrences: u32,
+    },
+    SelfDependency {
+        id: String,
+    },
+    UnknownDependency {
+        id: String,
+        dependency: String,
+    },
+    DependencyCycle,
+}
+
 /// Returns the stable key of the latest bundled semantic task router.
 ///
 /// # Panics
@@ -83,200 +165,252 @@ pub(crate) fn validate_router_output(
     prompt_version: &Version,
 ) -> Result<(), PromptError> {
     let output = serde_json::from_value::<TaskRouterOutput>(value.clone())?;
-    let subtask_limit =
-        usize::try_from(invocation.limits.max_suggested_subtasks).map_err(|_| {
-            PromptError::OutputInvariant(
-                "subtask limit cannot be represented on this platform".into(),
-            )
-        })?;
-    if output.suggested_subtasks.len() > subtask_limit {
-        return Err(PromptError::OutputInvariant(format!(
-            "suggested_subtasks exceeds invocation limit {}",
-            invocation.limits.max_suggested_subtasks
-        )));
+    let violations = router_invariant_violations(&output, invocation, prompt_version);
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(PromptError::OutputInvariant(violations))
     }
-    validate_route_axes(&output)?;
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one collect-all pass keeps simultaneous router violations visible to repair policy"
+)]
+fn router_invariant_violations(
+    output: &TaskRouterOutput,
+    invocation: &PromptInvocation,
+    prompt_version: &Version,
+) -> Vec<RouterInvariantViolation> {
+    let mut violations = Vec::new();
+    if u64::try_from(output.suggested_subtasks.len()).unwrap_or(u64::MAX)
+        > u64::from(invocation.limits.max_suggested_subtasks)
+    {
+        violations.push(RouterInvariantViolation::TooManySuggestedSubtasks {
+            maximum: invocation.limits.max_suggested_subtasks,
+            actual: wire_u32(output.suggested_subtasks.len()),
+        });
+    }
+    collect_route_axis_violations(output, &mut violations);
     let sections = invocation
         .sections
         .iter()
         .map(|section| section.name.as_str())
         .collect::<BTreeSet<_>>();
-    for evidence in &output.evidence {
+    for (index, evidence) in output.evidence.iter().enumerate() {
         if evidence.section.trim().is_empty() || evidence.basis.trim().is_empty() {
-            return Err(PromptError::OutputInvariant(
-                "evidence fields must contain non-whitespace text".to_owned(),
-            ));
+            violations.push(RouterInvariantViolation::BlankEvidenceField {
+                index: wire_u32(index),
+            });
         }
         if !sections.contains(evidence.section.as_str()) {
-            return Err(PromptError::OutputInvariant(format!(
-                "evidence references unknown input section {}",
-                evidence.section
-            )));
+            violations.push(RouterInvariantViolation::UnknownEvidenceSection {
+                index: wire_u32(index),
+                section: evidence.section.clone(),
+            });
         }
     }
     if prompt_version >= &Version::new(1, 1, 1) {
-        validate_minimal_evidence(&output, invocation)?;
+        collect_minimal_evidence_violations(output, invocation, &mut violations);
     }
-    if output
-        .clarification_questions
-        .iter()
-        .any(|question| question.trim().is_empty())
-    {
-        return Err(PromptError::OutputInvariant(
-            "clarification questions must contain non-whitespace text".to_owned(),
-        ));
+    for (index, question) in output.clarification_questions.iter().enumerate() {
+        if question.trim().is_empty() {
+            violations.push(RouterInvariantViolation::BlankClarificationQuestion {
+                index: wire_u32(index),
+            });
+        }
     }
 
-    let mut tasks = BTreeMap::new();
-    for task in &output.suggested_subtasks {
+    let mut tasks = BTreeMap::<&str, &SuggestedSubtask>::new();
+    let mut task_id_counts = BTreeMap::<&str, usize>::new();
+    for (index, task) in output.suggested_subtasks.iter().enumerate() {
         if task.required_access > output.required_access {
-            return Err(PromptError::OutputInvariant(format!(
-                "subtask {} requires broader access than its parent route",
-                task.id
-            )));
+            violations.push(RouterInvariantViolation::SubtaskAccessExceedsRoute {
+                index: wire_u32(index),
+                id: task.id.clone(),
+            });
         }
-        if task.id.trim().is_empty()
-            || task.objective.trim().is_empty()
-            || task
-                .acceptance_criteria
-                .iter()
-                .any(|criterion| criterion.trim().is_empty())
-            || task
-                .depends_on
-                .iter()
-                .any(|dependency| dependency.trim().is_empty())
-        {
-            return Err(PromptError::OutputInvariant(format!(
-                "subtask {} contains a blank field",
-                task.id
-            )));
+        if task.id.trim().is_empty() {
+            violations.push(RouterInvariantViolation::BlankSubtaskId {
+                index: wire_u32(index),
+            });
         }
-        if tasks.insert(task.id.as_str(), task).is_some() {
-            return Err(PromptError::OutputInvariant(format!(
-                "subtask id {} is duplicated",
-                task.id
-            )));
+        if task.objective.trim().is_empty() {
+            violations.push(RouterInvariantViolation::BlankSubtaskObjective {
+                index: wire_u32(index),
+                id: task.id.clone(),
+            });
+        }
+        for (criterion_index, criterion) in task.acceptance_criteria.iter().enumerate() {
+            if criterion.trim().is_empty() {
+                violations.push(RouterInvariantViolation::BlankAcceptanceCriterion {
+                    subtask_index: wire_u32(index),
+                    criterion_index: wire_u32(criterion_index),
+                    id: task.id.clone(),
+                });
+            }
+        }
+        for (dependency_index, dependency) in task.depends_on.iter().enumerate() {
+            if dependency.trim().is_empty() {
+                violations.push(RouterInvariantViolation::BlankDependency {
+                    subtask_index: wire_u32(index),
+                    dependency_index: wire_u32(dependency_index),
+                    id: task.id.clone(),
+                });
+            }
+        }
+        *task_id_counts.entry(task.id.as_str()).or_default() += 1;
+        tasks.entry(task.id.as_str()).or_insert(task);
+    }
+    for (id, occurrences) in task_id_counts {
+        if occurrences > 1 {
+            violations.push(RouterInvariantViolation::DuplicateSubtaskId {
+                id: id.to_owned(),
+                occurrences: wire_u32(occurrences),
+            });
         }
     }
     for task in &output.suggested_subtasks {
         for dependency in &task.depends_on {
             if dependency == &task.id {
-                return Err(PromptError::OutputInvariant(format!(
-                    "subtask {} depends on itself",
-                    task.id
-                )));
-            }
-            if !tasks.contains_key(dependency.as_str()) {
-                return Err(PromptError::OutputInvariant(format!(
-                    "subtask {} references unknown dependency {dependency}",
-                    task.id
-                )));
+                violations.push(RouterInvariantViolation::SelfDependency {
+                    id: task.id.clone(),
+                });
+            } else if !tasks.contains_key(dependency.as_str()) {
+                violations.push(RouterInvariantViolation::UnknownDependency {
+                    id: task.id.clone(),
+                    dependency: dependency.clone(),
+                });
             }
         }
     }
-    ensure_acyclic(&tasks)
+    if dependency_graph_has_cycle(&tasks) {
+        violations.push(RouterInvariantViolation::DependencyCycle);
+    }
+    violations
 }
 
-fn validate_minimal_evidence(
+fn collect_minimal_evidence_violations(
     output: &TaskRouterOutput,
     invocation: &PromptInvocation,
-) -> Result<(), PromptError> {
+    violations: &mut Vec<RouterInvariantViolation>,
+) {
     let mut citation_counts = BTreeMap::<&str, usize>::new();
     for evidence in &output.evidence {
-        let count = citation_counts
+        *citation_counts
             .entry(evidence.section.as_str())
-            .or_default();
-        *count += 1;
-        if *count > 1 {
-            return Err(PromptError::OutputInvariant(format!(
-                "evidence section {} is cited more than once",
-                evidence.section
-            )));
+            .or_default() += 1;
+    }
+    let mut emitted_duplicates = BTreeSet::new();
+    for evidence in &output.evidence {
+        let occurrences = citation_counts[evidence.section.as_str()];
+        if occurrences > 1 && emitted_duplicates.insert(evidence.section.as_str()) {
+            violations.push(RouterInvariantViolation::DuplicateEvidenceSection {
+                section: evidence.section.clone(),
+                occurrences: wire_u32(occurrences),
+            });
         }
     }
 
-    let mut user_sections = invocation
+    let user_sections = invocation
         .sections
         .iter()
-        .filter(|section| section.trust == TrustLevel::User);
-    let user_section = user_sections.next().ok_or_else(|| {
-        PromptError::OutputInvariant(
-            "router invocation must contain exactly one user-trusted section".to_owned(),
-        )
-    })?;
-    if user_sections.next().is_some() {
-        return Err(PromptError::OutputInvariant(
-            "router invocation must contain exactly one user-trusted section".to_owned(),
-        ));
+        .filter(|section| section.trust == TrustLevel::User)
+        .collect::<Vec<_>>();
+    if user_sections.len() == 1 {
+        let user_section = user_sections[0];
+        let actual = citation_counts
+            .get(user_section.name.as_str())
+            .copied()
+            .unwrap_or_default();
+        // More than one citation is represented canonically by the typed
+        // duplicate-section violation above. Emitting a second violation for
+        // the same defect would incorrectly make an evidence-only repair look
+        // non-repairable.
+        if actual == 0 {
+            violations.push(RouterInvariantViolation::UserEvidenceCitationCount {
+                section: user_section.name.clone(),
+                actual: wire_u32(actual),
+            });
+        }
+    } else {
+        violations.push(RouterInvariantViolation::UserSectionCount {
+            actual: wire_u32(user_sections.len()),
+        });
     }
-    if citation_counts.get(user_section.name.as_str()).copied() != Some(1) {
-        return Err(PromptError::OutputInvariant(format!(
-            "the user-trusted section {} must be cited exactly once",
-            user_section.name
-        )));
-    }
-    Ok(())
 }
 
-fn validate_route_axes(output: &TaskRouterOutput) -> Result<(), PromptError> {
+fn collect_route_axis_violations(
+    output: &TaskRouterOutput,
+    violations: &mut Vec<RouterInvariantViolation>,
+) {
     let expected_access = match output.action {
         RouteAction::Clarify | RouteAction::Answer => RequiredAccess::None,
         RouteAction::Inspect => RequiredAccess::ReadOnly,
         RouteAction::Change => RequiredAccess::WorkspaceWrite,
     };
     if output.required_access != expected_access {
-        return Err(PromptError::OutputInvariant(format!(
-            "required_access must be {expected_access:?} for action {:?}",
-            output.action
-        )));
+        violations.push(RouterInvariantViolation::RequiredAccessMismatch {
+            action: output.action,
+            expected: expected_access,
+            actual: output.required_access,
+        });
     }
     if output.strategy == RouteStrategy::Delegate
         && !matches!(output.action, RouteAction::Inspect | RouteAction::Change)
     {
-        return Err(PromptError::OutputInvariant(
-            "delegate strategy is allowed only for inspect or change".to_owned(),
-        ));
+        violations.push(RouterInvariantViolation::DelegateForUnsupportedAction {
+            action: output.action,
+        });
     }
     if output.clarification_questions.is_empty() == (output.action == RouteAction::Clarify) {
-        return Err(PromptError::OutputInvariant(
-            "clarification_questions must be non-empty exactly when action is clarify".to_owned(),
-        ));
+        violations.push(
+            RouterInvariantViolation::ClarificationQuestionPresenceMismatch {
+                action: output.action,
+            },
+        );
     }
     if output.suggested_subtasks.is_empty() == (output.strategy == RouteStrategy::Delegate) {
-        return Err(PromptError::OutputInvariant(
-            "suggested_subtasks must be non-empty exactly when strategy is delegate".to_owned(),
-        ));
+        violations.push(RouterInvariantViolation::SuggestedSubtaskPresenceMismatch {
+            strategy: output.strategy,
+        });
     }
-    Ok(())
 }
 
-fn ensure_acyclic(tasks: &BTreeMap<&str, &SuggestedSubtask>) -> Result<(), PromptError> {
+fn dependency_graph_has_cycle(tasks: &BTreeMap<&str, &SuggestedSubtask>) -> bool {
     fn visit<'a>(
         id: &'a str,
         tasks: &BTreeMap<&'a str, &'a SuggestedSubtask>,
         active: &mut BTreeSet<&'a str>,
         complete: &mut BTreeSet<&'a str>,
-    ) -> Result<(), PromptError> {
+    ) -> bool {
         if complete.contains(id) {
-            return Ok(());
+            return false;
         }
         if !active.insert(id) {
-            return Err(PromptError::OutputInvariant(format!(
-                "subtask dependency graph contains a cycle at {id}"
-            )));
+            return true;
         }
         for dependency in &tasks[id].depends_on {
-            visit(dependency, tasks, active, complete)?;
+            if tasks.contains_key(dependency.as_str()) && visit(dependency, tasks, active, complete)
+            {
+                return true;
+            }
         }
         active.remove(id);
         complete.insert(id);
-        Ok(())
+        false
     }
 
     let mut active = BTreeSet::new();
     let mut complete = BTreeSet::new();
     for id in tasks.keys().copied() {
-        visit(id, tasks, &mut active, &mut complete)?;
+        if visit(id, tasks, &mut active, &mut complete) {
+            return true;
+        }
     }
-    Ok(())
+    false
+}
+
+fn wire_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
