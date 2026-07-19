@@ -1,3 +1,4 @@
+use crate::compiler::{PromptInvocation, TrustLevel};
 use crate::{PromptError, PromptId, PromptKey};
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -68,7 +69,7 @@ pub struct TaskRouterOutput {
 pub fn task_router_key() -> PromptKey {
     PromptKey::new(
         PromptId::new(TASK_ROUTER_ID).expect("bundled prompt identifier must be valid"),
-        Version::new(1, 1, 0),
+        Version::new(1, 1, 1),
     )
 }
 
@@ -78,32 +79,43 @@ pub(crate) fn is_task_router_key(key: &PromptKey) -> bool {
 
 pub(crate) fn validate_router_output(
     value: &Value,
-    input_sections: &[String],
-    max_suggested_subtasks: u32,
+    invocation: &PromptInvocation,
+    prompt_version: &Version,
 ) -> Result<(), PromptError> {
     let output = serde_json::from_value::<TaskRouterOutput>(value.clone())?;
-    let subtask_limit = usize::try_from(max_suggested_subtasks).map_err(|_| {
-        PromptError::OutputInvariant("subtask limit cannot be represented on this platform".into())
-    })?;
+    let subtask_limit =
+        usize::try_from(invocation.limits.max_suggested_subtasks).map_err(|_| {
+            PromptError::OutputInvariant(
+                "subtask limit cannot be represented on this platform".into(),
+            )
+        })?;
     if output.suggested_subtasks.len() > subtask_limit {
         return Err(PromptError::OutputInvariant(format!(
-            "suggested_subtasks exceeds invocation limit {max_suggested_subtasks}"
+            "suggested_subtasks exceeds invocation limit {}",
+            invocation.limits.max_suggested_subtasks
         )));
     }
     validate_route_axes(&output)?;
-    let sections = input_sections.iter().collect::<BTreeSet<_>>();
+    let sections = invocation
+        .sections
+        .iter()
+        .map(|section| section.name.as_str())
+        .collect::<BTreeSet<_>>();
     for evidence in &output.evidence {
         if evidence.section.trim().is_empty() || evidence.basis.trim().is_empty() {
             return Err(PromptError::OutputInvariant(
                 "evidence fields must contain non-whitespace text".to_owned(),
             ));
         }
-        if !sections.contains(&evidence.section) {
+        if !sections.contains(evidence.section.as_str()) {
             return Err(PromptError::OutputInvariant(format!(
                 "evidence references unknown input section {}",
                 evidence.section
             )));
         }
+    }
+    if prompt_version >= &Version::new(1, 1, 1) {
+        validate_minimal_evidence(&output, invocation)?;
     }
     if output
         .clarification_questions
@@ -163,6 +175,47 @@ pub(crate) fn validate_router_output(
         }
     }
     ensure_acyclic(&tasks)
+}
+
+fn validate_minimal_evidence(
+    output: &TaskRouterOutput,
+    invocation: &PromptInvocation,
+) -> Result<(), PromptError> {
+    let mut citation_counts = BTreeMap::<&str, usize>::new();
+    for evidence in &output.evidence {
+        let count = citation_counts
+            .entry(evidence.section.as_str())
+            .or_default();
+        *count += 1;
+        if *count > 1 {
+            return Err(PromptError::OutputInvariant(format!(
+                "evidence section {} is cited more than once",
+                evidence.section
+            )));
+        }
+    }
+
+    let mut user_sections = invocation
+        .sections
+        .iter()
+        .filter(|section| section.trust == TrustLevel::User);
+    let user_section = user_sections.next().ok_or_else(|| {
+        PromptError::OutputInvariant(
+            "router invocation must contain exactly one user-trusted section".to_owned(),
+        )
+    })?;
+    if user_sections.next().is_some() {
+        return Err(PromptError::OutputInvariant(
+            "router invocation must contain exactly one user-trusted section".to_owned(),
+        ));
+    }
+    if citation_counts.get(user_section.name.as_str()).copied() != Some(1) {
+        return Err(PromptError::OutputInvariant(format!(
+            "the user-trusted section {} must be cited exactly once",
+            user_section.name
+        )));
+    }
+    Ok(())
 }
 
 fn validate_route_axes(output: &TaskRouterOutput) -> Result<(), PromptError> {

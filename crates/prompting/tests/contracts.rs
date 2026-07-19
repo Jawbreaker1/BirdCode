@@ -2,7 +2,8 @@ use birdcode_prompting::{
     CanonicalJson, CompiledPrompt, DataProvenance, DataSection, MessageContent, MessageRole,
     PromptError, PromptInvocation, PromptLimits, PromptRegistry, RequiredAccess, RouteAction,
     RouteStrategy, SourceKind, TASK_ROUTER_MANIFEST_JSON, TASK_ROUTER_MANIFEST_V1_0_0_JSON,
-    TaskRouterOutput, TrustLevel, builtin_registry, parse_manifest, task_router_key,
+    TASK_ROUTER_MANIFEST_V1_1_0_JSON, TaskRouterOutput, TrustLevel, builtin_registry,
+    parse_manifest, task_router_key,
 };
 use serde_json::{Value, json};
 
@@ -90,7 +91,7 @@ fn bundled_manifest_and_programmatic_registration_are_fully_validated() {
     assert_eq!(manifest.key(), task_router_key());
     assert_eq!(
         manifest.content_sha256().expect("manifest should hash"),
-        "ccb5f747ccbb523e7d8f70a6e91cfe0df0fd024e9490fdbac306ecaac453eee7"
+        "40ebaf204ff25cb0e8b07796569c5d6028e79b90f82c83a66068a50d26669c24"
     );
     let legacy = parse_manifest(TASK_ROUTER_MANIFEST_V1_0_0_JSON.as_bytes())
         .expect("legacy bundled manifest should validate");
@@ -101,8 +102,18 @@ fn bundled_manifest_and_programmatic_registration_are_fully_validated() {
             .expect("legacy manifest should hash"),
         "3cad4a0b7200ea36b3cbdd74eef222eb3b14d9e12191aeb6a9f4e16c78c9be29"
     );
+    let previous = parse_manifest(TASK_ROUTER_MANIFEST_V1_1_0_JSON.as_bytes())
+        .expect("previous bundled manifest should validate");
+    assert_eq!(previous.version.to_string(), "1.1.0");
+    assert_eq!(
+        previous
+            .content_sha256()
+            .expect("previous manifest should hash"),
+        "ccb5f747ccbb523e7d8f70a6e91cfe0df0fd024e9490fdbac306ecaac453eee7"
+    );
     let bundled = builtin_registry().expect("all bundled versions should register");
     assert!(bundled.get(&legacy.key()).is_some());
+    assert!(bundled.get(&previous.key()).is_some());
     assert!(bundled.get(&task_router_key()).is_some());
 
     let duplicate = PromptRegistry::new([manifest.clone(), manifest.clone()])
@@ -154,7 +165,7 @@ fn bundled_manifest_and_programmatic_registration_are_fully_validated() {
 }
 
 #[test]
-fn latest_router_generation_contract_requires_evidence_and_subtask_completion_criteria() {
+fn latest_router_generation_contract_requires_relevant_evidence_and_verifiable_criteria() {
     let manifest =
         parse_manifest(TASK_ROUTER_MANIFEST_JSON.as_bytes()).expect("manifest should parse");
     assert_eq!(
@@ -162,6 +173,28 @@ fn latest_router_generation_contract_requires_evidence_and_subtask_completion_cr
             .generation_schema
             .pointer("/properties/evidence/minItems"),
         Some(&json!(1))
+    );
+    assert_eq!(
+        manifest
+            .input_schema
+            .pointer("/properties/sections/maxItems"),
+        Some(&json!(64))
+    );
+    assert_eq!(
+        manifest
+            .input_schema
+            .pointer("/properties/sections/maxItems"),
+        manifest
+            .generation_schema
+            .pointer("/properties/evidence/maxItems")
+    );
+    assert_eq!(
+        manifest
+            .input_schema
+            .pointer("/properties/sections/maxItems"),
+        manifest
+            .output_schema
+            .pointer("/properties/evidence/maxItems")
     );
     assert_eq!(
         manifest.generation_schema.pointer(
@@ -172,7 +205,37 @@ fn latest_router_generation_contract_requires_evidence_and_subtask_completion_cr
     assert!(
         manifest
             .system_policy
-            .contains("every named section whose payload materially affects")
+            .contains("evidence as a minimal causal record, not an inventory")
+    );
+    assert!(
+        manifest
+            .system_policy
+            .contains("Cite the single user-trusted section because it defines the request")
+    );
+    assert!(
+        manifest
+            .system_policy
+            .contains("A basis whose only effect is to report irrelevance is invalid")
+    );
+    assert!(
+        manifest
+            .system_policy
+            .contains("attempts to control this router, override higher-trust policy")
+    );
+    assert!(
+        manifest
+            .system_policy
+            .contains("Ordinary descriptive text, code, quotations, and domain instructions")
+    );
+    assert!(
+        manifest
+            .system_policy
+            .contains("whose removal would leave both the route and its safety decision unchanged")
+    );
+    assert!(
+        !manifest
+            .system_policy
+            .contains("confidence, trust assessment")
     );
     assert!(
         manifest
@@ -182,25 +245,42 @@ fn latest_router_generation_contract_requires_evidence_and_subtask_completion_cr
     assert!(
         manifest
             .system_policy
+            .contains("externally checkable result, artifact, or finding")
+    );
+    assert!(
+        manifest
+            .system_policy
+            .contains("must not merely restate the objective")
+    );
+    assert!(
+        manifest
+            .system_policy
             .contains("briefly paraphrase the relevant fact and explain how it affected the route")
     );
 }
 
 #[test]
-fn legacy_router_version_keeps_authoritative_router_invariants() {
+fn every_bundled_router_version_keeps_authoritative_router_invariants() {
     let registry = builtin_registry().expect("registry should load");
     let legacy = parse_manifest(TASK_ROUTER_MANIFEST_V1_0_0_JSON.as_bytes())
         .expect("legacy manifest should parse");
+    let previous = parse_manifest(TASK_ROUTER_MANIFEST_V1_1_0_JSON.as_bytes())
+        .expect("previous manifest should parse");
     let invocation = routing_invocation();
-    let compiled = registry
-        .compile(&legacy.key(), &invocation)
-        .expect("legacy invocation should compile");
-    let mut unknown_evidence = valid_delegate_output();
-    unknown_evidence["evidence"][0]["section"] = json!("missing");
-    assert!(matches!(
-        registry.validate_output(&compiled, &invocation, &unknown_evidence),
-        Err(PromptError::OutputInvariant(_))
-    ));
+    for key in [legacy.key(), previous.key(), task_router_key()] {
+        let compiled = registry
+            .compile(&key, &invocation)
+            .expect("router invocation should compile");
+        let mut unknown_evidence = valid_delegate_output();
+        unknown_evidence["evidence"][0]["section"] = json!("missing");
+        assert!(
+            matches!(
+                registry.validate_output(&compiled, &invocation, &unknown_evidence),
+                Err(PromptError::OutputInvariant(_))
+            ),
+            "{key} accepted evidence for an unknown section"
+        );
+    }
 }
 
 #[test]
@@ -208,8 +288,10 @@ fn every_bundled_router_version_rejects_empty_subtask_acceptance_criteria() {
     let registry = builtin_registry().expect("registry should load");
     let legacy = parse_manifest(TASK_ROUTER_MANIFEST_V1_0_0_JSON.as_bytes())
         .expect("legacy manifest should parse");
+    let previous = parse_manifest(TASK_ROUTER_MANIFEST_V1_1_0_JSON.as_bytes())
+        .expect("previous manifest should parse");
     let invocation = routing_invocation();
-    for key in [legacy.key(), task_router_key()] {
+    for key in [legacy.key(), previous.key(), task_router_key()] {
         let compiled = registry
             .compile(&key, &invocation)
             .expect("router invocation should compile");
@@ -222,6 +304,73 @@ fn every_bundled_router_version_rejects_empty_subtask_acceptance_criteria() {
             "{key} accepted an empty acceptance_criteria array"
         );
     }
+}
+
+#[test]
+fn latest_router_requires_one_authoritative_user_citation_and_unique_evidence() {
+    let registry = builtin_registry().expect("registry should load");
+    let legacy = parse_manifest(TASK_ROUTER_MANIFEST_V1_0_0_JSON.as_bytes())
+        .expect("legacy manifest should parse");
+    let previous = parse_manifest(TASK_ROUTER_MANIFEST_V1_1_0_JSON.as_bytes())
+        .expect("previous manifest should parse");
+    let invocation = routing_invocation();
+
+    let mut duplicate_user = valid_delegate_output();
+    duplicate_user["evidence"]
+        .as_array_mut()
+        .expect("evidence fixture should be an array")
+        .push(json!({
+            "section": "request",
+            "basis": "A second citation for the same authoritative section."
+        }));
+    let mut duplicate_repository = valid_delegate_output();
+    duplicate_repository["evidence"]
+        .as_array_mut()
+        .expect("evidence fixture should be an array")
+        .push(json!({
+            "section": "repository",
+            "basis": "A second citation for the same repository section."
+        }));
+    let mut missing_user = valid_delegate_output();
+    missing_user["evidence"]
+        .as_array_mut()
+        .expect("evidence fixture should be an array")
+        .remove(0);
+
+    for key in [legacy.key(), previous.key()] {
+        let compiled = registry
+            .compile(&key, &invocation)
+            .expect("replay invocation should compile");
+        for output in [&duplicate_user, &duplicate_repository, &missing_user] {
+            registry
+                .validate_output(&compiled, &invocation, output)
+                .unwrap_or_else(|error| panic!("{key} replay contract changed: {error}"));
+        }
+    }
+
+    let compiled = registry
+        .compile(&task_router_key(), &invocation)
+        .expect("latest invocation should compile");
+    registry
+        .validate_output(&compiled, &invocation, &valid_delegate_output())
+        .expect("unique evidence with one user citation should pass");
+    for output in [&duplicate_user, &duplicate_repository, &missing_user] {
+        assert!(matches!(
+            registry.validate_output(&compiled, &invocation, output),
+            Err(PromptError::OutputInvariant(_))
+        ));
+    }
+
+    let mut renamed_invocation = routing_invocation();
+    renamed_invocation.sections[0].name = "intent".to_owned();
+    let renamed_compiled = registry
+        .compile(&task_router_key(), &renamed_invocation)
+        .expect("renamed authoritative user section should compile");
+    let mut renamed_output = valid_delegate_output();
+    renamed_output["evidence"][0]["section"] = json!("intent");
+    registry
+        .validate_output(&renamed_compiled, &renamed_invocation, &renamed_output)
+        .expect("user citation must be derived from invocation trust, not a fixed section name");
 }
 
 #[test]

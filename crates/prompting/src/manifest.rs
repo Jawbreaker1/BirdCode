@@ -12,8 +12,10 @@ use thiserror::Error;
 pub const MANIFEST_SCHEMA_JSON: &str = include_str!("../schemas/prompt-manifest.schema.json");
 pub const TASK_ROUTER_MANIFEST_V1_0_0_JSON: &str =
     include_str!("../../../prompts/semantic-task-router/1.0.0/manifest.json");
-pub const TASK_ROUTER_MANIFEST_JSON: &str =
+pub const TASK_ROUTER_MANIFEST_V1_1_0_JSON: &str =
     include_str!("../../../prompts/semantic-task-router/1.1.0/manifest.json");
+pub const TASK_ROUTER_MANIFEST_JSON: &str =
+    include_str!("../../../prompts/semantic-task-router/1.1.1/manifest.json");
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
 #[derive(Debug, Error)]
@@ -217,6 +219,7 @@ pub fn parse_manifest(bytes: &[u8]) -> Result<PromptManifest, PromptError> {
 pub fn builtin_registry() -> Result<PromptRegistry, PromptError> {
     PromptRegistry::new([
         parse_manifest(TASK_ROUTER_MANIFEST_V1_0_0_JSON.as_bytes())?,
+        parse_manifest(TASK_ROUTER_MANIFEST_V1_1_0_JSON.as_bytes())?,
         parse_manifest(TASK_ROUTER_MANIFEST_JSON.as_bytes())?,
     ])
 }
@@ -296,16 +299,7 @@ impl PromptRegistry {
         compiled.validate_against(manifest, invocation)?;
         validate_value(&manifest.output_schema, value, "model output")?;
         if crate::router::is_task_router_key(key) {
-            let input_sections = invocation
-                .sections
-                .iter()
-                .map(|section| section.name.clone())
-                .collect::<Vec<_>>();
-            crate::router::validate_router_output(
-                value,
-                &input_sections,
-                invocation.limits.max_suggested_subtasks,
-            )?;
+            crate::router::validate_router_output(value, invocation, &key.version)?;
         }
         Ok(())
     }
