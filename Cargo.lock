@@ -198,6 +198,7 @@ version = "0.1.0"
 dependencies = [
  "birdcode-backends",
  "birdcode-prompting",
+ "futures-util",
  "serde",
  "serde_json",
  "sha2",

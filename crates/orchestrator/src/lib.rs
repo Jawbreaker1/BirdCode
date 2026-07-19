@@ -4,6 +4,21 @@
 //! narrowly typed repair opportunity. It never repairs semantic route fields:
 //! only duplicate evidence bases may be consolidated, at most once.
 
+mod actor_graph;
+
+pub use actor_graph::{
+    ActorGraph, ActorGraphExecutionError, ActorGraphExecutor, ActorGraphLimits, ActorGraphOutcome,
+    ActorGraphPolicy, ActorGraphRun, ActorGraphValidationError, ActorGraphViolation,
+    ActorId as GraphActorId, AgentAssignment, AgentBudget, AgentCleanupFuture, AgentCompletion,
+    AgentDispatch, AgentFailure, AgentFailureKind, AgentFailureViolation, AgentFuture, AgentWorker,
+    AttemptId as AgentAttemptId, AttemptObservation, CandidateGroupId, CapabilityId,
+    CleanupReceipt, DispatchAttestation, ExecutionId, Handoff, HandoffId, HandoffOutcome,
+    HandoffViolation, InMemorySchedulerJournal, ModelLineage, ModelProfileId, PermissionGrant,
+    RoleId, SchedulerEvent, SchedulerEventId, SchedulerJournal, SchedulerJournalError,
+    SchedulerRecord, TimedOutAttempt, Usage, ValidatedActorGraph, WorkOrder, WorkOrderFailure,
+    WorkOrderId, WorkspaceAccess, WorkspaceGrant, WorkspaceLeaseId, WorkspaceLeasePolicy,
+};
+
 use birdcode_backends::{
     BackendError, ContractError, Message, MessageRole as BackendMessageRole, ModelBackend, ModelId,
     ReasoningSetting, StructuredInferenceRequest, StructuredInferenceResponse,
