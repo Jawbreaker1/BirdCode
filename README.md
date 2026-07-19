@@ -96,6 +96,30 @@ run through standalone tests and evaluation tools. The executor is
 fake-backend validated; it is not connected to the live LM Studio eval and none
 of these components yet appears as a daemon capability in the GUI or CLI.
 
+## Proof, not promises
+
+The strongest retained signals for this foundation are deliberately narrow and
+reproducible:
+
+- **9/9 semantic-router cases passed in one non-repairing inference per case.**
+  The run used `google/gemma-4-26b-a4b` Q8_0 with reasoning off on macOS ARM64.
+  [Inspect the retained report](evals/reports/2026-07-19-gemma-4-26b-q8-router-v1.1.3.json),
+  tied to source `9e12f133d60cd9dad5dd4bbc0ca6e6cedc8bde72`; report
+  SHA-256
+  `0275440b73ac4ef9fe3df441b44fdced8e0bc3c4e3492662e1b744eb04565ece`.
+- **The deterministic foundation gate is green.** Source commit
+  `3a05d2972b2efcc2b3067594b928f90418e1e93c` passed 194 Rust test
+  executions, 9 GUI tests, strict linting, type checking, production web build,
+  CLI persistence smoke, and native ARM64 app/DMG verification. A separate
+  read-only coding-agent review found no open P0-P2 defects in its declared
+  scope. [Read the retained release-gate review](docs/reviews/2026-07-19-foundation-review.md).
+- **Failures are retained too.** [The report history](evals/reports/) preserves
+  four earlier failing snapshots instead of replacing them with the green run.
+- **Scope matters.** This proves the standalone router against this nine-case
+  catalog and the current mechanical foundation. It does not validate the
+  daemon agent loop, router repair with a live model, tools, subagents, or
+  product security.
+
 ## Architecture
 
 The solid path below exists today. Dashed connections show the next integration
@@ -253,9 +277,11 @@ LM Studio reports zero or multiple loaded language models.
 ## Prompt contracts, not prompt strings
 
 Application prompts are repository data, never instructions to the developer
-or coding agent maintaining BirdCode. Every production prompt has a stable ID,
-semantic version, declared role, typed invocation schema, generation schema,
-authoritative output schema, and evaluation coverage.
+or coding agent maintaining BirdCode. Every bundled production prompt has a
+stable ID, semantic version, declared role, typed invocation and output
+schemas, and deterministic contract coverage. The task router additionally has
+a retained live-model eval; its evidence-repair prompt is currently
+fake-backend tested only.
 
 The implemented task router returns three independent axes:
 
@@ -335,12 +361,13 @@ signed by Tauri so the nested daemon and application bundle can be verified
 locally. It is not Developer ID signed or notarized; those are separate
 distribution gates for a public release.
 
-Immutable development snapshots are independently reviewed with the strongest
-available Codex Sol/Ultra configuration. Each retained review records its
-source commit, acceptance gate, findings, and limitations; it is a comparison
-signal, not a security certification. An LLM is never the sole judge of its
-own output, so deterministic checks and focused independent review remain
-authoritative wherever possible.
+Codex Sol/Ultra is used as a development comparison signal when policy and
+explicit data-sharing approval permit. The retained review for the current
+snapshot is a separate read-only coding-agent review, not a claimed external
+Sol/Ultra pass. It records the exact source commit, acceptance gate, findings,
+and limitations. Neither form of model review is a security certification; an
+LLM is never the sole judge of its own output, so deterministic checks and
+focused review remain authoritative wherever possible.
 
 ## Repository map
 
