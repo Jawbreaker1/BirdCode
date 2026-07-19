@@ -13,13 +13,15 @@ use birdcode_prompting::{
     CompiledMessage, CompiledPrompt, DataProvenance, DataSection, ManifestProvenance,
     MessageContent, MessageRole, PromptError, PromptInvocation, PromptKey, PromptLimits,
     PromptRegistry, RouteEvidence, RouterInvariantViolation, SourceKind, TaskRouterOutput,
-    TrustLevel, parse_manifest, task_router_key,
+    TrustLevel, builtin_registry, parse_manifest, task_router_key,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::sync::Mutex;
 use thiserror::Error;
+use uuid::Uuid;
 
 /// Immutable evidence-repair prompt embedded from repository data.
 pub const ROUTER_REPAIR_MANIFEST_JSON: &str =
@@ -29,9 +31,55 @@ const DEFAULT_REPAIR_MAX_OUTPUT_TOKENS: u32 = 768;
 const REPAIR_INPUT_SECTION: &str = "duplicate_evidence_groups";
 const SEMANTIC_TASK_ROUTER_ID: &str = "birdcode.semantic-task-router";
 
+macro_rules! uuid_id {
+    ($name:ident) => {
+        #[derive(
+            Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
+        )]
+        #[serde(transparent)]
+        pub struct $name(Uuid);
+
+        impl $name {
+            /// Creates a globally unique UUID v7 identifier.
+            #[must_use]
+            pub fn new() -> Self {
+                Self(Uuid::now_v7())
+            }
+
+            /// Wraps an explicit UUID for durable replay or resume.
+            #[must_use]
+            pub const fn from_uuid(value: Uuid) -> Self {
+                Self(value)
+            }
+
+            /// Returns the wrapped UUID.
+            #[must_use]
+            pub const fn as_uuid(self) -> Uuid {
+                self.0
+            }
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt(formatter)
+            }
+        }
+    };
+}
+
+uuid_id!(RouterExecutionId);
+uuid_id!(RouterAttemptId);
+
 /// Configuration for one semantic router execution.
 #[derive(Clone, Debug)]
 pub struct RouterExecutionRequest {
+    pub execution_id: RouterExecutionId,
     pub router_key: PromptKey,
     pub model_id: ModelId,
     pub invocation: PromptInvocation,
@@ -45,6 +93,7 @@ impl RouterExecutionRequest {
     #[must_use]
     pub fn new(model_id: ModelId, invocation: PromptInvocation, max_output_tokens: u32) -> Self {
         Self {
+            execution_id: RouterExecutionId::new(),
             router_key: task_router_key(),
             model_id,
             invocation,
@@ -52,6 +101,13 @@ impl RouterExecutionRequest {
             repair_max_output_tokens: DEFAULT_REPAIR_MAX_OUTPUT_TOKENS,
             reasoning: None,
         }
+    }
+
+    /// Uses an existing durable execution identity for reproduction or resume.
+    #[must_use]
+    pub const fn with_execution_id(mut self, execution_id: RouterExecutionId) -> Self {
+        self.execution_id = execution_id;
+        self
     }
 
     /// Applies the same provider reasoning setting to the initial and repair calls.
@@ -96,10 +152,14 @@ pub enum RetainedInferenceAttempt {
 /// Causal request provenance and backend outcome for one bounded attempt.
 ///
 /// `compiled_prompt` can contain sensitive user and repository data. Journal
-/// implementations must protect it accordingly. Repair records bind to the
-/// exact initial assistant text through `parent_candidate_raw_text_sha256`.
+/// implementations must protect it accordingly. Every record carries globally
+/// unique execution and attempt identities. Repair records causally bind to the
+/// exact initial attempt and assistant text.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct RetainedInferenceRecord {
+    pub execution_id: RouterExecutionId,
+    pub attempt_id: RouterAttemptId,
+    pub parent_attempt_id: Option<RouterAttemptId>,
     pub phase: RouterAttemptPhase,
     pub compiled_prompt: CompiledPrompt,
     pub requested_model_id: ModelId,
@@ -183,6 +243,9 @@ pub enum RouterExecutionStatus {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RouterExecutionFailure {
     InitialBackend,
+    InitialResponseContract {
+        violations: Vec<InferenceResponseContractViolation>,
+    },
     InitialOutputContract {
         message: String,
     },
@@ -193,6 +256,9 @@ pub enum RouterExecutionFailure {
         message: String,
     },
     RepairBackend,
+    RepairResponseContract {
+        violations: Vec<InferenceResponseContractViolation>,
+    },
     RepairOutputContract {
         message: String,
     },
@@ -206,6 +272,21 @@ pub enum RouterExecutionFailure {
         phase: RouterAttemptPhase,
         message: String,
     },
+}
+
+/// Machine-readable inconsistency in a nominally successful backend response.
+///
+/// Exact identifiers and assistant content remain available in the retained
+/// attempt. They are deliberately not duplicated into violations or error
+/// messages, which keeps this contract useful without widening disclosure.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InferenceResponseContractViolation {
+    ModelIdentityMismatch,
+    BackendIdentityMismatch,
+    RawTextIsNotJson,
+    RawTextValueMismatch,
+    OutputTokenLimitExceeded { maximum: u64, actual: u64 },
 }
 
 /// Machine-readable defect in a model-produced evidence patch.
@@ -253,6 +334,8 @@ pub struct RouterExecution {
 pub enum RouterSetupError {
     #[error("prompt {0} is not a semantic task-router prompt")]
     UnsupportedRouterPrompt(PromptKey),
+    #[error("prompt {0} is not an exact bundled semantic task-router manifest")]
+    UnbundledRouterManifest(PromptKey),
     #[error(transparent)]
     Prompt(#[from] PromptError),
     #[error(transparent)]
@@ -278,6 +361,7 @@ struct DuplicateEvidenceGroup {
 pub struct RouterExecutor<'a, B: ModelBackend + ?Sized> {
     backend: &'a B,
     router_registry: &'a PromptRegistry,
+    bundled_router_registry: PromptRegistry,
     journal: &'a dyn AttemptJournal,
     repair_registry: PromptRegistry,
     repair_key: PromptKey,
@@ -297,9 +381,11 @@ impl<'a, B: ModelBackend + ?Sized> RouterExecutor<'a, B> {
         let manifest = parse_manifest(ROUTER_REPAIR_MANIFEST_JSON.as_bytes())?;
         let repair_key = manifest.key();
         let repair_registry = PromptRegistry::new([manifest])?;
+        let bundled_router_registry = builtin_registry()?;
         Ok(Self {
             backend,
             router_registry,
+            bundled_router_registry,
             journal,
             repair_registry,
             repair_key,
@@ -326,9 +412,34 @@ impl<'a, B: ModelBackend + ?Sized> RouterExecutor<'a, B> {
                 request.router_key,
             ));
         }
+        let selected_manifest = self
+            .router_registry
+            .get(&request.router_key)
+            .ok_or_else(|| PromptError::PromptNotFound(request.router_key.clone()))?;
+        let Some(bundled_manifest) = self.bundled_router_registry.get(&request.router_key) else {
+            return Err(RouterSetupError::UnbundledRouterManifest(
+                request.router_key,
+            ));
+        };
+        let bundled_provenance = ManifestProvenance {
+            prompt: request.router_key.clone(),
+            content_sha256: bundled_manifest.content_sha256()?,
+        };
+        if selected_manifest != bundled_manifest
+            || selected_manifest.content_sha256()? != bundled_provenance.content_sha256
+        {
+            return Err(RouterSetupError::UnbundledRouterManifest(
+                request.router_key,
+            ));
+        }
         let compiled = self
             .router_registry
             .compile(&request.router_key, &request.invocation)?;
+        if compiled.manifest != bundled_provenance {
+            return Err(RouterSetupError::UnbundledRouterManifest(
+                request.router_key,
+            ));
+        }
         let backend_request = structured_request(
             request.model_id.clone(),
             &compiled,
@@ -338,6 +449,9 @@ impl<'a, B: ModelBackend + ?Sized> RouterExecutor<'a, B> {
         )?;
         let router_manifest = compiled.manifest.clone();
         let initial = RetainedInferenceRecord {
+            execution_id: request.execution_id,
+            attempt_id: RouterAttemptId::new(),
+            parent_attempt_id: None,
             phase: RouterAttemptPhase::Initial,
             compiled_prompt: compiled.clone(),
             requested_model_id: request.model_id.clone(),
@@ -370,6 +484,23 @@ impl<'a, B: ModelBackend + ?Sized> RouterExecutor<'a, B> {
                 RouterExecutionFailure::InitialBackend,
             ));
         };
+        let response_violations = inference_response_contract_violations(
+            initial_response,
+            &request.model_id,
+            self.backend.backend_id(),
+            request.max_output_tokens,
+        );
+        if !response_violations.is_empty() {
+            return Ok(execution(
+                router_manifest,
+                None,
+                initial,
+                None,
+                RouterExecutionFailure::InitialResponseContract {
+                    violations: response_violations,
+                },
+            ));
+        }
 
         match self.router_registry.validate_output(
             &compiled,
@@ -512,6 +643,9 @@ impl<'a, B: ModelBackend + ?Sized> RouterExecutor<'a, B> {
             }
         };
         let repair = RetainedInferenceRecord {
+            execution_id: request.execution_id,
+            attempt_id: RouterAttemptId::new(),
+            parent_attempt_id: Some(initial.attempt_id),
             phase: RouterAttemptPhase::EvidenceRepair,
             compiled_prompt: repair_compiled.clone(),
             requested_model_id: request.model_id,
@@ -544,6 +678,23 @@ impl<'a, B: ModelBackend + ?Sized> RouterExecutor<'a, B> {
                 RouterExecutionFailure::RepairBackend,
             );
         };
+        let response_violations = inference_response_contract_violations(
+            repair_response,
+            &repair.requested_model_id,
+            self.backend.backend_id(),
+            repair.max_output_tokens,
+        );
+        if !response_violations.is_empty() {
+            return execution(
+                router_manifest,
+                Some(repair_manifest),
+                initial,
+                Some(repair),
+                RouterExecutionFailure::RepairResponseContract {
+                    violations: response_violations,
+                },
+            );
+        }
         if let Err(error) = self.repair_registry.validate_output(
             &repair_compiled,
             &repair_invocation,
@@ -634,6 +785,41 @@ fn retained_attempt(
         Ok(response) => RetainedInferenceAttempt::Response { response },
         Err(error) => RetainedInferenceAttempt::Error { error },
     }
+}
+
+fn inference_response_contract_violations(
+    response: &StructuredInferenceResponse,
+    requested_model_id: &ModelId,
+    expected_backend_id: &birdcode_backends::BackendId,
+    max_output_tokens: u32,
+) -> Vec<InferenceResponseContractViolation> {
+    let mut violations = Vec::new();
+    if &response.model_id != requested_model_id {
+        violations.push(InferenceResponseContractViolation::ModelIdentityMismatch);
+    }
+    if &response.evidence.backend_id != expected_backend_id {
+        violations.push(InferenceResponseContractViolation::BackendIdentityMismatch);
+    }
+    match serde_json::from_str::<serde_json::Value>(&response.raw_text) {
+        Ok(decoded) if decoded != response.value => {
+            violations.push(InferenceResponseContractViolation::RawTextValueMismatch);
+        }
+        Err(_) => violations.push(InferenceResponseContractViolation::RawTextIsNotJson),
+        Ok(_) => {}
+    }
+    if let Some(actual) = response
+        .usage
+        .as_ref()
+        .and_then(|usage| usage.output_tokens)
+    {
+        let maximum = u64::from(max_output_tokens);
+        if actual > maximum {
+            violations.push(
+                InferenceResponseContractViolation::OutputTokenLimitExceeded { maximum, actual },
+            );
+        }
+    }
+    violations
 }
 
 fn structured_request(

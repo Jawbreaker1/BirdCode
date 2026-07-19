@@ -82,9 +82,14 @@ strategy, access, confidence, questions, subtasks, and unique evidence remain
 mechanically locked. The complete original route contract is validated again
 after patch application, with no further retry.
 
-Every backend response or error is retained with its compiled prompt, requested
-model, reasoning setting, token ceiling, and phase before orchestration can
-continue. Repair records are SHA-256-bound to the exact initial assistant text.
+Every backend response or error is retained with globally unique UUID v7
+execution/attempt IDs, its compiled prompt, requested model, reasoning setting,
+token ceiling, and phase before orchestration can continue. A repair carries
+the exact parent attempt ID and remains SHA-256-bound to the initial assistant
+text. Before inference, the executor requires the selected router to match an
+exact key, typed manifest, and content digest in its internal bundled registry;
+caller-added versions and same-key policy mutations fail setup without a model
+call or journal entry. Historical bundled versions remain available for replay.
 `crates/orchestrator` exposes an injectable journal boundary that fails closed;
 its bundled journal is intentionally in-memory. Wiring that boundary to the
 durable event/artifact store remains daemon integration work.

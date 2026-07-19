@@ -229,7 +229,7 @@ fn structured_request(messages: Vec<Message>) -> StructuredInferenceRequest {
 fn completion(content: impl serde::Serialize) -> Value {
     json!({
         "id": "chatcmpl-test",
-        "model": "google/gemma-4-26b-a4b@q8_0",
+        "model": "google/gemma-4-26b-a4b",
         "choices": [{
             "index": 0,
             "message": {
@@ -469,7 +469,7 @@ async fn multilingual_structured_roundtrip_is_strict_and_preserves_utf8() {
         .await
         .expect("structured inference succeeds");
 
-    assert_eq!(response.model_id.as_str(), "google/gemma-4-26b-a4b@q8_0");
+    assert_eq!(response.model_id.as_str(), "google/gemma-4-26b-a4b");
     assert_eq!(
         response.value,
         json!({"route": "granska", "language": "sv"})
@@ -501,6 +501,51 @@ async fn multilingual_structured_roundtrip_is_strict_and_preserves_utf8() {
         body["messages"][1]["content"],
         "Svenska: granska detta. 日本語: 確認してください。 العربية: راجع هذا."
     );
+}
+
+#[tokio::test]
+async fn completion_model_mismatch_is_typed_and_retains_bounded_raw_evidence() {
+    let returned_model = "unexpected/returned-model";
+    let raw_response = json!({
+        "id": "chatcmpl-wrong-model",
+        "model": returned_model,
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": serde_json::to_string(
+                    &json!({"route": "granska", "language": "sv"})
+                )
+                .expect("content encodes")
+            },
+            "finish_reason": "stop"
+        }]
+    });
+    let body = serde_json::to_vec(&raw_response).expect("response encodes");
+    let expected_sha256 = format!("{:x}", Sha256::digest(&body));
+    let server = MockServer::start(vec![MockReply::raw(200, body)]).await;
+
+    let error = backend(&server)
+        .infer_structured(structured_request(vec![Message::new(
+            MessageRole::User,
+            "Klassificera",
+        )]))
+        .await
+        .expect_err("a backend must not relabel a response from another model");
+
+    assert_eq!(error.kind, BackendErrorKind::ResponseContractViolation);
+    assert!(!error.message.contains(returned_model));
+    assert!(!error.message.contains("google/gemma-4-26b-a4b"));
+    let evidence = error
+        .evidence
+        .expect("mismatch retains bounded HTTP evidence");
+    assert_eq!(evidence.status, Some(200));
+    assert_eq!(
+        evidence.response_body_sha256.as_deref(),
+        Some(expected_sha256.as_str())
+    );
+    assert_eq!(evidence.raw_response, Some(raw_response));
+    assert!(evidence.response_preview.is_none());
 }
 
 #[tokio::test]
@@ -690,7 +735,7 @@ async fn malformed_assistant_json_is_a_typed_error() {
         200,
         json!({
             "id": "chatcmpl-malformed",
-            "model": "exact-model-id",
+            "model": "google/gemma-4-26b-a4b",
             "choices": [{
                 "index": 0,
                 "message": {"role": "assistant", "content": "{not-json"},

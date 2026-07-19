@@ -282,6 +282,21 @@ impl LmStudioBackend {
                     format!("chat completion envelope is invalid: {error}"),
                 )
             })?;
+        if completion.model != request.model_id().as_str() {
+            return Err(BackendError::new(
+                &self.backend_id,
+                BackendOperation::StructuredInference,
+                BackendErrorKind::ResponseContractViolation,
+                "completion model identity does not match the requested model",
+                Some(BackendErrorEvidence {
+                    endpoint: Some(http.endpoint.clone()),
+                    status: Some(http.status),
+                    response_body_sha256: Some(sha256_bytes(&http.body)),
+                    raw_response: Some(raw_response.clone()),
+                    response_preview: None,
+                }),
+            ));
+        }
         let mut primary_choices = completion.choices.iter().filter(|choice| choice.index == 0);
         let choice = primary_choices.next().ok_or_else(|| {
             malformed_error(

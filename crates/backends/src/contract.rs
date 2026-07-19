@@ -13,6 +13,12 @@ pub trait ModelBackend: Send + Sync {
 
     fn discover_models(&self) -> BackendFuture<'_, ModelCatalog>;
 
+    /// Performs one structured inference request.
+    ///
+    /// An `Ok` response must represent a complete provider generation. A
+    /// backend that observes truncation or another incomplete finish condition
+    /// must return [`BackendErrorKind::IncompleteResponse`] instead. The
+    /// provider-specific `finish_reason` remains opaque to callers.
     fn infer_structured(
         &self,
         request: StructuredInferenceRequest,
@@ -329,11 +335,15 @@ impl StructuredInferenceRequest {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StructuredInferenceResponse {
-    /// Exact model identity returned in the completion envelope.
+    /// Exact model identity returned in the completion envelope. It must match
+    /// the request's model identity byte-for-byte.
     pub model_id: ModelId,
     pub value: Value,
-    /// Original assistant content before JSON decoding.
+    /// Original assistant content before JSON decoding. Decoding it as JSON
+    /// must produce exactly `value`.
     pub raw_text: String,
+    /// Provider-specific, opaque completion metadata. Backends must reject an
+    /// incomplete response instead of encoding completeness assumptions here.
     pub finish_reason: Option<String>,
     pub usage: Option<TokenUsage>,
     pub evidence: InferenceEvidence,
@@ -507,6 +517,7 @@ pub enum BackendErrorKind {
     ResponseTooLarge,
     HttpStatus,
     MalformedResponse,
+    ResponseContractViolation,
     SchemaViolation,
     IncompleteResponse,
 }
