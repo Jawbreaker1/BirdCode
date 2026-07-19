@@ -7,18 +7,27 @@
 mod canonical;
 mod compiler;
 mod manifest;
+mod root_planner;
 mod router;
 
 pub use compiler::{
     CanonicalJson, CompiledMessage, CompiledPrompt, DataProvenance, DataSection,
     ManifestProvenance, MessageContent, MessageProvenance, MessageRole, PromptInvocation,
-    PromptLimits, SourceKind, TrustLevel,
+    PromptLimits, RuntimeConstraint, SourceKind, TrustLevel,
 };
 pub use manifest::{
     MANIFEST_SCHEMA_JSON, PromptError, PromptId, PromptKey, PromptManifest, PromptRegistry,
-    PromptRole, TASK_ROUTER_MANIFEST_JSON, TASK_ROUTER_MANIFEST_V1_0_0_JSON,
-    TASK_ROUTER_MANIFEST_V1_1_0_JSON, TASK_ROUTER_MANIFEST_V1_1_1_JSON,
-    TASK_ROUTER_MANIFEST_V1_1_2_JSON, builtin_registry, parse_manifest,
+    PromptRole, ROOT_PLANNER_MANIFEST_JSON, TASK_ROUTER_MANIFEST_JSON,
+    TASK_ROUTER_MANIFEST_V1_0_0_JSON, TASK_ROUTER_MANIFEST_V1_1_0_JSON,
+    TASK_ROUTER_MANIFEST_V1_1_1_JSON, TASK_ROUTER_MANIFEST_V1_1_2_JSON, builtin_registry,
+    parse_manifest,
+};
+pub use root_planner::{
+    ObligationReferenceSite, PlannerDigestField, ProposedVerificationTarget, ProtectedObligation,
+    ProtectedObligationRef, ProtectedObligationViolation, RootPlannerDecisionEvidence,
+    RootPlannerDirective, RootPlannerEscalationRequest, RootPlannerInvariantViolation,
+    RootPlannerOutput, RootPlannerPolicy, RootPlannerPolicyViolation, RootPlannerWorkOrder,
+    VerificationKind, root_planner_key, validate_root_planner_output,
 };
 pub use router::{
     RequiredAccess, RouteAction, RouteEvidence, RouteStrategy, RouterInvariantViolation,

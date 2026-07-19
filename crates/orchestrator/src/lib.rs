@@ -5,6 +5,7 @@
 //! only duplicate evidence bases may be consolidated, at most once.
 
 mod actor_graph;
+pub mod planner;
 
 pub use actor_graph::{
     ActorGraph, ActorGraphExecutionError, ActorGraphExecutor, ActorGraphLimits, ActorGraphOutcome,
@@ -157,7 +158,7 @@ pub enum RouterAttemptPhase {
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum RetainedInferenceAttempt {
     Response {
-        response: StructuredInferenceResponse,
+        response: Box<StructuredInferenceResponse>,
     },
     Error {
         error: BackendError,
@@ -797,7 +798,9 @@ fn retained_attempt(
     result: Result<StructuredInferenceResponse, BackendError>,
 ) -> RetainedInferenceAttempt {
     match result {
-        Ok(response) => RetainedInferenceAttempt::Response { response },
+        Ok(response) => RetainedInferenceAttempt::Response {
+            response: Box::new(response),
+        },
         Err(error) => RetainedInferenceAttempt::Error { error },
     }
 }

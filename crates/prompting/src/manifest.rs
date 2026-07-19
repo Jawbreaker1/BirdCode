@@ -2,6 +2,7 @@ use crate::canonical;
 use crate::compiler::{CompiledPrompt, PromptInvocation};
 use semver::Version;
 use serde::de::DeserializeOwned;
+use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -20,6 +21,8 @@ pub const TASK_ROUTER_MANIFEST_V1_1_2_JSON: &str =
     include_str!("../../../prompts/semantic-task-router/1.1.2/manifest.json");
 pub const TASK_ROUTER_MANIFEST_JSON: &str =
     include_str!("../../../prompts/semantic-task-router/1.1.3/manifest.json");
+pub const ROOT_PLANNER_MANIFEST_JSON: &str =
+    include_str!("../../../prompts/root-planner-turn/1.0.0/manifest.json");
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
 #[derive(Debug, Error)]
@@ -40,12 +43,18 @@ pub enum PromptError {
     PromptNotFound(PromptKey),
     #[error("input section name is duplicated: {0}")]
     DuplicateSection(String),
+    #[error("runtime constraint name is duplicated: {0}")]
+    DuplicateRuntimeConstraint(String),
+    #[error("runtime constraint name is invalid: {0}")]
+    InvalidRuntimeConstraint(String),
     #[error("input section {section} violates its declared trust boundary")]
     TrustBoundary { section: String },
     #[error("compiled prompt does not match registered manifest {0}")]
     CompiledPromptMismatch(PromptKey),
     #[error("model output violates semantic-router invariants: {0:?}")]
     OutputInvariant(Vec<crate::router::RouterInvariantViolation>),
+    #[error("model output violates root-planner invariants: {0:?}")]
+    RootPlannerOutputInvariant(Vec<crate::root_planner::RootPlannerInvariantViolation>),
     #[error("generation schema contains an invalid dynamic directive: {0}")]
     GenerationSchemaDirective(String),
 }
@@ -207,12 +216,105 @@ impl PromptManifest {
 /// Returns an error for invalid JSON, manifest shape, identifiers, semantic
 /// versions, or embedded JSON Schemas.
 pub fn parse_manifest(bytes: &[u8]) -> Result<PromptManifest, PromptError> {
-    let value = serde_json::from_slice::<Value>(bytes)?;
+    let value = serde_json::from_slice::<UniqueJsonValue>(bytes)?.0;
     let meta_schema = serde_json::from_str::<Value>(MANIFEST_SCHEMA_JSON)?;
     validate_value(&meta_schema, &value, "prompt manifest")?;
     let manifest = serde_json::from_value::<PromptManifest>(value)?;
     manifest.validate()?;
     Ok(manifest)
+}
+
+/// Recursive JSON value decoder that rejects duplicate object keys instead of
+/// silently applying last-key-wins semantics. Prompt manifests are executable
+/// policy contracts, so an ambiguous source representation must fail closed.
+struct UniqueJsonValue(Value);
+
+impl<'de> Deserialize<'de> for UniqueJsonValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(UniqueJsonVisitor)
+    }
+}
+
+struct UniqueJsonVisitor;
+
+impl<'de> Visitor<'de> for UniqueJsonVisitor {
+    type Value = UniqueJsonValue;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an unambiguous JSON value")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+        Ok(UniqueJsonValue(Value::Bool(value)))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(UniqueJsonValue(Value::Number(value.into())))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(UniqueJsonValue(Value::Number(value.into())))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        serde_json::Number::from_f64(value)
+            .map(Value::Number)
+            .map(UniqueJsonValue)
+            .ok_or_else(|| E::custom("non-finite JSON number"))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.visit_string(value.to_owned())
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+        Ok(UniqueJsonValue(Value::String(value)))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(UniqueJsonValue(Value::Null))
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(UniqueJsonValue(Value::Null))
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut values = Vec::with_capacity(sequence.size_hint().unwrap_or(0));
+        while let Some(UniqueJsonValue(value)) = sequence.next_element()? {
+            values.push(value);
+        }
+        Ok(UniqueJsonValue(Value::Array(values)))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut values = serde_json::Map::with_capacity(map.size_hint().unwrap_or(0));
+        while let Some(key) = map.next_key::<String>()? {
+            if values.contains_key(&key) {
+                return Err(serde::de::Error::custom(format_args!(
+                    "duplicate JSON object key `{key}`"
+                )));
+            }
+            let UniqueJsonValue(value) = map.next_value()?;
+            values.insert(key, value);
+        }
+        Ok(UniqueJsonValue(Value::Object(values)))
+    }
 }
 
 /// Returns a registry containing every prompt embedded by this crate.
@@ -227,6 +329,7 @@ pub fn builtin_registry() -> Result<PromptRegistry, PromptError> {
         parse_manifest(TASK_ROUTER_MANIFEST_V1_1_1_JSON.as_bytes())?,
         parse_manifest(TASK_ROUTER_MANIFEST_V1_1_2_JSON.as_bytes())?,
         parse_manifest(TASK_ROUTER_MANIFEST_JSON.as_bytes())?,
+        parse_manifest(ROOT_PLANNER_MANIFEST_JSON.as_bytes())?,
     ])
 }
 
@@ -306,6 +409,10 @@ impl PromptRegistry {
         validate_value(&manifest.output_schema, value, "model output")?;
         if crate::router::is_task_router_key(key) {
             crate::router::validate_router_output(value, invocation, &key.version)?;
+        }
+        if crate::root_planner::is_root_planner_key(key) {
+            crate::root_planner::validate_root_planner_output(value, invocation)
+                .map_err(PromptError::RootPlannerOutputInvariant)?;
         }
         Ok(())
     }

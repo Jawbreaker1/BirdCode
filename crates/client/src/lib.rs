@@ -1,8 +1,10 @@
 //! Shared stdio transport for `BirdCode` daemon clients.
 
 use birdcode_protocol::{
-    ClientCommand, ClientIdentity, ClientRequest, ErrorCode, Health, InitializeRequest,
-    InitializeResult, PROTOCOL_VERSION, ResponseOutcome, ServerResponse, ServerResult,
+    ArtifactChunk, ArtifactReadContractError, ArtifactRef, BackendCatalog, CancellationReceipt,
+    ClientCommand, ClientIdentity, ClientRequest, CreateRunRequest, ErrorCode, EventPage,
+    GetArtifactRequest, Health, InitializeRequest, InitializeResult, PROTOCOL_VERSION,
+    ResponseOutcome, Run, RunId, ServerResponse, ServerResult, SessionId,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -49,6 +51,14 @@ pub enum ClientError {
     ResponseTimeout(Duration),
     StartupTimeout(Duration),
     ResponseIdMismatch,
+    RunIdentityMismatch {
+        expected: RunId,
+        actual: RunId,
+    },
+    RunSpecificationMismatch {
+        run_id: RunId,
+    },
+    ReconnectBeforeInitialize,
     NegotiatedProtocolMismatch {
         expected: u32,
         actual: u32,
@@ -63,6 +73,16 @@ pub enum ClientError {
     UnexpectedResult {
         expected: &'static str,
         actual: &'static str,
+    },
+    InvalidArtifactRequest(ArtifactReadContractError),
+    ArtifactReferenceMismatch,
+    ArtifactOffsetMismatch {
+        expected: u64,
+        actual: u64,
+    },
+    ArtifactChunkExceedsRequest {
+        requested: u32,
+        actual: usize,
     },
 }
 
@@ -102,6 +122,17 @@ impl fmt::Display for ClientError {
             Self::ResponseIdMismatch => {
                 formatter.write_str("daemon response id did not match the request id")
             }
+            Self::RunIdentityMismatch { expected, actual } => write!(
+                formatter,
+                "daemon returned run {actual} for requested run {expected}"
+            ),
+            Self::RunSpecificationMismatch { run_id } => write!(
+                formatter,
+                "daemon returned a different specification for requested run {run_id}"
+            ),
+            Self::ReconnectBeforeInitialize => formatter.write_str(
+                "daemon connection cannot be reconciled before successful initialization",
+            ),
             Self::NegotiatedProtocolMismatch { expected, actual } => write!(
                 formatter,
                 "daemon reported protocol version {actual}, but the client requires {expected}"
@@ -124,6 +155,19 @@ impl fmt::Display for ClientError {
                 formatter,
                 "daemon returned {actual} when {expected} was expected"
             ),
+            Self::InvalidArtifactRequest(error) => {
+                write!(formatter, "invalid artifact read request: {error}")
+            }
+            Self::ArtifactReferenceMismatch => formatter
+                .write_str("daemon returned an artifact chunk for a different artifact reference"),
+            Self::ArtifactOffsetMismatch { expected, actual } => write!(
+                formatter,
+                "daemon returned artifact offset {actual}; expected {expected}"
+            ),
+            Self::ArtifactChunkExceedsRequest { requested, actual } => write!(
+                formatter,
+                "daemon returned {actual} artifact bytes; request allowed {requested}"
+            ),
         }
     }
 }
@@ -137,6 +181,7 @@ impl std::error::Error for ClientError {
             | Self::WriterThread(error)
             | Self::ReaderThread(error) => Some(error),
             Self::Encode(error) | Self::Decode(error) => Some(error),
+            Self::InvalidArtifactRequest(error) => Some(error),
             Self::MissingPipe(_)
             | Self::Ended
             | Self::RequestTooLarge
@@ -144,9 +189,115 @@ impl std::error::Error for ClientError {
             | Self::ResponseTimeout(_)
             | Self::StartupTimeout(_)
             | Self::ResponseIdMismatch
+            | Self::RunIdentityMismatch { .. }
+            | Self::RunSpecificationMismatch { .. }
+            | Self::ReconnectBeforeInitialize
             | Self::NegotiatedProtocolMismatch { .. }
             | Self::Rejected { .. }
-            | Self::UnexpectedResult { .. } => None,
+            | Self::UnexpectedResult { .. }
+            | Self::ArtifactReferenceMismatch
+            | Self::ArtifactOffsetMismatch { .. }
+            | Self::ArtifactChunkExceedsRequest { .. } => None,
+        }
+    }
+}
+
+/// A client-identified run whose submission may have executed, but whose
+/// exact result could not be established after one bounded reconnect/replay.
+///
+/// The request is intentionally retained as one indivisible value so callers
+/// cannot accidentally reconcile a new id or a modified specification.
+#[derive(Debug)]
+pub struct PendingCreateRun {
+    request: Box<CreateRunRequest>,
+    last_error: Box<ClientError>,
+}
+
+impl PendingCreateRun {
+    /// Returns the stable idempotency identity that must be reconciled.
+    #[must_use]
+    pub const fn run_id(&self) -> RunId {
+        self.request.run_id
+    }
+
+    /// Returns the exact request retained for reconciliation.
+    #[must_use]
+    pub fn request(&self) -> &CreateRunRequest {
+        self.request.as_ref()
+    }
+
+    /// Returns the most recent failure that left the result ambiguous.
+    #[must_use]
+    pub fn last_error(&self) -> &ClientError {
+        self.last_error.as_ref()
+    }
+}
+
+/// Exact failure classification for a client-identified `CreateRun` action.
+#[derive(Debug)]
+pub enum CreateRunFailure {
+    /// No `CreateRun` frame in the action can have reached the daemon.
+    NotSubmitted {
+        request: Box<CreateRunRequest>,
+        source: Box<ClientError>,
+    },
+    /// The daemon returned an authoritative protocol rejection.
+    Rejected {
+        request: Box<CreateRunRequest>,
+        source: Box<ClientError>,
+    },
+    /// The stable request remains pending after bounded reconciliation.
+    ReconciliationRequired(PendingCreateRun),
+}
+
+impl CreateRunFailure {
+    /// Returns the stable run id associated with every failure class.
+    #[must_use]
+    pub const fn run_id(&self) -> RunId {
+        match self {
+            Self::NotSubmitted { request, .. } | Self::Rejected { request, .. } => request.run_id,
+            Self::ReconciliationRequired(pending) => pending.run_id(),
+        }
+    }
+
+    /// Returns the unchanged request associated with this failure.
+    #[must_use]
+    pub fn request(&self) -> &CreateRunRequest {
+        match self {
+            Self::NotSubmitted { request, .. } | Self::Rejected { request, .. } => request.as_ref(),
+            Self::ReconciliationRequired(pending) => pending.request(),
+        }
+    }
+}
+
+impl fmt::Display for CreateRunFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotSubmitted { request, source } => write!(
+                formatter,
+                "run {} was definitely not submitted: {source}",
+                request.run_id
+            ),
+            Self::Rejected { request, source } => {
+                write!(formatter, "run {} was rejected: {source}", request.run_id)
+            }
+            Self::ReconciliationRequired(pending) => write!(
+                formatter,
+                "run {} may have been created and requires exact reconciliation: {}",
+                pending.run_id(),
+                pending.last_error()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CreateRunFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::NotSubmitted { source, .. } | Self::Rejected { source, .. } => {
+                Some(source.as_ref())
+            }
+            Self::ReconciliationRequired(pending) => Some(pending.last_error()),
         }
     }
 }
@@ -205,6 +356,36 @@ enum RequestPhase {
     SteadyState,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequestProgress {
+    NotSubmitted,
+    MayHaveExecuted,
+}
+
+#[derive(Debug)]
+enum CallFailure {
+    Request {
+        progress: RequestProgress,
+        error: ClientError,
+    },
+    Rejected(ClientError),
+}
+
+impl CallFailure {
+    fn into_client_error(self) -> ClientError {
+        match self {
+            Self::Request { error, .. } | Self::Rejected(error) => error,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum CreateRunAttemptFailure {
+    NotSubmitted(ClientError),
+    Rejected(ClientError),
+    MayHaveExecuted(ClientError),
+}
+
 impl RequestPhase {
     const fn timeout_error(self, timeout: Duration) -> ClientError {
         match self {
@@ -222,6 +403,9 @@ pub struct DaemonClient {
     reader_thread: Option<JoinHandle<()>>,
     request_timeout: Duration,
     startup_timeout: Duration,
+    executable: PathBuf,
+    data_dir: PathBuf,
+    initialized_client: Option<ClientIdentity>,
 }
 
 impl DaemonClient {
@@ -312,6 +496,9 @@ impl DaemonClient {
             reader_thread: Some(reader_thread),
             request_timeout: timeouts.request,
             startup_timeout: timeouts.startup,
+            executable: executable.to_owned(),
+            data_dir: data_dir.to_owned(),
+            initialized_client: None,
         })
     }
 
@@ -352,7 +539,23 @@ impl DaemonClient {
         Request: Serialize,
         Response: DeserializeOwned,
     {
-        let frame = encode_request(request)?;
+        self.request_with_progress(request, phase)
+            .map_err(CallFailure::into_client_error)
+    }
+
+    fn request_with_progress<Request, Response>(
+        &mut self,
+        request: &Request,
+        phase: RequestPhase,
+    ) -> Result<Response, CallFailure>
+    where
+        Request: Serialize,
+        Response: DeserializeOwned,
+    {
+        let frame = encode_request(request).map_err(|error| CallFailure::Request {
+            progress: RequestProgress::NotSubmitted,
+            error,
+        })?;
         let timeout = match phase {
             RequestPhase::Startup => self.startup_timeout,
             RequestPhase::SteadyState => self.request_timeout,
@@ -364,48 +567,83 @@ impl DaemonClient {
             completion: completion_sender,
         };
         let Some(writer) = self.write_requests.as_ref() else {
-            return Err(ClientError::MissingPipe("stdin"));
+            return Err(CallFailure::Request {
+                progress: RequestProgress::NotSubmitted,
+                error: ClientError::MissingPipe("stdin"),
+            });
         };
         if writer.send(write_request).is_err() {
             self.terminate_now();
-            return Err(ClientError::Ended);
+            return Err(CallFailure::Request {
+                progress: RequestProgress::NotSubmitted,
+                error: ClientError::Ended,
+            });
         }
         match completion_receiver.recv_timeout(remaining_timeout(started, timeout)) {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 self.terminate_now();
-                return Err(ClientError::Io(error));
+                return Err(CallFailure::Request {
+                    progress: RequestProgress::MayHaveExecuted,
+                    error: ClientError::Io(error),
+                });
             }
             Err(RecvTimeoutError::Disconnected) => {
                 self.terminate_now();
-                return Err(ClientError::Ended);
+                return Err(CallFailure::Request {
+                    progress: RequestProgress::MayHaveExecuted,
+                    error: ClientError::Ended,
+                });
             }
             Err(RecvTimeoutError::Timeout) => {
                 self.terminate_now();
-                return Err(phase.timeout_error(timeout));
+                return Err(CallFailure::Request {
+                    progress: RequestProgress::MayHaveExecuted,
+                    error: phase.timeout_error(timeout),
+                });
             }
         }
 
         let Some(responses) = self.responses.as_ref() else {
-            return Err(ClientError::MissingPipe("stdout"));
+            return Err(CallFailure::Request {
+                progress: RequestProgress::MayHaveExecuted,
+                error: ClientError::MissingPipe("stdout"),
+            });
         };
         let response = match responses.recv_timeout(remaining_timeout(started, timeout)) {
             Ok(Ok(frame)) => frame,
-            Ok(Err(ResponseReadError::TooLarge)) => return Err(ClientError::ResponseTooLarge),
+            Ok(Err(ResponseReadError::TooLarge)) => {
+                return Err(CallFailure::Request {
+                    progress: RequestProgress::MayHaveExecuted,
+                    error: ClientError::ResponseTooLarge,
+                });
+            }
             Ok(Err(ResponseReadError::Io(error))) => {
                 self.terminate_now();
-                return Err(ClientError::Io(error));
+                return Err(CallFailure::Request {
+                    progress: RequestProgress::MayHaveExecuted,
+                    error: ClientError::Io(error),
+                });
             }
             Ok(Err(ResponseReadError::Ended)) | Err(RecvTimeoutError::Disconnected) => {
                 self.terminate_now();
-                return Err(ClientError::Ended);
+                return Err(CallFailure::Request {
+                    progress: RequestProgress::MayHaveExecuted,
+                    error: ClientError::Ended,
+                });
             }
             Err(RecvTimeoutError::Timeout) => {
                 self.terminate_now();
-                return Err(phase.timeout_error(timeout));
+                return Err(CallFailure::Request {
+                    progress: RequestProgress::MayHaveExecuted,
+                    error: phase.timeout_error(timeout),
+                });
             }
         };
-        serde_json::from_slice(&response).map_err(ClientError::Decode)
+        serde_json::from_slice(&response).map_err(|error| CallFailure::Request {
+            progress: RequestProgress::MayHaveExecuted,
+            error: ClientError::Decode(error),
+        })
     }
 
     /// Performs one typed protocol call and validates response correlation.
@@ -423,19 +661,31 @@ impl DaemonClient {
         command: ClientCommand,
         phase: RequestPhase,
     ) -> Result<ServerResult, ClientError> {
+        self.call_with_progress(command, phase)
+            .map_err(CallFailure::into_client_error)
+    }
+
+    fn call_with_progress(
+        &mut self,
+        command: ClientCommand,
+        phase: RequestPhase,
+    ) -> Result<ServerResult, CallFailure> {
         let request = ClientRequest::new(command);
         let request_id = request.id;
-        let response: ServerResponse = self.request_with_phase(&request, phase)?;
+        let response: ServerResponse = self.request_with_progress(&request, phase)?;
         if response.request_id != request_id {
-            return Err(ClientError::ResponseIdMismatch);
+            return Err(CallFailure::Request {
+                progress: RequestProgress::MayHaveExecuted,
+                error: ClientError::ResponseIdMismatch,
+            });
         }
         match response.outcome {
             ResponseOutcome::Success { result } => Ok(result),
-            ResponseOutcome::Error { error } => Err(ClientError::Rejected {
+            ResponseOutcome::Error { error } => Err(CallFailure::Rejected(ClientError::Rejected {
                 code: error.code,
                 retryable: error.retryable,
                 message: error.message,
-            }),
+            })),
         }
     }
 
@@ -450,19 +700,21 @@ impl DaemonClient {
         name: impl Into<String>,
         version: impl Into<String>,
     ) -> Result<InitializeResult, ClientError> {
+        let identity = ClientIdentity {
+            name: name.into(),
+            version: version.into(),
+        };
         let result = self.call_with_phase(
             ClientCommand::Initialize(InitializeRequest {
                 protocol_version: PROTOCOL_VERSION,
-                client: ClientIdentity {
-                    name: name.into(),
-                    version: version.into(),
-                },
+                client: identity.clone(),
             }),
             RequestPhase::Startup,
         )?;
         match result {
             ServerResult::Initialized(initialized) => {
                 ensure_protocol_version(initialized.protocol_version)?;
+                self.initialized_client = Some(identity);
                 Ok(initialized)
             }
             other => Err(ClientError::UnexpectedResult {
@@ -490,6 +742,299 @@ impl DaemonClient {
                 actual: result_name(&other),
             }),
         }
+    }
+
+    /// Discovers configured local models without granting them runtime access.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport or protocol errors, including an unexpected result
+    /// when the daemon violates the command contract.
+    pub fn discover_models(&mut self) -> Result<BackendCatalog, ClientError> {
+        match self.call(ClientCommand::DiscoverModels)? {
+            ServerResult::BackendCatalog(catalog) => Ok(catalog),
+            other => Err(ClientError::UnexpectedResult {
+                expected: "backend_catalog",
+                actual: result_name(&other),
+            }),
+        }
+    }
+
+    /// Creates one client-identified run with one bounded recovery attempt.
+    ///
+    /// When the first submission is not known to have been rejected, this
+    /// method reconnects once and replays the identical request once. It never
+    /// retries any preceding command, including `CreateSession`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an exact failure class. An ambiguous result always retains the
+    /// original run id and specification in [`PendingCreateRun`].
+    pub fn create_run(&mut self, request: &CreateRunRequest) -> Result<Run, CreateRunFailure> {
+        let first_progress = match self.create_run_once(request) {
+            Ok(run) => return Ok(run),
+            Err(CreateRunAttemptFailure::Rejected(source)) => {
+                return Err(CreateRunFailure::Rejected {
+                    request: Box::new(request.clone()),
+                    source: Box::new(source),
+                });
+            }
+            Err(CreateRunAttemptFailure::NotSubmitted(_)) => RequestProgress::NotSubmitted,
+            Err(CreateRunAttemptFailure::MayHaveExecuted(_)) => RequestProgress::MayHaveExecuted,
+        };
+
+        if let Err(source) = self.reconnect_initialized() {
+            return Err(create_run_recovery_failure(
+                request.clone(),
+                first_progress,
+                source,
+            ));
+        }
+
+        match self.create_run_once(request) {
+            Ok(run) => Ok(run),
+            Err(CreateRunAttemptFailure::Rejected(source)) => Err(CreateRunFailure::Rejected {
+                request: Box::new(request.clone()),
+                source: Box::new(source),
+            }),
+            Err(CreateRunAttemptFailure::NotSubmitted(source)) => Err(create_run_recovery_failure(
+                request.clone(),
+                first_progress,
+                source,
+            )),
+            Err(CreateRunAttemptFailure::MayHaveExecuted(source)) => {
+                Err(CreateRunFailure::ReconciliationRequired(PendingCreateRun {
+                    request: Box::new(request.clone()),
+                    last_error: Box::new(source),
+                }))
+            }
+        }
+    }
+
+    /// Reconciles one previously ambiguous run using exactly one reconnect and
+    /// one replay of the retained request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a definitive rejection, or returns the same stable request as a
+    /// pending reconciliation when the result remains ambiguous.
+    pub fn reconcile_create_run(
+        &mut self,
+        pending: PendingCreateRun,
+    ) -> Result<Run, CreateRunFailure> {
+        let request = *pending.request;
+        if let Err(last_error) = self.reconnect_initialized() {
+            return Err(CreateRunFailure::ReconciliationRequired(PendingCreateRun {
+                request: Box::new(request),
+                last_error: Box::new(last_error),
+            }));
+        }
+        match self.create_run_once(&request) {
+            Ok(run) => Ok(run),
+            Err(CreateRunAttemptFailure::Rejected(source)) => Err(CreateRunFailure::Rejected {
+                request: Box::new(request),
+                source: Box::new(source),
+            }),
+            Err(
+                CreateRunAttemptFailure::NotSubmitted(last_error)
+                | CreateRunAttemptFailure::MayHaveExecuted(last_error),
+            ) => Err(CreateRunFailure::ReconciliationRequired(PendingCreateRun {
+                request: Box::new(request),
+                last_error: Box::new(last_error),
+            })),
+        }
+    }
+
+    /// Reads current materialized run state.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, protocol, or not-found errors.
+    pub fn get_run(&mut self, run_id: RunId) -> Result<Run, ClientError> {
+        match self.call(ClientCommand::GetRun { run_id })? {
+            ServerResult::Run(run) if run.id == run_id => Ok(run),
+            ServerResult::Run(run) => Err(ClientError::RunIdentityMismatch {
+                expected: run_id,
+                actual: run.id,
+            }),
+            other => Err(ClientError::UnexpectedResult {
+                expected: "run",
+                actual: result_name(&other),
+            }),
+        }
+    }
+
+    /// Reads one bounded replay page after an authoritative sequence cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, protocol, or not-found errors.
+    pub fn get_events(
+        &mut self,
+        session_id: SessionId,
+        after_sequence: u64,
+    ) -> Result<EventPage, ClientError> {
+        match self.call(ClientCommand::GetEvents {
+            session_id,
+            after_sequence,
+        })? {
+            ServerResult::EventPage(page) => Ok(page),
+            other => Err(ClientError::UnexpectedResult {
+                expected: "event_page",
+                actual: result_name(&other),
+            }),
+        }
+    }
+
+    /// Durably requests cancellation of one run.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, protocol, or not-found errors.
+    pub fn cancel_run(&mut self, run_id: RunId) -> Result<CancellationReceipt, ClientError> {
+        match self.call(ClientCommand::CancelRun { run_id })? {
+            ServerResult::CancellationReceipt(receipt) => Ok(receipt),
+            other => Err(ClientError::UnexpectedResult {
+                expected: "cancellation_receipt",
+                actual: result_name(&other),
+            }),
+        }
+    }
+
+    /// Reads one bounded page from an exact content-addressed artifact.
+    ///
+    /// The helper validates the request locally, then verifies that the daemon
+    /// bound its response to the identical artifact reference and offset and
+    /// did not exceed the requested raw-byte limit. Filesystem paths are never
+    /// accepted by this API.
+    ///
+    /// # Errors
+    ///
+    /// Returns request-contract, transport, protocol, or response-binding
+    /// errors. Callers continue with [`ArtifactChunk::next_offset`] until
+    /// [`ArtifactChunk::eof`] is true.
+    pub fn get_artifact(
+        &mut self,
+        artifact: ArtifactRef,
+        offset: u64,
+        max_bytes: u32,
+    ) -> Result<ArtifactChunk, ClientError> {
+        let request = GetArtifactRequest::new(artifact, offset, max_bytes)
+            .map_err(ClientError::InvalidArtifactRequest)?;
+        let result = self.call(ClientCommand::GetArtifact(request.clone()))?;
+        let chunk = match result {
+            ServerResult::ArtifactChunk(chunk) => chunk,
+            other => {
+                return Err(ClientError::UnexpectedResult {
+                    expected: "artifact_chunk",
+                    actual: result_name(&other),
+                });
+            }
+        };
+        validate_artifact_response(&request, &chunk)?;
+        Ok(chunk)
+    }
+
+    fn create_run_once(
+        &mut self,
+        request: &CreateRunRequest,
+    ) -> Result<Run, CreateRunAttemptFailure> {
+        let result = self.call_with_progress(
+            ClientCommand::CreateRun(request.clone()),
+            RequestPhase::SteadyState,
+        );
+        let run = match result {
+            Ok(ServerResult::Run(run)) => run,
+            Ok(other) => {
+                self.terminate_now();
+                return Err(CreateRunAttemptFailure::MayHaveExecuted(
+                    ClientError::UnexpectedResult {
+                        expected: "run",
+                        actual: result_name(&other),
+                    },
+                ));
+            }
+            Err(CallFailure::Rejected(error)) => {
+                return Err(classify_create_run_rejection(error));
+            }
+            Err(CallFailure::Request { progress, error }) => {
+                if progress == RequestProgress::MayHaveExecuted {
+                    self.terminate_now();
+                    return Err(CreateRunAttemptFailure::MayHaveExecuted(error));
+                }
+                return Err(CreateRunAttemptFailure::NotSubmitted(error));
+            }
+        };
+        if run.id != request.run_id {
+            let error = ClientError::RunIdentityMismatch {
+                expected: request.run_id,
+                actual: run.id,
+            };
+            self.terminate_now();
+            return Err(CreateRunAttemptFailure::MayHaveExecuted(error));
+        }
+        if run.spec != request.spec {
+            let error = ClientError::RunSpecificationMismatch {
+                run_id: request.run_id,
+            };
+            self.terminate_now();
+            return Err(CreateRunAttemptFailure::MayHaveExecuted(error));
+        }
+        Ok(run)
+    }
+
+    fn reconnect_initialized(&mut self) -> Result<InitializeResult, ClientError> {
+        let identity = self
+            .initialized_client
+            .clone()
+            .ok_or(ClientError::ReconnectBeforeInitialize)?;
+        let mut replacement = Self::spawn_with_timeouts(
+            &self.executable,
+            &self.data_dir,
+            ClientTimeouts::new(self.request_timeout, self.startup_timeout),
+        )?;
+        let initialized = replacement.initialize(identity.name, identity.version)?;
+        std::mem::swap(self, &mut replacement);
+        drop(replacement);
+        Ok(initialized)
+    }
+}
+
+fn classify_create_run_rejection(error: ClientError) -> CreateRunAttemptFailure {
+    let is_definitive = matches!(
+        &error,
+        ClientError::Rejected {
+            code: ErrorCode::InvalidRequest | ErrorCode::NotFound | ErrorCode::Conflict,
+            retryable: false,
+            ..
+        }
+    );
+    if is_definitive {
+        CreateRunAttemptFailure::Rejected(error)
+    } else {
+        // A generic/internal server failure proves that the daemon decoded the
+        // request, but not that every durable side effect rolled back before
+        // the response was produced. Preserve the stable identity until an
+        // exact replay returns the run or a pre-commit rejection class above.
+        CreateRunAttemptFailure::MayHaveExecuted(error)
+    }
+}
+
+fn create_run_recovery_failure(
+    request: CreateRunRequest,
+    first_progress: RequestProgress,
+    source: ClientError,
+) -> CreateRunFailure {
+    if first_progress == RequestProgress::NotSubmitted {
+        CreateRunFailure::NotSubmitted {
+            request: Box::new(request),
+            source: Box::new(source),
+        }
+    } else {
+        CreateRunFailure::ReconciliationRequired(PendingCreateRun {
+            request: Box::new(request),
+            last_error: Box::new(source),
+        })
     }
 }
 
@@ -548,9 +1093,35 @@ const fn result_name(result: &ServerResult) -> &'static str {
     match result {
         ServerResult::Initialized(_) => "initialized",
         ServerResult::Health(_) => "health",
+        ServerResult::BackendCatalog(_) => "backend_catalog",
         ServerResult::Session(_) => "session",
         ServerResult::Run(_) => "run",
+        ServerResult::EventPage(_) => "event_page",
+        ServerResult::CancellationReceipt(_) => "cancellation_receipt",
+        ServerResult::ArtifactChunk(_) => "artifact_chunk",
     }
+}
+
+fn validate_artifact_response(
+    request: &GetArtifactRequest,
+    chunk: &ArtifactChunk,
+) -> Result<(), ClientError> {
+    if chunk.artifact() != request.artifact() {
+        return Err(ClientError::ArtifactReferenceMismatch);
+    }
+    if chunk.offset() != request.offset() {
+        return Err(ClientError::ArtifactOffsetMismatch {
+            expected: request.offset(),
+            actual: chunk.offset(),
+        });
+    }
+    if chunk.data().len() > request.max_bytes() as usize {
+        return Err(ClientError::ArtifactChunkExceedsRequest {
+            requested: request.max_bytes(),
+            actual: chunk.data().len(),
+        });
+    }
+    Ok(())
 }
 
 fn ensure_protocol_version(actual: u32) -> Result<(), ClientError> {
@@ -720,10 +1291,15 @@ fn drain_line(input: &mut impl BufRead) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClientError, ClientTimeouts, DAEMON_BINARY_NAME, DAEMON_REQUEST_FRAME_BYTES,
-        DEFAULT_REQUEST_TIMEOUT, DEFAULT_STARTUP_TIMEOUT, DaemonClient, MAX_RESPONSE_FRAME_BYTES,
-        ResponseReadError, encode_request, ensure_protocol_version, read_response_frame,
-        sibling_daemon_path,
+        ClientError, ClientTimeouts, CreateRunFailure, DAEMON_BINARY_NAME,
+        DAEMON_REQUEST_FRAME_BYTES, DEFAULT_REQUEST_TIMEOUT, DEFAULT_STARTUP_TIMEOUT, DaemonClient,
+        MAX_RESPONSE_FRAME_BYTES, ResponseReadError, encode_request, ensure_protocol_version,
+        read_response_frame, result_name, sibling_daemon_path, validate_artifact_response,
+    };
+    use birdcode_protocol::{
+        ArtifactChunk, ArtifactRef, BackendKind, BackendSelection, ClientCommand, CreateRunRequest,
+        CreateSessionRequest, ErrorCode, GetArtifactRequest, InputItem, RunId, RunLimits,
+        RunPurpose, RunSpec, ServerResult, SessionId, Sha256Digest,
     };
     use serde::ser::SerializeSeq;
     use serde::{Serialize, Serializer};
@@ -736,6 +1312,14 @@ mod tests {
         chunk: String,
         elements: usize,
         serialized: Cell<usize>,
+    }
+
+    fn artifact(byte: char, size_bytes: u64) -> ArtifactRef {
+        ArtifactRef {
+            sha256: byte.to_string().repeat(Sha256Digest::HEX_LENGTH),
+            size_bytes,
+            media_type: "application/octet-stream".to_owned(),
+        }
     }
 
     impl Serialize for CountedLargeSequence {
@@ -788,6 +1372,145 @@ while IFS= read -r ignored; do :; done
 "#
         .replace("__PROTOCOL_VERSION__", &birdcode_protocol::PROTOCOL_VERSION.to_string());
         executable_daemon(directory, "slow-initializing-daemon", &source)
+    }
+
+    #[cfg(unix)]
+    fn reconciliation_daemon(directory: &Path) -> PathBuf {
+        let source = r#"#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+
+data_dir = pathlib.Path(sys.argv[sys.argv.index("--data-dir") + 1])
+mode = (data_dir / "mode").read_text().strip()
+
+def bump(name):
+    path = data_dir / (name + ".count")
+    value = int(path.read_text()) + 1 if path.exists() else 1
+    path.write_text(str(value))
+    return value
+
+def send(request_id, result=None, error=None):
+    if error is None:
+        response = {"request_id": request_id, "status": "success", "result": result}
+    else:
+        response = {"request_id": request_id, "status": "error", "error": error}
+    print(json.dumps(response, separators=(",", ":")), flush=True)
+
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request["method"]
+    params = request.get("params")
+    if method == "initialize":
+        bump("initialize")
+        identity_path = data_dir / "initialize.json"
+        canonical = json.dumps(params, sort_keys=True, separators=(",", ":"))
+        if identity_path.exists() and identity_path.read_text() != canonical:
+            sys.exit(41)
+        identity_path.write_text(canonical)
+        send(request["id"], {
+            "type": "initialized",
+            "data": {
+                "protocol_version": __PROTOCOL_VERSION__,
+                "server": {"name": "reconciliation-test", "version": "test"},
+                "capabilities": {"supported": []}
+            }
+        })
+    elif method == "create_session":
+        bump("create_session")
+        send(request["id"], {
+            "type": "session",
+            "data": {
+                "id": "019b0000-0000-7000-8000-000000000001",
+                "workspace_root": params["workspace_root"],
+                "title": params.get("title"),
+                "created_at": "2026-07-19T12:00:00Z"
+            }
+        })
+    elif method == "create_run":
+        attempt = bump("create_run")
+        request_path = data_dir / "create_run.json"
+        canonical = json.dumps(params, sort_keys=True, separators=(",", ":"))
+        if request_path.exists() and request_path.read_text() != canonical:
+            send(request["id"], error={
+                "code": "conflict",
+                "message": "replay changed the retained request",
+                "retryable": False
+            })
+            continue
+        request_path.write_text(canonical)
+        if attempt == 1 and mode in ("commit_drop", "conflict", "commit_internal"):
+            sys.exit(0)
+        if mode == "commit_internal":
+            send(request["id"], error={
+                "code": "internal",
+                "message": "store outcome is unavailable",
+                "retryable": True
+            })
+            continue
+        if mode == "conflict":
+            send(request["id"], error={
+                "code": "conflict",
+                "message": "stored run conflicts with retained specification",
+                "retryable": False
+            })
+            continue
+        run_id = params["run_id"]
+        if mode == "wrong_run":
+            run_id = "019b0000-0000-7000-8000-000000000099"
+        send(request["id"], {
+            "type": "run",
+            "data": {
+                "id": run_id,
+                "spec": params["spec"],
+                "state": "queued",
+                "created_at": "2026-07-19T12:00:00Z"
+            }
+        })
+    else:
+        send(request["id"], error={
+            "code": "invalid_request",
+            "message": "unsupported test command",
+            "retryable": False
+        })
+"#
+        .replace(
+            "__PROTOCOL_VERSION__",
+            &birdcode_protocol::PROTOCOL_VERSION.to_string(),
+        );
+        executable_daemon(directory, "reconciliation-daemon", &source)
+    }
+
+    fn plan_request() -> CreateRunRequest {
+        CreateRunRequest {
+            run_id: RunId::new(),
+            spec: RunSpec {
+                session_id: SessionId::new(),
+                purpose: RunPurpose::PlanOnly,
+                backend: BackendSelection {
+                    backend_id: "lmstudio".to_owned(),
+                    kind: BackendKind::Model,
+                    model: Some("exact-model".to_owned()),
+                    reasoning_effort: None,
+                },
+                input: vec![InputItem::Text {
+                    text: "Planera exakt på svenska".to_owned(),
+                }],
+                limits: RunLimits {
+                    max_output_tokens: Some(4096),
+                    max_wall_time_seconds: Some(60),
+                    max_subagents: 0,
+                },
+            },
+        }
+    }
+
+    #[cfg(unix)]
+    fn read_count(directory: &Path, name: &str) -> u32 {
+        std::fs::read_to_string(directory.join(format!("{name}.count")))
+            .expect("counter should exist")
+            .parse()
+            .expect("counter should be numeric")
     }
 
     #[test]
@@ -871,6 +1594,262 @@ while IFS= read -r ignored; do :; done
                 actual
             }) if actual == birdcode_protocol::PROTOCOL_VERSION + 1
         ));
+    }
+
+    #[test]
+    fn artifact_result_name_and_response_binding_are_exact() {
+        let exact_artifact = artifact('a', 8);
+        let request = GetArtifactRequest::new(exact_artifact.clone(), 0, 4)
+            .expect("artifact request should be valid");
+        let chunk = ArtifactChunk::new(exact_artifact.clone(), 0, vec![1, 2, 3, 4], false)
+            .expect("artifact chunk should be valid");
+
+        assert_eq!(
+            result_name(&ServerResult::ArtifactChunk(chunk.clone())),
+            "artifact_chunk"
+        );
+        validate_artifact_response(&request, &chunk)
+            .expect("exact artifact response should be accepted");
+
+        let wrong_artifact_chunk = ArtifactChunk::new(artifact('b', 8), 0, vec![1, 2, 3, 4], false)
+            .expect("alternate chunk should be structurally valid");
+        assert!(matches!(
+            validate_artifact_response(&request, &wrong_artifact_chunk),
+            Err(ClientError::ArtifactReferenceMismatch)
+        ));
+
+        let wrong_offset_chunk = ArtifactChunk::new(exact_artifact, 1, vec![1, 2, 3, 4], false)
+            .expect("offset chunk should be structurally valid");
+        assert!(matches!(
+            validate_artifact_response(&request, &wrong_offset_chunk),
+            Err(ClientError::ArtifactOffsetMismatch {
+                expected: 0,
+                actual: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn artifact_response_cannot_exceed_the_requested_page_size() {
+        let artifact = artifact('c', 8);
+        let request = GetArtifactRequest::new(artifact.clone(), 0, 2)
+            .expect("artifact request should be valid");
+        let chunk = ArtifactChunk::new(artifact, 0, vec![1, 2, 3, 4], false)
+            .expect("chunk remains below the protocol-wide bound");
+
+        assert!(matches!(
+            validate_artifact_response(&request, &chunk),
+            Err(ClientError::ArtifactChunkExceedsRequest {
+                requested: 2,
+                actual: 4
+            })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn committed_run_with_dropped_response_replays_exactly_without_replaying_session() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        std::fs::write(directory.path().join("mode"), "commit_drop")
+            .expect("test mode should be written");
+        let daemon = reconciliation_daemon(directory.path());
+        let mut client = DaemonClient::spawn_with_timeouts(
+            &daemon,
+            directory.path(),
+            ClientTimeouts::new(Duration::from_secs(2), Duration::from_secs(2)),
+        )
+        .expect("test daemon should start");
+        client
+            .initialize("reconciliation-client", "test")
+            .expect("initialization should succeed");
+        let session_result = client
+            .call(ClientCommand::CreateSession(CreateSessionRequest {
+                workspace_root: directory.path().to_owned().into(),
+                title: Some("one session only".to_owned()),
+            }))
+            .expect("session creation should succeed");
+        assert!(matches!(session_result, ServerResult::Session(_)));
+        let request = plan_request();
+
+        let run = client
+            .create_run(&request)
+            .expect("exact replay should recover the committed run");
+
+        assert_eq!(run.id, request.run_id);
+        assert_eq!(run.spec, request.spec);
+        assert_eq!(read_count(directory.path(), "initialize"), 2);
+        assert_eq!(read_count(directory.path(), "create_run"), 2);
+        assert_eq!(read_count(directory.path(), "create_session"), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wrong_returned_run_remains_bound_to_the_original_pending_identity() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        std::fs::write(directory.path().join("mode"), "wrong_run")
+            .expect("test mode should be written");
+        let daemon = reconciliation_daemon(directory.path());
+        let mut client = DaemonClient::spawn_with_timeouts(
+            &daemon,
+            directory.path(),
+            ClientTimeouts::new(Duration::from_secs(2), Duration::from_secs(2)),
+        )
+        .expect("test daemon should start");
+        client
+            .initialize("reconciliation-client", "test")
+            .expect("initialization should succeed");
+        let request = plan_request();
+
+        let failure = client
+            .create_run(&request)
+            .expect_err("a response for another run must fail closed");
+        let CreateRunFailure::ReconciliationRequired(pending) = failure else {
+            panic!("wrong identities are ambiguous, not safe rejections");
+        };
+
+        assert_eq!(pending.run_id(), request.run_id);
+        assert_eq!(pending.request(), &request);
+        assert!(matches!(
+            pending.last_error(),
+            ClientError::RunIdentityMismatch { expected, .. } if *expected == request.run_id
+        ));
+        let repeated = client
+            .reconcile_create_run(pending)
+            .expect_err("an explicit action remains bounded to one exact replay");
+        let CreateRunFailure::ReconciliationRequired(pending) = repeated else {
+            panic!("a repeated wrong identity must remain pending");
+        };
+        assert_eq!(pending.run_id(), request.run_id);
+        assert_eq!(pending.request(), &request);
+        assert_eq!(read_count(directory.path(), "initialize"), 3);
+        assert_eq!(read_count(directory.path(), "create_run"), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn conflict_after_ambiguous_commit_is_authoritative_and_never_changes_identity() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        std::fs::write(directory.path().join("mode"), "conflict")
+            .expect("test mode should be written");
+        let daemon = reconciliation_daemon(directory.path());
+        let mut client = DaemonClient::spawn_with_timeouts(
+            &daemon,
+            directory.path(),
+            ClientTimeouts::new(Duration::from_secs(2), Duration::from_secs(2)),
+        )
+        .expect("test daemon should start");
+        client
+            .initialize("reconciliation-client", "test")
+            .expect("initialization should succeed");
+        let request = plan_request();
+
+        let failure = client
+            .create_run(&request)
+            .expect_err("conflict must stop bounded reconciliation");
+        let CreateRunFailure::Rejected {
+            request: rejected,
+            source,
+        } = failure
+        else {
+            panic!("conflict should remain a typed authoritative rejection");
+        };
+        let ClientError::Rejected {
+            code, retryable, ..
+        } = *source
+        else {
+            panic!("conflict must retain its protocol error");
+        };
+
+        assert_eq!(*rejected, request);
+        assert_eq!(code, ErrorCode::Conflict);
+        assert!(!retryable);
+        assert_eq!(read_count(directory.path(), "initialize"), 2);
+        assert_eq!(read_count(directory.path(), "create_run"), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn internal_error_after_ambiguous_commit_retains_exact_reconciliation_identity() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        std::fs::write(directory.path().join("mode"), "commit_internal")
+            .expect("test mode should be written");
+        let daemon = reconciliation_daemon(directory.path());
+        let mut client = DaemonClient::spawn_with_timeouts(
+            &daemon,
+            directory.path(),
+            ClientTimeouts::new(Duration::from_secs(2), Duration::from_secs(2)),
+        )
+        .expect("test daemon should start");
+        client
+            .initialize("reconciliation-client", "test")
+            .expect("initialization should succeed");
+        let request = plan_request();
+
+        let failure = client
+            .create_run(&request)
+            .expect_err("an internal replay result cannot prove rollback");
+        let CreateRunFailure::ReconciliationRequired(pending) = failure else {
+            panic!("an internal result after a possible commit must remain pending");
+        };
+        assert_eq!(pending.run_id(), request.run_id);
+        assert_eq!(pending.request(), &request);
+        assert!(matches!(
+            pending.last_error(),
+            ClientError::Rejected {
+                code: ErrorCode::Internal,
+                retryable: true,
+                ..
+            }
+        ));
+
+        let repeated = client
+            .reconcile_create_run(pending)
+            .expect_err("another internal result must retain the same request");
+        let CreateRunFailure::ReconciliationRequired(pending) = repeated else {
+            panic!("repeated internal results must remain pending");
+        };
+        assert_eq!(pending.run_id(), request.run_id);
+        assert_eq!(pending.request(), &request);
+        assert_eq!(read_count(directory.path(), "initialize"), 3);
+        assert_eq!(read_count(directory.path(), "create_run"), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oversized_create_run_is_definitely_not_submitted_on_either_connection() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        std::fs::write(directory.path().join("mode"), "commit_drop")
+            .expect("test mode should be written");
+        let daemon = reconciliation_daemon(directory.path());
+        let mut client = DaemonClient::spawn_with_timeouts(
+            &daemon,
+            directory.path(),
+            ClientTimeouts::new(Duration::from_secs(2), Duration::from_secs(2)),
+        )
+        .expect("test daemon should start");
+        client
+            .initialize("reconciliation-client", "test")
+            .expect("initialization should succeed");
+        let mut request = plan_request();
+        request.spec.input = vec![InputItem::Text {
+            text: "x".repeat(DAEMON_REQUEST_FRAME_BYTES),
+        }];
+
+        let failure = client
+            .create_run(&request)
+            .expect_err("oversized request must fail before submission");
+        let CreateRunFailure::NotSubmitted {
+            request: retained,
+            source,
+        } = failure
+        else {
+            panic!("local framing rejection must be definitely-not-submitted");
+        };
+
+        assert!(matches!(*source, ClientError::RequestTooLarge));
+        assert_eq!(retained.run_id, request.run_id);
+        assert_eq!(read_count(directory.path(), "initialize"), 2);
+        assert!(!directory.path().join("create_run.count").exists());
     }
 
     #[test]

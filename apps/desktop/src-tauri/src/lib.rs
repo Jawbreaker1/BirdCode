@@ -14,7 +14,12 @@ pub fn run() {
         .manage(runtime::RuntimeManager::default())
         .invoke_handler(tauri::generate_handler![
             runtime::runtime_health,
-            runtime::runtime_reset
+            runtime::runtime_reset,
+            runtime::runtime_discover_models,
+            runtime::runtime_start_plan,
+            runtime::runtime_reconcile_plan_start,
+            runtime::runtime_poll_plan,
+            runtime::runtime_cancel_plan
         ])
         .run(tauri::generate_context!())
         .expect("failed to run BirdCode desktop application");

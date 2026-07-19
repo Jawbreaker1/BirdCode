@@ -5,7 +5,12 @@
 //! will enter through explicit backend interfaces in later slices.
 
 mod config;
+mod planning;
 mod runtime;
 
 pub use config::RuntimePaths;
+pub use planning::{
+    CompiledRootPlanRequest, MAX_ROOT_PLANNER_OUTPUT_TOKENS, PlanRequestCompileError,
+    compile_root_plan_request,
+};
 pub use runtime::{LocalRuntime, Repository, RepositoryError, RepositoryErrorKind, RuntimeError};

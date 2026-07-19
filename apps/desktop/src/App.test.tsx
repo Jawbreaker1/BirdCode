@@ -17,6 +17,13 @@ test("reports the real disconnected state and never enables a fake run", async (
   await waitFor(() => expect(screen.getAllByText("Runtime not started").length).toBeGreaterThan(0));
   expect((screen.getByLabelText("Run task") as HTMLButtonElement).disabled).toBe(true);
   expect(screen.getByText(/No model output is simulated/)).toBeTruthy();
+  expect(screen.getByText("What should BirdCode plan?")).toBeTruthy();
+  expect(screen.queryByText(/orchestration/i)).toBeNull();
+  for (const name of ["Projects", "Settings", "Workspace actions", "Close inspector"]) {
+    const unavailable = screen.getByRole("button", { name }) as HTMLButtonElement;
+    expect(unavailable.disabled).toBe(true);
+    expect(unavailable.title).toBe("Unavailable in this PlanOnly slice");
+  }
 });
 
 test("does not claim task readiness or interactive setup without a backend", async () => {
@@ -209,4 +216,421 @@ test("does not poll while initially hidden and checks immediately when visible",
   } else {
     Reflect.deleteProperty(document, "visibilityState");
   }
+});
+
+test("submits an exact discovered model and renders the verified accepted plan", async () => {
+  const startPlan = vi.fn<NonNullable<RuntimeBridge["startPlan"]>>().mockResolvedValue({
+    status: "started",
+    data: {
+      sessionId: "019b0000-0000-7000-8000-000000000001",
+      runId: "019b0000-0000-7000-8000-000000000002",
+      state: "queued",
+      workspaceRoot: "/tmp/birdcode-project",
+      modelId: "google/gemma-4-26b-a4b",
+    },
+  });
+  const pollPlan = vi.fn<NonNullable<RuntimeBridge["pollPlan"]>>().mockResolvedValue({
+    runId: "019b0000-0000-7000-8000-000000000002",
+    state: "completed",
+    nextSequence: 8,
+    events: [{
+      sequence: 8,
+      occurredAt: "2026-07-19T16:00:00Z",
+      kind: "plan_proposal_accepted",
+      tone: "success",
+      title: "Plan accepted",
+      detail: "Revision 1",
+    }],
+    acceptedPlan: {
+      revision: 1,
+      digest: "a".repeat(64),
+      directive: "plan",
+      rationale: "Split the bounded outcome into independently verifiable work.",
+      decisionEvidence: [{ section: "root", basis: "Bound user goal" }],
+      workOrders: [{
+        id: "work-1",
+        objective: "Implement the durable core",
+        obligationIds: ["root_goal"],
+        dependencies: [],
+        verificationTargets: [{ kind: "repository_file", selector: "Cargo.toml", question: "Does the workspace build?" }],
+      }],
+      clarifications: [],
+      escalations: [],
+    },
+  });
+  const bridge: RuntimeBridge = {
+    health: async () => ({ state: "ready", transport: "stdio", protocolVersion: "3", daemonVersion: "0.1.0", message: "Ready", backends: [] }),
+    reset: async () => {},
+    discoverModels: async () => [{
+      backendId: "lmstudio",
+      modelId: "google/gemma-4-26b-a4b",
+      displayName: "Gemma 4 26B",
+      contextWindowTokens: 121088,
+      maxOutputTokens: null,
+    }],
+    startPlan,
+    pollPlan,
+    cancelPlan: async () => ({
+      runId: "019b0000-0000-7000-8000-000000000002",
+      cancellationRequestId: "019b0000-0000-7000-8000-000000000003",
+      cancellationGeneration: 1,
+      disposition: "recorded",
+    }),
+  };
+
+  render(<App bridge={bridge} />);
+  await waitFor(() => expect(
+    (screen.getByLabelText("Exact LM Studio model") as HTMLSelectElement).value,
+  ).toBe("google/gemma-4-26b-a4b"));
+  fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "/tmp/birdcode-project" } });
+  fireEvent.change(screen.getByLabelText("Task prompt"), { target: { value: "Bygg planen — 説明も含めて" } });
+  fireEvent.click(screen.getByLabelText("Run task"));
+
+  await waitFor(() => expect(startPlan).toHaveBeenCalledTimes(1));
+  expect(startPlan.mock.calls[0]?.[0]).toEqual({
+    workspaceRoot: "/tmp/birdcode-project",
+    goal: "Bygg planen — 説明も含めて",
+    backendId: "lmstudio",
+    modelId: "google/gemma-4-26b-a4b",
+    maxOutputTokens: 4096,
+    maxWallTimeSeconds: 180,
+    reasoningEffort: null,
+  });
+  await waitFor(() => expect(screen.getByText("Accepted root plan")).toBeTruthy());
+  expect(screen.getByText("Implement the durable core")).toBeTruthy();
+  expect(screen.getByText("Proposed work orders")).toBeTruthy();
+  expect(screen.getByText("No dependencies declared")).toBeTruthy();
+  expect(screen.queryByText(/ready for parallel orchestration/i)).toBeNull();
+  expect(pollPlan).toHaveBeenCalledWith(
+    "019b0000-0000-7000-8000-000000000001",
+    "019b0000-0000-7000-8000-000000000002",
+    0,
+  );
+});
+
+test("retains one ambiguous run identity until exact reconciliation starts it", async () => {
+  const sessionId = "019b0000-0000-7000-8000-000000000041";
+  const runId = "019b0000-0000-7000-8000-000000000042";
+  const pending = {
+    status: "reconciliation_required" as const,
+    data: {
+      sessionId,
+      runId,
+      workspaceRoot: "/tmp/birdcode-project",
+      modelId: "exact-model",
+      mayHaveExecuted: true,
+      message: "The response was lost after the exact CreateRun may have reached the daemon.",
+    },
+  };
+  const startPlan = vi
+    .fn<NonNullable<RuntimeBridge["startPlan"]>>()
+    .mockResolvedValue(pending);
+  const reconcilePlanStart = vi
+    .fn<NonNullable<RuntimeBridge["reconcilePlanStart"]>>()
+    .mockResolvedValueOnce({
+      ...pending,
+      data: { ...pending.data, message: "The same run still requires reconciliation." },
+    })
+    .mockResolvedValueOnce({
+      status: "started",
+      data: {
+        sessionId,
+        runId,
+        state: "queued",
+        workspaceRoot: "/tmp/birdcode-project",
+        modelId: "exact-model",
+      },
+    });
+  const pollPlan = vi.fn<NonNullable<RuntimeBridge["pollPlan"]>>().mockResolvedValue({
+    runId,
+    state: "completed",
+    nextSequence: 1,
+    events: [],
+    acceptedPlan: null,
+  });
+  const bridge: RuntimeBridge = {
+    health: async () => ({ state: "ready", transport: "stdio", protocolVersion: "4", daemonVersion: "0.1.0", message: "Ready", backends: [] }),
+    reset: async () => {},
+    discoverModels: async () => [{ backendId: "lmstudio", modelId: "exact-model", displayName: "Exact model", contextWindowTokens: null, maxOutputTokens: null }],
+    startPlan,
+    reconcilePlanStart,
+    pollPlan,
+  };
+
+  render(<App bridge={bridge} />);
+  await waitFor(() => expect(
+    (screen.getByLabelText("Exact LM Studio model") as HTMLSelectElement).value,
+  ).toBe("exact-model"));
+  fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "/tmp/birdcode-project" } });
+  fireEvent.change(screen.getByLabelText("Task prompt"), { target: { value: "Plan exactly once" } });
+  fireEvent.click(screen.getByLabelText("Run task"));
+
+  await waitFor(() => expect(screen.getByText("Keep this run identity")).toBeTruthy());
+  expect(screen.getAllByText(runId).length).toBeGreaterThan(0);
+  expect(screen.getByText("May already exist")).toBeTruthy();
+  expect(startPlan).toHaveBeenCalledTimes(1);
+  expect((screen.getByLabelText("Run task") as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByLabelText("Task prompt") as HTMLTextAreaElement).disabled).toBe(true);
+
+  fireEvent.click(screen.getByRole("button", { name: "Reconcile run" }));
+  await waitFor(() => expect(reconcilePlanStart).toHaveBeenCalledTimes(1));
+  expect(reconcilePlanStart).toHaveBeenLastCalledWith(runId);
+  await waitFor(() => expect(screen.getByText("The same run still requires reconciliation.")).toBeTruthy());
+  expect(screen.getAllByText(runId).length).toBeGreaterThan(0);
+  expect(startPlan).toHaveBeenCalledTimes(1);
+
+  fireEvent.click(screen.getByRole("button", { name: "Reconcile run" }));
+  await waitFor(() => expect(reconcilePlanStart).toHaveBeenCalledTimes(2));
+  expect(reconcilePlanStart).toHaveBeenLastCalledWith(runId);
+  await waitFor(() => expect(pollPlan).toHaveBeenCalledWith(sessionId, runId, 0));
+  expect(screen.queryByText("Keep this run identity")).toBeNull();
+  expect(startPlan).toHaveBeenCalledTimes(1);
+});
+
+test("rejects a reconciliation response that changes any retained plan identity", async () => {
+  const sessionId = "019b0000-0000-7000-8000-000000000051";
+  const runId = "019b0000-0000-7000-8000-000000000052";
+  const startPlan = vi.fn<NonNullable<RuntimeBridge["startPlan"]>>().mockResolvedValue({
+    status: "reconciliation_required",
+    data: {
+      sessionId,
+      runId,
+      workspaceRoot: "/tmp/birdcode-project",
+      modelId: "exact-model",
+      mayHaveExecuted: false,
+      message: "Retained for exact submission.",
+    },
+  });
+  const reconcilePlanStart = vi.fn<NonNullable<RuntimeBridge["reconcilePlanStart"]>>().mockResolvedValue({
+    status: "reconciliation_required",
+    data: {
+      sessionId,
+      runId,
+      workspaceRoot: "/tmp/birdcode-project",
+      modelId: "different-model",
+      mayHaveExecuted: false,
+      message: "Wrong identity",
+    },
+  });
+  const bridge: RuntimeBridge = {
+    health: async () => ({ state: "ready", transport: "stdio", protocolVersion: "4", daemonVersion: "0.1.0", message: "Ready", backends: [] }),
+    reset: async () => {},
+    discoverModels: async () => [{ backendId: "lmstudio", modelId: "exact-model", displayName: "Exact model", contextWindowTokens: null, maxOutputTokens: null }],
+    startPlan,
+    reconcilePlanStart,
+  };
+
+  render(<App bridge={bridge} />);
+  await waitFor(() => expect(
+    (screen.getByLabelText("Exact LM Studio model") as HTMLSelectElement).value,
+  ).toBe("exact-model"));
+  fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "/tmp/birdcode-project" } });
+  fireEvent.change(screen.getByLabelText("Task prompt"), { target: { value: "Plan once" } });
+  fireEvent.click(screen.getByLabelText("Run task"));
+  fireEvent.click(await screen.findByRole("button", { name: "Reconcile run" }));
+
+  await waitFor(() => expect(screen.getByText("Runtime returned a different retained plan identity during reconciliation")).toBeTruthy());
+  expect(screen.getAllByText(runId).length).toBeGreaterThan(0);
+  expect(screen.queryByText("Wrong identity")).toBeNull();
+  expect(startPlan).toHaveBeenCalledTimes(1);
+});
+
+test("offers only truthful LM Studio reasoning choices and enforces the planner token ceiling", async () => {
+  const startPlan = vi.fn<NonNullable<RuntimeBridge["startPlan"]>>().mockResolvedValue({
+    status: "started",
+    data: {
+      sessionId: "019b0000-0000-7000-8000-000000000021",
+      runId: "019b0000-0000-7000-8000-000000000022",
+      state: "completed",
+      workspaceRoot: "/tmp/birdcode-project",
+      modelId: "exact-model",
+    },
+  });
+  const bridge: RuntimeBridge = {
+    health: async () => ({ state: "ready", transport: "stdio", protocolVersion: "3", daemonVersion: "0.1.0", message: "Ready", backends: [] }),
+    reset: async () => {},
+    discoverModels: async () => [{ backendId: "lmstudio", modelId: "exact-model", displayName: "Exact model", contextWindowTokens: null, maxOutputTokens: null }],
+    startPlan,
+  };
+
+  render(<App bridge={bridge} />);
+  await waitFor(() => expect(
+    (screen.getByLabelText("Exact LM Studio model") as HTMLSelectElement).value,
+  ).toBe("exact-model"));
+
+  const reasoning = screen.getByLabelText("Reasoning") as HTMLSelectElement;
+  expect([...reasoning.options].map((option) => [option.value, option.text])).toEqual([
+    ["auto", "Auto"],
+    ["off", "Off"],
+  ]);
+  expect(reasoning.value).toBe("auto");
+
+  const outputTokens = screen.getByLabelText("Output tokens") as HTMLInputElement;
+  expect(outputTokens.max).toBe("16384");
+  fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "/tmp/birdcode-project" } });
+  fireEvent.change(screen.getByLabelText("Task prompt"), { target: { value: "Plan this" } });
+  fireEvent.change(outputTokens, { target: { value: "16385" } });
+  expect((screen.getByLabelText("Run task") as HTMLButtonElement).disabled).toBe(true);
+
+  fireEvent.change(outputTokens, { target: { value: "16384" } });
+  fireEvent.change(reasoning, { target: { value: "off" } });
+  fireEvent.click(screen.getByLabelText("Run task"));
+
+  await waitFor(() => expect(startPlan).toHaveBeenCalledTimes(1));
+  expect(startPlan.mock.calls[0]?.[0]).toMatchObject({
+    maxOutputTokens: 16_384,
+    reasoningEffort: "off",
+  });
+});
+
+test("records cancellation at most once from repeated UI clicks", async () => {
+  let resolveCancellation!: () => void;
+  const cancelPlan = vi.fn<NonNullable<RuntimeBridge["cancelPlan"]>>().mockImplementation(() => new Promise((resolve) => {
+    resolveCancellation = () => resolve({
+      runId: "019b0000-0000-7000-8000-000000000012",
+      cancellationRequestId: "019b0000-0000-7000-8000-000000000013",
+      cancellationGeneration: 1,
+      disposition: "recorded",
+    });
+  }));
+  const bridge: RuntimeBridge = {
+    health: async () => ({ state: "ready", transport: "stdio", protocolVersion: "3", daemonVersion: "0.1.0", message: "Ready", backends: [] }),
+    reset: async () => {},
+    discoverModels: async () => [{ backendId: "lmstudio", modelId: "exact-model", displayName: "Exact model", contextWindowTokens: null, maxOutputTokens: null }],
+    startPlan: async () => ({
+      status: "started",
+      data: {
+        sessionId: "019b0000-0000-7000-8000-000000000011",
+        runId: "019b0000-0000-7000-8000-000000000012",
+        state: "running",
+        workspaceRoot: "/tmp/birdcode-project",
+        modelId: "exact-model",
+      },
+    }),
+    pollPlan: async (_sessionId, runId, afterSequence) => ({
+      runId,
+      state: "running",
+      nextSequence: afterSequence,
+      events: [],
+      acceptedPlan: null,
+    }),
+    cancelPlan,
+  };
+
+  render(<App bridge={bridge} />);
+  await waitFor(() => expect(
+    (screen.getByLabelText("Exact LM Studio model") as HTMLSelectElement).value,
+  ).toBe("exact-model"));
+  fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "/tmp/birdcode-project" } });
+  fireEvent.change(screen.getByLabelText("Task prompt"), { target: { value: "Plan this" } });
+  fireEvent.click(screen.getByLabelText("Run task"));
+  const cancel = await screen.findByRole("button", { name: "Cancel run" });
+  fireEvent.click(cancel);
+  fireEvent.click(cancel);
+  expect(cancelPlan).toHaveBeenCalledTimes(1);
+
+  await act(async () => resolveCancellation());
+  await waitFor(() => expect(screen.getByRole("button", { name: "Cancellation recorded" })).toBeTruthy());
+  fireEvent.click(screen.getByRole("button", { name: "Cancellation recorded" }));
+  expect(cancelPlan).toHaveBeenCalledTimes(1);
+});
+
+test("reports an already-terminal receipt without claiming cancellation was recorded", async () => {
+  const runId = "019b0000-0000-7000-8000-000000000022";
+  const cancelPlan = vi.fn<NonNullable<RuntimeBridge["cancelPlan"]>>().mockResolvedValue({
+    runId,
+    cancellationRequestId: "019b0000-0000-7000-8000-000000000023",
+    cancellationGeneration: 0,
+    disposition: "run_already_terminal",
+  });
+  const bridge: RuntimeBridge = {
+    health: async () => ({ state: "ready", transport: "stdio", protocolVersion: "4", daemonVersion: "0.1.0", message: "Ready", backends: [] }),
+    reset: async () => {},
+    discoverModels: async () => [{ backendId: "lmstudio", modelId: "exact-model", displayName: "Exact model", contextWindowTokens: null, maxOutputTokens: null }],
+    startPlan: async () => ({
+      status: "started",
+      data: {
+        sessionId: "019b0000-0000-7000-8000-000000000021",
+        runId,
+        state: "running",
+        workspaceRoot: "/tmp/birdcode-project",
+        modelId: "exact-model",
+      },
+    }),
+    pollPlan: async () => new Promise(() => {}),
+    cancelPlan,
+  };
+
+  render(<App bridge={bridge} />);
+  await waitFor(() => expect(
+    (screen.getByLabelText("Exact LM Studio model") as HTMLSelectElement).value,
+  ).toBe("exact-model"));
+  fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "/tmp/birdcode-project" } });
+  fireEvent.change(screen.getByLabelText("Task prompt"), { target: { value: "Plan this" } });
+  fireEvent.click(screen.getByLabelText("Run task"));
+  fireEvent.click(await screen.findByRole("button", { name: "Cancel run" }));
+
+  await waitFor(() => expect(screen.getByRole("button", { name: "Run already terminal" })).toBeTruthy());
+  expect(screen.queryByRole("button", { name: "Cancellation recorded" })).toBeNull();
+  expect(screen.getByRole("alert").textContent).toContain("no cancellation was recorded");
+  expect(cancelPlan).toHaveBeenCalledTimes(1);
+});
+
+test("re-enables cancellation after a transient rejection while coalescing the retry", async () => {
+  let resolveRetry!: () => void;
+  const cancelPlan = vi
+    .fn<NonNullable<RuntimeBridge["cancelPlan"]>>()
+    .mockRejectedValueOnce(new Error("temporary transport failure"))
+    .mockImplementationOnce(() => new Promise((resolve) => {
+      resolveRetry = () => resolve({
+        runId: "019b0000-0000-7000-8000-000000000032",
+        cancellationRequestId: "019b0000-0000-7000-8000-000000000033",
+        cancellationGeneration: 1,
+        disposition: "already_requested",
+      });
+    }));
+  const bridge: RuntimeBridge = {
+    health: async () => ({ state: "ready", transport: "stdio", protocolVersion: "3", daemonVersion: "0.1.0", message: "Ready", backends: [] }),
+    reset: async () => {},
+    discoverModels: async () => [{ backendId: "lmstudio", modelId: "exact-model", displayName: "Exact model", contextWindowTokens: null, maxOutputTokens: null }],
+    startPlan: async () => ({
+      status: "started",
+      data: {
+        sessionId: "019b0000-0000-7000-8000-000000000031",
+        runId: "019b0000-0000-7000-8000-000000000032",
+        state: "running",
+        workspaceRoot: "/tmp/birdcode-project",
+        modelId: "exact-model",
+      },
+    }),
+    pollPlan: async (_sessionId, runId, afterSequence) => ({
+      runId,
+      state: "running",
+      nextSequence: afterSequence,
+      events: [],
+      acceptedPlan: null,
+    }),
+    cancelPlan,
+  };
+
+  render(<App bridge={bridge} />);
+  await waitFor(() => expect(
+    (screen.getByLabelText("Exact LM Studio model") as HTMLSelectElement).value,
+  ).toBe("exact-model"));
+  fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "/tmp/birdcode-project" } });
+  fireEvent.change(screen.getByLabelText("Task prompt"), { target: { value: "Plan this" } });
+  fireEvent.click(screen.getByLabelText("Run task"));
+
+  fireEvent.click(await screen.findByRole("button", { name: "Cancel run" }));
+  await waitFor(() => expect(cancelPlan).toHaveBeenCalledTimes(1));
+  const retry = await screen.findByRole("button", { name: "Cancel run" });
+  expect((retry as HTMLButtonElement).disabled).toBe(false);
+
+  fireEvent.click(retry);
+  fireEvent.click(retry);
+  expect(cancelPlan).toHaveBeenCalledTimes(2);
+
+  await act(async () => resolveRetry());
+  await waitFor(() => expect(screen.getByRole("button", { name: "Cancellation recorded" })).toBeTruthy());
+  expect(cancelPlan).toHaveBeenCalledTimes(2);
 });

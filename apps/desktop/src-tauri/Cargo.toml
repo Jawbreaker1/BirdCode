@@ -17,8 +17,11 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 birdcode-client = { path = "../../../crates/client" }
+birdcode-prompting = { path = "../../../crates/prompting" }
 birdcode-protocol = { path = "../../../crates/protocol" }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
 tauri = { version = "2", features = [] }
 
 [lints]

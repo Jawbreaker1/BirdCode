@@ -448,11 +448,12 @@ async fn native_enrichment_uses_the_short_discovery_deadline() {
 
 #[tokio::test]
 async fn multilingual_structured_roundtrip_is_strict_and_preserves_utf8() {
-    let server = MockServer::start(vec![MockReply::json(
+    let provider_reply = MockReply::json(
         200,
         completion(json!({"route": "granska", "language": "sv"})),
-    )])
-    .await;
+    );
+    let provider_body_sha256 = format!("{:x}", Sha256::digest(&provider_reply.body));
+    let server = MockServer::start(vec![provider_reply]).await;
     let mut config = LmStudioConfig::new(server.base_url.clone());
     config.api_token = Some(SecretToken::new("local-test-token"));
     let backend = LmStudioBackend::new(config).expect("loopback token config is valid");
@@ -482,6 +483,10 @@ async fn multilingual_structured_roundtrip_is_strict_and_preserves_utf8() {
         response.evidence.raw_response["id"],
         Value::String("chatcmpl-test".to_owned())
     );
+    assert_eq!(
+        response.evidence.response_body_sha256,
+        Some(provider_body_sha256)
+    );
 
     let captured = server.captured().await;
     assert_eq!(captured.len(), 1);
@@ -500,6 +505,55 @@ async fn multilingual_structured_roundtrip_is_strict_and_preserves_utf8() {
     assert_eq!(
         body["messages"][1]["content"],
         "Svenska: granska detta. 日本語: 確認してください。 العربية: راجع هذا."
+    );
+}
+
+#[tokio::test]
+async fn successful_inference_hashes_exact_provider_bytes_not_only_json_semantics() {
+    let value = completion(json!({"route": "granska", "language": "sv"}));
+    let compact = serde_json::to_vec(&value).expect("compact provider JSON encodes");
+    let pretty = serde_json::to_vec_pretty(&value).expect("pretty provider JSON encodes");
+    assert_ne!(compact, pretty);
+
+    let compact_server = MockServer::start(vec![
+        MockReply::raw(200, compact.clone()).with_header("Content-Type", "application/json"),
+    ])
+    .await;
+    let pretty_server = MockServer::start(vec![
+        MockReply::raw(200, pretty.clone()).with_header("Content-Type", "application/json"),
+    ])
+    .await;
+
+    let compact_response = backend(&compact_server)
+        .infer_structured(structured_request(vec![Message::new(
+            MessageRole::User,
+            "granska",
+        )]))
+        .await
+        .expect("compact response succeeds");
+    let pretty_response = backend(&pretty_server)
+        .infer_structured(structured_request(vec![Message::new(
+            MessageRole::User,
+            "granska",
+        )]))
+        .await
+        .expect("pretty response succeeds");
+
+    assert_eq!(
+        compact_response.evidence.raw_response,
+        pretty_response.evidence.raw_response
+    );
+    assert_eq!(
+        compact_response.evidence.response_body_sha256,
+        Some(format!("{:x}", Sha256::digest(compact)))
+    );
+    assert_eq!(
+        pretty_response.evidence.response_body_sha256,
+        Some(format!("{:x}", Sha256::digest(pretty)))
+    );
+    assert_ne!(
+        compact_response.evidence.response_body_sha256,
+        pretty_response.evidence.response_body_sha256
     );
 }
 

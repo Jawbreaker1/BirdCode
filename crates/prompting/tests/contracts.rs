@@ -1,8 +1,8 @@
 use birdcode_prompting::{
     CanonicalJson, CompiledPrompt, DataProvenance, DataSection, MessageContent, MessageRole,
     PromptError, PromptInvocation, PromptLimits, PromptRegistry, RequiredAccess, RouteAction,
-    RouteStrategy, RouterInvariantViolation, SourceKind, TASK_ROUTER_MANIFEST_JSON,
-    TASK_ROUTER_MANIFEST_V1_0_0_JSON, TASK_ROUTER_MANIFEST_V1_1_0_JSON,
+    RouteStrategy, RouterInvariantViolation, RuntimeConstraint, SourceKind,
+    TASK_ROUTER_MANIFEST_JSON, TASK_ROUTER_MANIFEST_V1_0_0_JSON, TASK_ROUTER_MANIFEST_V1_1_0_JSON,
     TASK_ROUTER_MANIFEST_V1_1_1_JSON, TASK_ROUTER_MANIFEST_V1_1_2_JSON, TaskRouterOutput,
     TrustLevel, builtin_registry, parse_manifest, task_router_key,
 };
@@ -183,6 +183,27 @@ fn bundled_manifest_and_programmatic_registration_are_fully_validated() {
         PromptRegistry::new([invalid_directive]),
         Err(PromptError::GenerationSchemaDirective(_))
     ));
+}
+
+#[test]
+fn manifest_parser_rejects_duplicate_json_keys_at_any_depth() {
+    let duplicate_top_level = TASK_ROUTER_MANIFEST_JSON.replacen(
+        "\"manifest_schema_version\": 1,",
+        "\"manifest_schema_version\": 1,\n  \"manifest_schema_version\": 1,",
+        1,
+    );
+    let duplicate_nested = TASK_ROUTER_MANIFEST_JSON.replacen(
+        "\"type\": \"object\",",
+        "\"type\": \"object\",\n    \"type\": \"object\",",
+        1,
+    );
+
+    for ambiguous in [duplicate_top_level, duplicate_nested] {
+        let error = parse_manifest(ambiguous.as_bytes())
+            .expect_err("duplicate policy keys must never use last-key-wins semantics");
+        assert!(matches!(error, PromptError::Json(_)));
+        assert!(error.to_string().contains("duplicate JSON object key"));
+    }
 }
 
 #[test]
@@ -568,6 +589,90 @@ fn compilation_preserves_multilingual_payloads_and_trust_boundaries() {
         let decoded: CompiledPrompt =
             serde_json::from_slice(&encoded).expect("compiled prompt should round trip");
         assert_eq!(decoded, compiled);
+    }
+}
+
+#[test]
+fn runtime_constraints_are_separate_application_policy_messages() {
+    let invocation = PromptInvocation::with_runtime_constraints(
+        vec![section(
+            "request",
+            TrustLevel::User,
+            SourceKind::User,
+            "multilingual-planning-turn",
+            json!({ "request": "Planera arbetet utan att ändra filer. 日本語 🐦" }),
+        )],
+        PromptLimits::new(0),
+        vec![RuntimeConstraint {
+            name: "planner_policy".to_owned(),
+            payload: json!({
+                "access": "read_only",
+                "obligation_snapshot_sha256": "a".repeat(64)
+            }),
+        }],
+    );
+    let manifest =
+        parse_manifest(TASK_ROUTER_MANIFEST_JSON.as_bytes()).expect("router manifest should parse");
+    let mut permissive = manifest.clone();
+    permissive.input_schema["properties"]["runtime_constraints"] = json!({
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 1,
+        "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "payload"],
+            "properties": {
+                "name": { "const": "planner_policy" },
+                "payload": { "type": "object" }
+            }
+        }
+    });
+    let registry =
+        PromptRegistry::new([permissive.clone()]).expect("test manifest should register");
+    let compiled = registry
+        .compile(&permissive.key(), &invocation)
+        .expect("trusted runtime constraint should compile");
+
+    assert_eq!(compiled.runtime_constraints, invocation.runtime_constraints);
+    assert_eq!(compiled.messages[1].trust, TrustLevel::ApplicationPolicy);
+    let MessageContent::Json(policy) = &compiled.messages[1].content else {
+        panic!("runtime constraints must remain canonical policy JSON")
+    };
+    assert_eq!(policy.value()["constraints"][0]["name"], "planner_policy");
+    assert_eq!(compiled.messages[2].trust, TrustLevel::User);
+}
+
+#[test]
+fn runtime_constraint_names_are_nonempty_and_unique() {
+    let sections = routing_invocation().sections;
+    for constraints in [
+        vec![RuntimeConstraint {
+            name: "   ".to_owned(),
+            payload: json!({}),
+        }],
+        vec![
+            RuntimeConstraint {
+                name: "planner_policy".to_owned(),
+                payload: json!({ "version": 1 }),
+            },
+            RuntimeConstraint {
+                name: "planner_policy".to_owned(),
+                payload: json!({ "version": 2 }),
+            },
+        ],
+    ] {
+        let invocation = PromptInvocation::with_runtime_constraints(
+            sections.clone(),
+            PromptLimits::new(0),
+            constraints,
+        );
+        assert!(
+            builtin_registry()
+                .expect("registry should load")
+                .compile(&task_router_key(), &invocation)
+                .is_err()
+        );
     }
 }
 
