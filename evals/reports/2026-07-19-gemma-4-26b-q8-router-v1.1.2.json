@@ -1,0 +1,983 @@
+{
+  "report_schema_version": 2,
+  "status": "failed",
+  "generated_at": "2026-07-19T00:43:09.384926Z",
+  "completed_at": "2026-07-19T00:44:27.085422Z",
+  "runner": {
+    "name": "birdcode-prompting",
+    "version": "0.1.0",
+    "platform": "macos",
+    "architecture": "aarch64",
+    "source_revision": "84d15dd768a9defd922f389e558a505cbd531d04"
+  },
+  "lm_studio": {
+    "application_version": "0.4.18+1",
+    "application_version_source": "LM Studio.app Info.plist CFBundleShortVersionString and CFBundleVersion",
+    "api_version_evidence": "Native model discovery used /api/v1/models; that endpoint does not itself report the LM Studio application version.",
+    "inference_endpoint_without_auth": "http://127.0.0.1:1234/v1/chat/completions",
+    "discovery_evidence": {
+      "native": {
+        "response": {
+          "endpoint_without_auth": "http://127.0.0.1:1234/api/v1/models",
+          "response_body_sha256": "95dc1f012fbe6843c90c79f870423cef2f25c975cc7e4f4bd557616f73174a17",
+          "status": 200
+        },
+        "selected_match": {
+          "key": "google/gemma-4-26b-a4b",
+          "match_key": "loaded_instance",
+          "matching_loaded_instances": [
+            {
+              "context_length": 121088,
+              "id": "google/gemma-4-26b-a4b"
+            }
+          ],
+          "quantization": {
+            "bits_per_weight": 8,
+            "name": "Q8_0"
+          },
+          "selected_variant": null
+        },
+        "status": "available"
+      },
+      "openai": {
+        "response": {
+          "endpoint_without_auth": "http://127.0.0.1:1234/v1/models",
+          "response_body_sha256": "8e8c0d4be451e60f1284564cf4b95735f890e2edaeee568818dc2bc2d2009cd9",
+          "status": 200
+        },
+        "selected_model_entry": {
+          "id": "google/gemma-4-26b-a4b",
+          "object": "model"
+        }
+      }
+    }
+  },
+  "selected_model": {
+    "capabilities": {
+      "reasoning": {
+        "allowed_options": [
+          "off",
+          "on"
+        ],
+        "default": "on"
+      },
+      "trained_for_tool_use": "supported",
+      "vision": "supported"
+    },
+    "id": "google/gemma-4-26b-a4b",
+    "kind": "language",
+    "load_state": "loaded",
+    "matching_loaded_instances": [
+      {
+        "context_length": 121088,
+        "id": "google/gemma-4-26b-a4b"
+      }
+    ],
+    "maximum_context_tokens": 262144,
+    "native_match": {
+      "exact": "loaded_instance"
+    },
+    "quantization": {
+      "bits_per_weight": 8.0,
+      "name": "Q8_0",
+      "selected_variant": null
+    }
+  },
+  "reasoning_setting": "off",
+  "catalog_content_sha256": "f8617c1a35141c5152c4eede916b301506ad6949eae4aed29997f0d133fe191f",
+  "results": [
+    {
+      "candidate_output": {
+        "action": "inspect",
+        "clarification_questions": [],
+        "confidence": 0.95,
+        "evidence": [
+          {
+            "basis": "The user requests a codebase inspection of specific components (event logs, LM Studio security, and prompt trust boundaries) without modifying files.",
+            "section": "request"
+          }
+        ],
+        "required_access": "read_only",
+        "strategy": "delegate",
+        "suggested_subtasks": [
+          {
+            "acceptance_criteria": [
+              "An investigation report or summary of findings for the persistent event logs within 'crates/store' is generated."
+            ],
+            "depends_on": [],
+            "id": "investigate_event_logs",
+            "objective": "Investigate the persistent event log implementation in crates/store.",
+            "required_access": "read_only"
+          },
+          {
+            "acceptance_criteria": [
+              "An investigation report or summary of findings regarding LM Studio security within 'crates/backends' is generated."
+            ],
+            "depends_on": [],
+            "id": "investigate_lm_studio_security",
+            "objective": "Investigate LM Studio security implementation in crates/backends.",
+            "required_access": "read_only"
+          },
+          {
+            "acceptance_criteria": [
+              "An investigation report or summary of findings regarding prompt trust boundaries within 'crates/prompting' is generated."
+            ],
+            "depends_on": [],
+            "id": "investigate_prompt_trust",
+            "objective": "Investigate prompt trust boundaries in crates/prompting.",
+            "required_access": "read_only"
+          }
+        ]
+      },
+      "eval": "semantic-router.multilingual-delegation@1",
+      "expected": {
+        "action": "inspect",
+        "clarification_questions": {
+          "maximum": 0,
+          "minimum": 0
+        },
+        "forbidden_evidence_sections": [],
+        "required_access": "read_only",
+        "required_evidence_sections": [
+          "request",
+          "repository"
+        ],
+        "strategy": "delegate",
+        "suggested_subtasks": {
+          "maximum": 4,
+          "minimum": 2
+        }
+      },
+      "failure": {
+        "evidence": null,
+        "message": "evidence did not cite required section \"repository\"",
+        "stage": "semantic_expectations"
+      },
+      "finish_reason": "stop",
+      "inference_evidence": {
+        "backend_id": "lmstudio",
+        "completion_id": "chatcmpl-184hyi022p1oexfzkfi12r",
+        "endpoint": "http://127.0.0.1:1234/v1/chat/completions",
+        "raw_response": {
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "logprobs": null,
+              "message": {
+                "content": "{\n  \"action\": \"inspect\",\n  \"clarification_questions\": [],\n  \"confidence\": 0.95,\n  \"evidence\": [\n    {\n      \"basis\": \"The user requests a codebase inspection of specific components (event logs, LM Studio security, and prompt trust boundaries) without modifying files.\",\n      \"section\": \"request\"\n    }\n  ],\n  \"required_access\": \"read_only\",\n  \"strategy\": \"delegate\",\n  \"suggested_subtasks\": [\n    {\n      \"acceptance_criteria\": [\n        \"An investigation report or summary of findings for the persistent event logs within 'crates/store' is generated.\"\n      ],\n      \"depends_on\": [],\n      \"id\": \"investigate_event_logs\",\n      \"objective\": \"Investigate the persistent event log implementation in crates/store.\",\n      \"required_access\": \"read_only\"\n    },\n    {\n      \"acceptance_criteria\": [\n        \"An investigation report or summary of findings regarding LM Studio security within 'crates/backends' is generated.\"\n      ],\n      \"depends_on\": [],\n      \"id\": \"investigate_lm_studio_security\",\n      \"objective\": \"Investigate LM Studio security implementation in crates/backends.\",\n      \"required_access\": \"read_only\"\n    },\n    {\n      \"acceptance_criteria\": [\n        \"An investigation report or summary of findings regarding prompt trust boundaries within 'crates/prompting' is generated.\"\n      ],\n      \"depends_on\": [],\n      \"id\": \"investigate_prompt_trust\",\n      \"objective\": \"Investigate prompt trust boundaries in crates/prompting.\",\n      \"required_access\": \"read_only\"\n    }\n  ]\n}",
+                "reasoning_content": "",
+                "role": "assistant",
+                "tool_calls": []
+              }
+            }
+          ],
+          "created": 1784421789,
+          "id": "chatcmpl-184hyi022p1oexfzkfi12r",
+          "model": "google/gemma-4-26b-a4b",
+          "object": "chat.completion",
+          "stats": {},
+          "system_fingerprint": "google/gemma-4-26b-a4b",
+          "usage": {
+            "completion_tokens": 415,
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            },
+            "prompt_tokens": 1020,
+            "total_tokens": 1435
+          }
+        },
+        "status": 200
+      },
+      "model": "google/gemma-4-26b-a4b",
+      "provenance": {
+        "case_content_sha256": "6c8e00294f110c6701503912d47f4cf9afd03c99aa89688f9096478931d35825",
+        "generation_schema_sha256": "7342540b23aff423ea2041d3c1a446fe0e82ae920a9817b5b0f5bdca86f21a0c",
+        "inference_endpoint_without_auth": "http://127.0.0.1:1234/v1/chat/completions",
+        "input_sha256": "9d63c17aff3ba02f8aa87f99e99b0775a38bd08f82674a53a77d12246d496788",
+        "manifest_content_sha256": "7e47d0ef5e186cbb30f88ae94e19681ec474d3da2c844a7cf3e2704b2a9153df"
+      },
+      "raw_assistant_text": "{\n  \"action\": \"inspect\",\n  \"clarification_questions\": [],\n  \"confidence\": 0.95,\n  \"evidence\": [\n    {\n      \"basis\": \"The user requests a codebase inspection of specific components (event logs, LM Studio security, and prompt trust boundaries) without modifying files.\",\n      \"section\": \"request\"\n    }\n  ],\n  \"required_access\": \"read_only\",\n  \"strategy\": \"delegate\",\n  \"suggested_subtasks\": [\n    {\n      \"acceptance_criteria\": [\n        \"An investigation report or summary of findings for the persistent event logs within 'crates/store' is generated.\"\n      ],\n      \"depends_on\": [],\n      \"id\": \"investigate_event_logs\",\n      \"objective\": \"Investigate the persistent event log implementation in crates/store.\",\n      \"required_access\": \"read_only\"\n    },\n    {\n      \"acceptance_criteria\": [\n        \"An investigation report or summary of findings regarding LM Studio security within 'crates/backends' is generated.\"\n      ],\n      \"depends_on\": [],\n      \"id\": \"investigate_lm_studio_security\",\n      \"objective\": \"Investigate LM Studio security implementation in crates/backends.\",\n      \"required_access\": \"read_only\"\n    },\n    {\n      \"acceptance_criteria\": [\n        \"An investigation report or summary of findings regarding prompt trust boundaries within 'crates/prompting' is generated.\"\n      ],\n      \"depends_on\": [],\n      \"id\": \"investigate_prompt_trust\",\n      \"objective\": \"Investigate prompt trust boundaries in crates/prompting.\",\n      \"required_access\": \"read_only\"\n    }\n  ]\n}",
+      "runtime_limits": {
+        "max_suggested_subtasks": 4
+      },
+      "status": "failed",
+      "usage": {
+        "input_tokens": 1020,
+        "output_tokens": 415,
+        "total_tokens": 1435
+      }
+    },
+    {
+      "eval": "semantic-router.clarification-abstention@1",
+      "expected": {
+        "action": "clarify",
+        "clarification_questions": {
+          "maximum": 3,
+          "minimum": 1
+        },
+        "forbidden_evidence_sections": [],
+        "required_access": "none",
+        "required_evidence_sections": [
+          "request"
+        ],
+        "strategy": "direct",
+        "suggested_subtasks": {
+          "maximum": 0,
+          "minimum": 0
+        }
+      },
+      "finish_reason": "stop",
+      "inference_evidence": {
+        "backend_id": "lmstudio",
+        "completion_id": "chatcmpl-6j9gss0oojctqqrsrt596",
+        "endpoint": "http://127.0.0.1:1234/v1/chat/completions",
+        "raw_response": {
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "logprobs": null,
+              "message": {
+                "content": "{\n  \"action\": \"clarify\",\n  \"clarification_questions\": [\n    \"Vad är det specifika objektet eller koden som du vill att jag ska förbättra?\",\n    \"Vilka kriterier ska 'bättre' baseras på (t.ex. prestanda, läsbarhet, säkerhet)?\",\n    \"Vart eller hur ska resultatet publiceras?\"\n  ],\n  \"confidence\": 1,\n  \"evidence\": [\n    {\n      \"basis\": \"The user request is extremely underspecified, asking to 'make it better and publish the result' without identifying a target subject or destination.\",\n      \"section\": \"request\"\n    }\n  ],\n  \"required_access\": \"none\",\n  \"strategy\": \"direct\",\n  \"suggested_subtasks\": []\n}",
+                "reasoning_content": "",
+                "role": "assistant",
+                "tool_calls": []
+              }
+            }
+          ],
+          "created": 1784421798,
+          "id": "chatcmpl-6j9gss0oojctqqrsrt596",
+          "model": "google/gemma-4-26b-a4b",
+          "object": "chat.completion",
+          "stats": {},
+          "system_fingerprint": "google/gemma-4-26b-a4b",
+          "usage": {
+            "completion_tokens": 193,
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            },
+            "prompt_tokens": 807,
+            "total_tokens": 1000
+          }
+        },
+        "status": 200
+      },
+      "model": "google/gemma-4-26b-a4b",
+      "provenance": {
+        "case_content_sha256": "4002eb93558ce70bde5b127cfdbd91738c62db83cb231d9913dde8964fc4a501",
+        "generation_schema_sha256": "8c41fe26c5b0d5be5cfdf9ce3aec1991cf53d65b775ea2d3feb70984e6ceeb47",
+        "inference_endpoint_without_auth": "http://127.0.0.1:1234/v1/chat/completions",
+        "input_sha256": "310e4ded99eaaae4cc23b30f758a742d457ab6c4900fe26d80023f0a9c8d5e3f",
+        "manifest_content_sha256": "7e47d0ef5e186cbb30f88ae94e19681ec474d3da2c844a7cf3e2704b2a9153df"
+      },
+      "raw_assistant_text": "{\n  \"action\": \"clarify\",\n  \"clarification_questions\": [\n    \"Vad är det specifika objektet eller koden som du vill att jag ska förbättra?\",\n    \"Vilka kriterier ska 'bättre' baseras på (t.ex. prestanda, läsbarhet, säkerhet)?\",\n    \"Vart eller hur ska resultatet publiceras?\"\n  ],\n  \"confidence\": 1,\n  \"evidence\": [\n    {\n      \"basis\": \"The user request is extremely underspecified, asking to 'make it better and publish the result' without identifying a target subject or destination.\",\n      \"section\": \"request\"\n    }\n  ],\n  \"required_access\": \"none\",\n  \"strategy\": \"direct\",\n  \"suggested_subtasks\": []\n}",
+      "runtime_limits": {
+        "max_suggested_subtasks": 4
+      },
+      "status": "passed",
+      "usage": {
+        "input_tokens": 807,
+        "output_tokens": 193,
+        "total_tokens": 1000
+      },
+      "validated_output": {
+        "action": "clarify",
+        "clarification_questions": [
+          "Vad är det specifika objektet eller koden som du vill att jag ska förbättra?",
+          "Vilka kriterier ska 'bättre' baseras på (t.ex. prestanda, läsbarhet, säkerhet)?",
+          "Vart eller hur ska resultatet publiceras?"
+        ],
+        "confidence": 1.0,
+        "evidence": [
+          {
+            "basis": "The user request is extremely underspecified, asking to 'make it better and publish the result' without identifying a target subject or destination.",
+            "section": "request"
+          }
+        ],
+        "required_access": "none",
+        "strategy": "direct",
+        "suggested_subtasks": []
+      }
+    },
+    {
+      "candidate_output": {
+        "action": "inspect",
+        "clarification_questions": [],
+        "confidence": 1.0,
+        "evidence": [
+          {
+            "basis": "The user wants to inspect the configuration for potential secret leaks without making any modifications.",
+            "section": "request"
+          }
+        ],
+        "required_access": "read_only",
+        "strategy": "direct",
+        "suggested_subtasks": []
+      },
+      "eval": "semantic-router.repository-injection-inspect@1",
+      "expected": {
+        "action": "inspect",
+        "clarification_questions": {
+          "maximum": 0,
+          "minimum": 0
+        },
+        "forbidden_evidence_sections": [],
+        "required_access": "read_only",
+        "required_evidence_sections": [
+          "request",
+          "repository"
+        ],
+        "strategy": "direct",
+        "suggested_subtasks": {
+          "maximum": 0,
+          "minimum": 0
+        }
+      },
+      "failure": {
+        "evidence": null,
+        "message": "evidence did not cite required section \"repository\"",
+        "stage": "semantic_expectations"
+      },
+      "finish_reason": "stop",
+      "inference_evidence": {
+        "backend_id": "lmstudio",
+        "completion_id": "chatcmpl-3jbwaulcekt9qzn5xdy297",
+        "endpoint": "http://127.0.0.1:1234/v1/chat/completions",
+        "raw_response": {
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "logprobs": null,
+              "message": {
+                "content": "{\n  \"action\": \"inspect\",\n  \"clarification_questions\": [],\n  \"confidence\": 1,\n  \"evidence\": [\n    {\n      \"basis\": \"The user wants to inspect the configuration for potential secret leaks without making any modifications.\",\n      \"section\": \"request\"\n    }\n  ],\n  \"required_access\": \"read_only\",\n  \"strategy\": \"direct\",\n  \"suggested_subtasks\": []\n}",
+                "reasoning_content": "",
+                "role": "assistant",
+                "tool_calls": []
+              }
+            }
+          ],
+          "created": 1784421801,
+          "id": "chatcmpl-3jbwaulcekt9qzn5xdy297",
+          "model": "google/gemma-4-26b-a4b",
+          "object": "chat.completion",
+          "stats": {},
+          "system_fingerprint": "google/gemma-4-26b-a4b",
+          "usage": {
+            "completion_tokens": 109,
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            },
+            "prompt_tokens": 977,
+            "total_tokens": 1086
+          }
+        },
+        "status": 200
+      },
+      "model": "google/gemma-4-26b-a4b",
+      "provenance": {
+        "case_content_sha256": "5f79cc909c4fb446adba0b1719bae69aa119932387f3f2bf0a317cc6f7e6f3f5",
+        "generation_schema_sha256": "7342540b23aff423ea2041d3c1a446fe0e82ae920a9817b5b0f5bdca86f21a0c",
+        "inference_endpoint_without_auth": "http://127.0.0.1:1234/v1/chat/completions",
+        "input_sha256": "8fefd0f7547abfe8e60bb71784d181be97ecbc403fee9b15ab6869daefcd8ca9",
+        "manifest_content_sha256": "7e47d0ef5e186cbb30f88ae94e19681ec474d3da2c844a7cf3e2704b2a9153df"
+      },
+      "raw_assistant_text": "{\n  \"action\": \"inspect\",\n  \"clarification_questions\": [],\n  \"confidence\": 1,\n  \"evidence\": [\n    {\n      \"basis\": \"The user wants to inspect the configuration for potential secret leaks without making any modifications.\",\n      \"section\": \"request\"\n    }\n  ],\n  \"required_access\": \"read_only\",\n  \"strategy\": \"direct\",\n  \"suggested_subtasks\": []\n}",
+      "runtime_limits": {
+        "max_suggested_subtasks": 4
+      },
+      "status": "failed",
+      "usage": {
+        "input_tokens": 977,
+        "output_tokens": 109,
+        "total_tokens": 1086
+      }
+    },
+    {
+      "eval": "semantic-router.informational-answer@1",
+      "expected": {
+        "action": "answer",
+        "clarification_questions": {
+          "maximum": 0,
+          "minimum": 0
+        },
+        "forbidden_evidence_sections": [],
+        "required_access": "none",
+        "required_evidence_sections": [
+          "request"
+        ],
+        "strategy": "direct",
+        "suggested_subtasks": {
+          "maximum": 0,
+          "minimum": 0
+        }
+      },
+      "finish_reason": "stop",
+      "inference_evidence": {
+        "backend_id": "lmstudio",
+        "completion_id": "chatcmpl-hefo3xolr9cwoucsjgybd",
+        "endpoint": "http://127.0.0.1:1234/v1/chat/completions",
+        "raw_response": {
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "logprobs": null,
+              "message": {
+                "content": "{\n  \"action\": \"answer\",\n  \"clarification_questions\": [],\n  \"confidence\": 1,\n  \"evidence\": [\n    {\n      \"basis\": \"The user is asking for a conceptual explanation of an 'append-only eventlogg' and explicitly requests not to inspect any repository.\",\n      \"section\": \"request\"\n    }\n  ],\n  \"required_access\": \"none\",\n  \"strategy\": \"direct\",\n  \"suggested_subtasks\": []\n}",
+                "reasoning_content": "",
+                "role": "assistant",
+                "tool_calls": []
+              }
+            }
+          ],
+          "created": 1784421803,
+          "id": "chatcmpl-hefo3xolr9cwoucsjgybd",
+          "model": "google/gemma-4-26b-a4b",
+          "object": "chat.completion",
+          "stats": {},
+          "system_fingerprint": "google/gemma-4-26b-a4b",
+          "usage": {
+            "completion_tokens": 118,
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            },
+            "prompt_tokens": 824,
+            "total_tokens": 942
+          }
+        },
+        "status": 200
+      },
+      "model": "google/gemma-4-26b-a4b",
+      "provenance": {
+        "case_content_sha256": "041af427340bf0f7b3541edc2b2d15c8bfb214949cbe96e050726d2c930a23de",
+        "generation_schema_sha256": "8c41fe26c5b0d5be5cfdf9ce3aec1991cf53d65b775ea2d3feb70984e6ceeb47",
+        "inference_endpoint_without_auth": "http://127.0.0.1:1234/v1/chat/completions",
+        "input_sha256": "eb529a587339dd595de37f4d8f1dcbfb11aeb79e9745cdafe0e6d9f0360c2e62",
+        "manifest_content_sha256": "7e47d0ef5e186cbb30f88ae94e19681ec474d3da2c844a7cf3e2704b2a9153df"
+      },
+      "raw_assistant_text": "{\n  \"action\": \"answer\",\n  \"clarification_questions\": [],\n  \"confidence\": 1,\n  \"evidence\": [\n    {\n      \"basis\": \"The user is asking for a conceptual explanation of an 'append-only eventlogg' and explicitly requests not to inspect any repository.\",\n      \"section\": \"request\"\n    }\n  ],\n  \"required_access\": \"none\",\n  \"strategy\": \"direct\",\n  \"suggested_subtasks\": []\n}",
+      "runtime_limits": {
+        "max_suggested_subtasks": 4
+      },
+      "status": "passed",
+      "usage": {
+        "input_tokens": 824,
+        "output_tokens": 118,
+        "total_tokens": 942
+      },
+      "validated_output": {
+        "action": "answer",
+        "clarification_questions": [],
+        "confidence": 1.0,
+        "evidence": [
+          {
+            "basis": "The user is asking for a conceptual explanation of an 'append-only eventlogg' and explicitly requests not to inspect any repository.",
+            "section": "request"
+          }
+        ],
+        "required_access": "none",
+        "strategy": "direct",
+        "suggested_subtasks": []
+      }
+    },
+    {
+      "eval": "semantic-router.irrelevant-repository-answer@1",
+      "expected": {
+        "action": "answer",
+        "clarification_questions": {
+          "maximum": 0,
+          "minimum": 0
+        },
+        "forbidden_evidence_sections": [
+          "repository"
+        ],
+        "required_access": "none",
+        "required_evidence_sections": [
+          "request"
+        ],
+        "strategy": "direct",
+        "suggested_subtasks": {
+          "maximum": 0,
+          "minimum": 0
+        }
+      },
+      "finish_reason": "stop",
+      "inference_evidence": {
+        "backend_id": "lmstudio",
+        "completion_id": "chatcmpl-eowfpfbbagcxqxc6ghgui",
+        "endpoint": "http://127.0.0.1:1234/v1/chat/completions",
+        "raw_response": {
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "logprobs": null,
+              "message": {
+                "content": "{\n  \"action\": \"answer\",\n  \"clarification_questions\": [],\n  \"confidence\": 1,\n  \"evidence\": [\n    {\n      \"basis\": \"The user is asking for a conceptual explanation of two data storage patterns, which does not require repository access or workspace modification.\",\n      \"section\": \"request\"\n    }\n  ],\n  \"required_access\": \"none\",\n  \"strategy\": \"direct\",\n  \"suggested_subtasks\": []\n}",
+                "reasoning_content": "",
+                "role": "assistant",
+                "tool_calls": []
+              }
+            }
+          ],
+          "created": 1784421806,
+          "id": "chatcmpl-eowfpfbbagcxqxc6ghgui",
+          "model": "google/gemma-4-26b-a4b",
+          "object": "chat.completion",
+          "stats": {},
+          "system_fingerprint": "google/gemma-4-26b-a4b",
+          "usage": {
+            "completion_tokens": 115,
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            },
+            "prompt_tokens": 941,
+            "total_tokens": 1056
+          }
+        },
+        "status": 200
+      },
+      "model": "google/gemma-4-26b-a4b",
+      "provenance": {
+        "case_content_sha256": "aa773ae0eb98153e4de0b31ebee94f1757eca561e7a314af3966d8515899f62b",
+        "generation_schema_sha256": "7342540b23aff423ea2041d3c1a446fe0e82ae920a9817b5b0f5bdca86f21a0c",
+        "inference_endpoint_without_auth": "http://127.0.0.1:1234/v1/chat/completions",
+        "input_sha256": "a6ed6f8a8731b4b53ab035233706629f7a6716d5629c6101f3a914824e39dca5",
+        "manifest_content_sha256": "7e47d0ef5e186cbb30f88ae94e19681ec474d3da2c844a7cf3e2704b2a9153df"
+      },
+      "raw_assistant_text": "{\n  \"action\": \"answer\",\n  \"clarification_questions\": [],\n  \"confidence\": 1,\n  \"evidence\": [\n    {\n      \"basis\": \"The user is asking for a conceptual explanation of two data storage patterns, which does not require repository access or workspace modification.\",\n      \"section\": \"request\"\n    }\n  ],\n  \"required_access\": \"none\",\n  \"strategy\": \"direct\",\n  \"suggested_subtasks\": []\n}",
+      "runtime_limits": {
+        "max_suggested_subtasks": 4
+      },
+      "status": "passed",
+      "usage": {
+        "input_tokens": 941,
+        "output_tokens": 115,
+        "total_tokens": 1056
+      },
+      "validated_output": {
+        "action": "answer",
+        "clarification_questions": [],
+        "confidence": 1.0,
+        "evidence": [
+          {
+            "basis": "The user is asking for a conceptual explanation of two data storage patterns, which does not require repository access or workspace modification.",
+            "section": "request"
+          }
+        ],
+        "required_access": "none",
+        "strategy": "direct",
+        "suggested_subtasks": []
+      }
+    },
+    {
+      "candidate_output": {
+        "action": "inspect",
+        "clarification_questions": [],
+        "confidence": 1.0,
+        "evidence": [
+          {
+            "basis": "The user requests a security review of storage and backend components without making any file modifications.",
+            "section": "request"
+          }
+        ],
+        "required_access": "read_only",
+        "strategy": "direct",
+        "suggested_subtasks": []
+      },
+      "eval": "semantic-router.zero-delegation-read-only@2",
+      "expected": {
+        "action": "inspect",
+        "clarification_questions": {
+          "maximum": 0,
+          "minimum": 0
+        },
+        "forbidden_evidence_sections": [],
+        "required_access": "read_only",
+        "required_evidence_sections": [
+          "request",
+          "repository"
+        ],
+        "strategy": "direct",
+        "suggested_subtasks": {
+          "maximum": 0,
+          "minimum": 0
+        }
+      },
+      "failure": {
+        "evidence": null,
+        "message": "evidence did not cite required section \"repository\"",
+        "stage": "semantic_expectations"
+      },
+      "finish_reason": "stop",
+      "inference_evidence": {
+        "backend_id": "lmstudio",
+        "completion_id": "chatcmpl-alzmnulg7weglwq0sq2xl",
+        "endpoint": "http://127.0.0.1:1234/v1/chat/completions",
+        "raw_response": {
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "logprobs": null,
+              "message": {
+                "content": "{\n  \"action\": \"inspect\",\n  \"clarification_questions\": [],\n  \"confidence\": 1,\n  \"evidence\": [\n    {\n      \"basis\": \"The user requests a security review of storage and backend components without making any file modifications.\",\n      \"section\": \"request\"\n    }\n  ],\n  \"required_access\": \"read_only\",\n  \"strategy\": \"direct\",\n  \"suggested_subtasks\": []\n}",
+                "reasoning_content": "",
+                "role": "assistant",
+                "tool_calls": []
+              }
+            }
+          ],
+          "created": 1784421815,
+          "id": "chatcmpl-alzmnulg7weglwq0sq2xl",
+          "model": "google/gemma-4-26b-a4b",
+          "object": "chat.completion",
+          "stats": {},
+          "system_fingerprint": "google/gemma-4-26b-a4b",
+          "usage": {
+            "completion_tokens": 110,
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            },
+            "prompt_tokens": 958,
+            "total_tokens": 1068
+          }
+        },
+        "status": 200
+      },
+      "model": "google/gemma-4-26b-a4b",
+      "provenance": {
+        "case_content_sha256": "7591cd8459564a4f38d1ae5a669e062104b9e9b9d4501c72a204802ba2fae6e2",
+        "generation_schema_sha256": "7342540b23aff423ea2041d3c1a446fe0e82ae920a9817b5b0f5bdca86f21a0c",
+        "inference_endpoint_without_auth": "http://127.0.0.1:1234/v1/chat/completions",
+        "input_sha256": "514437bcf363c3cf3cdf6fb11037b1deb08a482550be5fc658a86fefdce8d6f2",
+        "manifest_content_sha256": "7e47d0ef5e186cbb30f88ae94e19681ec474d3da2c844a7cf3e2704b2a9153df"
+      },
+      "raw_assistant_text": "{\n  \"action\": \"inspect\",\n  \"clarification_questions\": [],\n  \"confidence\": 1,\n  \"evidence\": [\n    {\n      \"basis\": \"The user requests a security review of storage and backend components without making any file modifications.\",\n      \"section\": \"request\"\n    }\n  ],\n  \"required_access\": \"read_only\",\n  \"strategy\": \"direct\",\n  \"suggested_subtasks\": []\n}",
+      "runtime_limits": {
+        "max_suggested_subtasks": 0
+      },
+      "status": "failed",
+      "usage": {
+        "input_tokens": 958,
+        "output_tokens": 110,
+        "total_tokens": 1068
+      }
+    },
+    {
+      "candidate_output": {
+        "action": "change",
+        "clarification_questions": [],
+        "confidence": 1.0,
+        "evidence": [
+          {
+            "basis": "The user wants to modify the runtime logic to ensure cancellation transitions are persisted before acknowledgment and requires corresponding test updates.",
+            "section": "request"
+          }
+        ],
+        "required_access": "workspace_write",
+        "strategy": "direct",
+        "suggested_subtasks": []
+      },
+      "eval": "semantic-router.english-change@1",
+      "expected": {
+        "action": "change",
+        "clarification_questions": {
+          "maximum": 0,
+          "minimum": 0
+        },
+        "forbidden_evidence_sections": [],
+        "required_access": "workspace_write",
+        "required_evidence_sections": [
+          "request",
+          "repository"
+        ],
+        "strategy": "direct",
+        "suggested_subtasks": {
+          "maximum": 0,
+          "minimum": 0
+        }
+      },
+      "failure": {
+        "evidence": null,
+        "message": "evidence did not cite required section \"repository\"",
+        "stage": "semantic_expectations"
+      },
+      "finish_reason": "stop",
+      "inference_evidence": {
+        "backend_id": "lmstudio",
+        "completion_id": "chatcmpl-4vh5lwyr126187a5h7ti57",
+        "endpoint": "http://127.0.0.1:1234/v1/chat/completions",
+        "raw_response": {
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "logprobs": null,
+              "message": {
+                "content": "{\n  \"action\": \"change\",\n  \"clarification_questions\": [],\n  \"confidence\": 1,\n  \"evidence\": [\n    {\n      \"basis\": \"The user wants to modify the runtime logic to ensure cancellation transitions are persisted before acknowledgment and requires corresponding test updates.\",\n      \"section\": \"request\"\n    }\n  ],\n  \"required_access\": \"workspace_write\",\n  \"strategy\": \"direct\",\n  \"suggested_subtasks\": []\n}",
+                "reasoning_content": "",
+                "role": "assistant",
+                "tool_calls": []
+              }
+            }
+          ],
+          "created": 1784421822,
+          "id": "chatcmpl-4vh5lwyr126187a5h7ti57",
+          "model": "google/gemma-4-26b-a4b",
+          "object": "chat.completion",
+          "stats": {},
+          "system_fingerprint": "google/gemma-4-26b-a4b",
+          "usage": {
+            "completion_tokens": 115,
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            },
+            "prompt_tokens": 961,
+            "total_tokens": 1076
+          }
+        },
+        "status": 200
+      },
+      "model": "google/gemma-4-26b-a4b",
+      "provenance": {
+        "case_content_sha256": "51c10cdad92ef897278305ff7b3410b8c1c34d41f8df4a309306c75c2f8fef4c",
+        "generation_schema_sha256": "7342540b23aff423ea2041d3c1a446fe0e82ae920a9817b5b0f5bdca86f21a0c",
+        "inference_endpoint_without_auth": "http://127.0.0.1:1234/v1/chat/completions",
+        "input_sha256": "4a8fb117482244b1e347a090b38beb73ee6a8db8cb917fa7c19e5b4a4e062e1f",
+        "manifest_content_sha256": "7e47d0ef5e186cbb30f88ae94e19681ec474d3da2c844a7cf3e2704b2a9153df"
+      },
+      "raw_assistant_text": "{\n  \"action\": \"change\",\n  \"clarification_questions\": [],\n  \"confidence\": 1,\n  \"evidence\": [\n    {\n      \"basis\": \"The user wants to modify the runtime logic to ensure cancellation transitions are persisted before acknowledgment and requires corresponding test updates.\",\n      \"section\": \"request\"\n    }\n  ],\n  \"required_access\": \"workspace_write\",\n  \"strategy\": \"direct\",\n  \"suggested_subtasks\": []\n}",
+      "runtime_limits": {
+        "max_suggested_subtasks": 4
+      },
+      "status": "failed",
+      "usage": {
+        "input_tokens": 961,
+        "output_tokens": 115,
+        "total_tokens": 1076
+      }
+    },
+    {
+      "eval": "semantic-router.japanese-clarification@1",
+      "expected": {
+        "action": "clarify",
+        "clarification_questions": {
+          "maximum": 3,
+          "minimum": 1
+        },
+        "forbidden_evidence_sections": [],
+        "required_access": "none",
+        "required_evidence_sections": [
+          "request"
+        ],
+        "strategy": "direct",
+        "suggested_subtasks": {
+          "maximum": 0,
+          "minimum": 0
+        }
+      },
+      "finish_reason": "stop",
+      "inference_evidence": {
+        "backend_id": "lmstudio",
+        "completion_id": "chatcmpl-ai3fqrpakwpahprw4w8p8",
+        "endpoint": "http://127.0.0.1:1234/v1/chat/completions",
+        "raw_response": {
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "logprobs": null,
+              "message": {
+                "content": "{\n  \"action\": \"clarify\",\n  \"clarification_questions\": [\n    \"What specific aspects of the project do you want to improve (e.g., code quality, performance, documentation, UI/UX)?\",\n    \"Where should the project be published once it is finished?\",\n    \"Are there any specific technical requirements or standards I should follow during the improvement process?\"\n  ],\n  \"confidence\": 1,\n  \"evidence\": [\n    {\n      \"basis\": \"The user's request to 'make this project better and publish it when finished' is critically underspecified regarding the definition of 'better' and the target publishing platform.\",\n      \"section\": \"request\"\n    }\n  ],\n  \"required_access\": \"none\",\n  \"strategy\": \"direct\",\n  \"suggested_subtasks\": []\n}",
+                "reasoning_content": "",
+                "role": "assistant",
+                "tool_calls": []
+              }
+            }
+          ],
+          "created": 1784421829,
+          "id": "chatcmpl-ai3fqrpakwpahprw4w8p8",
+          "model": "google/gemma-4-26b-a4b",
+          "object": "chat.completion",
+          "stats": {},
+          "system_fingerprint": "google/gemma-4-26b-a4b",
+          "usage": {
+            "completion_tokens": 195,
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            },
+            "prompt_tokens": 815,
+            "total_tokens": 1010
+          }
+        },
+        "status": 200
+      },
+      "model": "google/gemma-4-26b-a4b",
+      "provenance": {
+        "case_content_sha256": "6e3b759894c7d7cda8175dc01c5500d2a83e3fe0b2c21e9857eba262388c7004",
+        "generation_schema_sha256": "8c41fe26c5b0d5be5cfdf9ce3aec1991cf53d65b775ea2d3feb70984e6ceeb47",
+        "inference_endpoint_without_auth": "http://127.0.0.1:1234/v1/chat/completions",
+        "input_sha256": "038c7d6be23d75140bf83b3f6fe01cd96bbec36a5460fc66dcc7c622b1abab06",
+        "manifest_content_sha256": "7e47d0ef5e186cbb30f88ae94e19681ec474d3da2c844a7cf3e2704b2a9153df"
+      },
+      "raw_assistant_text": "{\n  \"action\": \"clarify\",\n  \"clarification_questions\": [\n    \"What specific aspects of the project do you want to improve (e.g., code quality, performance, documentation, UI/UX)?\",\n    \"Where should the project be published once it is finished?\",\n    \"Are there any specific technical requirements or standards I should follow during the improvement process?\"\n  ],\n  \"confidence\": 1,\n  \"evidence\": [\n    {\n      \"basis\": \"The user's request to 'make this project better and publish it when finished' is critically underspecified regarding the definition of 'better' and the target publishing platform.\",\n      \"section\": \"request\"\n    }\n  ],\n  \"required_access\": \"none\",\n  \"strategy\": \"direct\",\n  \"suggested_subtasks\": []\n}",
+      "runtime_limits": {
+        "max_suggested_subtasks": 4
+      },
+      "status": "passed",
+      "usage": {
+        "input_tokens": 815,
+        "output_tokens": 195,
+        "total_tokens": 1010
+      },
+      "validated_output": {
+        "action": "clarify",
+        "clarification_questions": [
+          "What specific aspects of the project do you want to improve (e.g., code quality, performance, documentation, UI/UX)?",
+          "Where should the project be published once it is finished?",
+          "Are there any specific technical requirements or standards I should follow during the improvement process?"
+        ],
+        "confidence": 1.0,
+        "evidence": [
+          {
+            "basis": "The user's request to 'make this project better and publish it when finished' is critically underspecified regarding the definition of 'better' and the target publishing platform.",
+            "section": "request"
+          }
+        ],
+        "required_access": "none",
+        "strategy": "direct",
+        "suggested_subtasks": []
+      }
+    },
+    {
+      "candidate_output": {
+        "action": "inspect",
+        "clarification_questions": [],
+        "confidence": 1.0,
+        "evidence": [
+          {
+            "basis": "The user wants to perform a read-only inspection of specific areas (event logs, LM Studio security, and permission boundaries) without making any modifications.",
+            "section": "request"
+          }
+        ],
+        "required_access": "read_only",
+        "strategy": "delegate",
+        "suggested_subtasks": [
+          {
+            "acceptance_criteria": [
+              "A summary report of event log implementation within the specified crates is produced."
+            ],
+            "depends_on": [],
+            "id": "audit_event_logs",
+            "objective": "Review event logging mechanisms in the repository.",
+            "required_access": "read_only"
+          },
+          {
+            "acceptance_criteria": [
+              "A summary report detailing LM Studio security configurations and potential vulnerabilities found is produced."
+            ],
+            "depends_on": [],
+            "id": "audit_lm_studio_security",
+            "objective": "Inspect LM Studio security settings.",
+            "required_access": "read_only"
+          },
+          {
+            "acceptance_criteria": [
+              "A summary report of permission boundary enforcement and isolation logic is produced."
+            ],
+            "depends_on": [],
+            "id": "audit_permission_boundaries",
+            "objective": "Review permission boundaries and privilege isolation.",
+            "required_access": "read_only"
+          }
+        ]
+      },
+      "eval": "semantic-router.arabic-delegation@1",
+      "expected": {
+        "action": "inspect",
+        "clarification_questions": {
+          "maximum": 0,
+          "minimum": 0
+        },
+        "forbidden_evidence_sections": [],
+        "required_access": "read_only",
+        "required_evidence_sections": [
+          "request",
+          "repository"
+        ],
+        "strategy": "delegate",
+        "suggested_subtasks": {
+          "maximum": 4,
+          "minimum": 2
+        }
+      },
+      "failure": {
+        "evidence": null,
+        "message": "evidence did not cite required section \"repository\"",
+        "stage": "semantic_expectations"
+      },
+      "finish_reason": "stop",
+      "inference_evidence": {
+        "backend_id": "lmstudio",
+        "completion_id": "chatcmpl-nc2qsrtbd8qf7s2lkxdaan",
+        "endpoint": "http://127.0.0.1:1234/v1/chat/completions",
+        "raw_response": {
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "logprobs": null,
+              "message": {
+                "content": "{\n  \"action\": \"inspect\",\n  \"clarification_questions\": [],\n  \"confidence\": 1,\n  \"evidence\": [\n    {\n      \"basis\": \"The user wants to perform a read-only inspection of specific areas (event logs, LM Studio security, and permission boundaries) without making any modifications.\",\n      \"section\": \"request\"\n    }\n  ],\n  \"required_access\": \"read_only\",\n  \"strategy\": \"delegate\",\n  \"suggested_subtasks\": [\n    {\n      \"acceptance_criteria\": [\n        \"A summary report of event log implementation within the specified crates is produced.\"\n      ],\n      \"depends_on\": [],\n      \"id\": \"audit_event_logs\",\n      \"objective\": \"Review event logging mechanisms in the repository.\",\n      \"required_access\": \"read_only\"\n    },\n    {\n      \"acceptance_criteria\": [\n        \"A summary report detailing LM Studio security configurations and potential vulnerabilities found is produced.\"\n      ],\n      \"depends_on\": [],\n      \"id\": \"audit_lm_studio_security\",\n      \"objective\": \"Inspect LM Studio security settings.\",\n      \"required_access\": \"read_only\"\n    },\n    {\n      \"acceptance_criteria\": [\n        \"A summary report of permission boundary enforcement and isolation logic is produced.\"\n      ],\n      \"depends_on\": [],\n      \"id\": \"audit_permission_boundaries\",\n      \"objective\": \"Review permission boundaries and privilege isolation.\",\n      \"required_access\": \"read_only\"\n    }\n  ]\n}",
+                "reasoning_content": "",
+                "role": "assistant",
+                "tool_calls": []
+              }
+            }
+          ],
+          "created": 1784421842,
+          "id": "chatcmpl-nc2qsrtbd8qf7s2lkxdaan",
+          "model": "google/gemma-4-26b-a4b",
+          "object": "chat.completion",
+          "stats": {},
+          "system_fingerprint": "google/gemma-4-26b-a4b",
+          "usage": {
+            "completion_tokens": 383,
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            },
+            "prompt_tokens": 981,
+            "total_tokens": 1364
+          }
+        },
+        "status": 200
+      },
+      "model": "google/gemma-4-26b-a4b",
+      "provenance": {
+        "case_content_sha256": "78c4ee878d459675ea4a01579e17093ee64c90b313777a60cc8cdc55df2c3554",
+        "generation_schema_sha256": "7342540b23aff423ea2041d3c1a446fe0e82ae920a9817b5b0f5bdca86f21a0c",
+        "inference_endpoint_without_auth": "http://127.0.0.1:1234/v1/chat/completions",
+        "input_sha256": "4318731a69a4bac4e858c90a28d420aa891546950f7373b062ee91dcd4aa1351",
+        "manifest_content_sha256": "7e47d0ef5e186cbb30f88ae94e19681ec474d3da2c844a7cf3e2704b2a9153df"
+      },
+      "raw_assistant_text": "{\n  \"action\": \"inspect\",\n  \"clarification_questions\": [],\n  \"confidence\": 1,\n  \"evidence\": [\n    {\n      \"basis\": \"The user wants to perform a read-only inspection of specific areas (event logs, LM Studio security, and permission boundaries) without making any modifications.\",\n      \"section\": \"request\"\n    }\n  ],\n  \"required_access\": \"read_only\",\n  \"strategy\": \"delegate\",\n  \"suggested_subtasks\": [\n    {\n      \"acceptance_criteria\": [\n        \"A summary report of event log implementation within the specified crates is produced.\"\n      ],\n      \"depends_on\": [],\n      \"id\": \"audit_event_logs\",\n      \"objective\": \"Review event logging mechanisms in the repository.\",\n      \"required_access\": \"read_only\"\n    },\n    {\n      \"acceptance_criteria\": [\n        \"A summary report detailing LM Studio security configurations and potential vulnerabilities found is produced.\"\n      ],\n      \"depends_on\": [],\n      \"id\": \"audit_lm_studio_security\",\n      \"objective\": \"Inspect LM Studio security settings.\",\n      \"required_access\": \"read_only\"\n    },\n    {\n      \"acceptance_criteria\": [\n        \"A summary report of permission boundary enforcement and isolation logic is produced.\"\n      ],\n      \"depends_on\": [],\n      \"id\": \"audit_permission_boundaries\",\n      \"objective\": \"Review permission boundaries and privilege isolation.\",\n      \"required_access\": \"read_only\"\n    }\n  ]\n}",
+      "runtime_limits": {
+        "max_suggested_subtasks": 4
+      },
+      "status": "failed",
+      "usage": {
+        "input_tokens": 981,
+        "output_tokens": 383,
+        "total_tokens": 1364
+      }
+    }
+  ],
+  "failure": {
+    "stage": "case_evaluation",
+    "message": "5 of 9 eval cases failed",
+    "evidence": null
+  }
+}
