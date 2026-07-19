@@ -11,6 +11,7 @@ members = [
   "crates/protocol",
   "crates/runtime",
   "crates/store",
+  "crates/validation",
 ]
 
 [workspace.package]

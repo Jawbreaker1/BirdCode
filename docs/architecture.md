@@ -15,6 +15,7 @@ React/Tauri desktop ─┐
                     ├── versioned local protocol ── Rust daemon
 Rust CLI ───────────┘                               ├── agent runtime
                                                     ├── context compiler
+                                                    ├── execution/validation plane
                                                     ├── event and artifact store
                                                     ├── tool and permission broker
                                                     └── backend adapters
@@ -33,6 +34,52 @@ authentication.
 
 The distinction is represented in capabilities rather than hidden behind a
 false least-common-denominator interface.
+
+## Outcome loop and Execution & Validation Plane
+
+BirdCode's target loop is outcome-driven:
+
+```text
+goal -> semantic plan -> isolated implementation -> execute real product
+     -> collect mechanical + visual evidence -> verify -> repair/replan
+     -> staged integration -> independent review -> complete or fail
+```
+
+The Execution & Validation Plane is provider-neutral so the same versioned
+plan can exercise BirdCode, Codex, or another candidate without provider-aware
+exceptions. An explicit target combines an application surface with an
+execution platform and resolves mechanically to a registered adapter. The
+target adapter families are Playwright web, API/server, CLI, TUI, macOS desktop,
+Apple simulator, Android, Windows, and Linux.
+
+`crates/validation` currently implements only the typed foundation: explicit
+targets and a surface-plus-platform adapter inventory, lossless
+command/provenance contracts, bounded evidence, validation policy, and
+provider-blind review packages. Its immutable run manifest binds the source
+snapshot, fixture, Validation Plan, harness configuration, concrete adapter,
+permissions, and network policy into the provenance hash root. Its default
+adapter catalog is empty. It does not execute a process, launch an application,
+drive a browser/device, or claim platform support.
+
+Evidence has an enforced hierarchy. Builds, tests, exit/process state, API and
+persisted state, DOM/accessibility observations, logs, and traces are primary.
+The current crate represents screenshots, video, logs, and traces as bounded
+artifact metadata; visual metadata cannot satisfy a passing policy without
+primary non-visual evidence. It hash-binds typed actor, declared model,
+environment, command, exit, and caller-/adapter-declared artifact metadata.
+It does not capture, fetch, anonymize, or attest the referenced bytes, and
+secret-resolved byte counts remain declarations until a broker receipt exists.
+The typed foundation does not yet carry comparison-grade backend deployment,
+model revision, weights/quantization, or identity-verification evidence; that
+lineage expansion is required before the blind-comparison gate.
+
+The current blind projection creates an in-memory opaque evaluator package,
+removes provider, model, agent, command, storage-path, and raw target
+identities, and returns a separate in-memory disclosure plus a digest of the
+exact evaluator input. The caller must isolate and persist that disclosure.
+Durable validated seal reload, signatures/external anchoring, verdict lock, and
+controlled unblinding are controller work that is not implemented yet. See
+[validation.md](validation.md) and [benchmarking.md](benchmarking.md).
 
 ## Durable state
 
@@ -105,6 +152,14 @@ Writing agents use isolated worktrees or overlays. Parents receive structured
 handoffs containing evidence, artifacts, tests, risks, and unresolved work,
 not an unbounded copy of the child transcript.
 
+Model assignment and decomposition use versioned evaluation-derived profiles,
+not model-name branches. A semantic planner may compensate for a weaker model
+with smaller work orders, specialist agents, parallel candidates, more frequent
+validation, or bounded repair. The scheduler only enforces the resulting typed
+graph, permissions, isolation, and ledgers; it never parses raw task language.
+The complete target lifecycle and measurable vertical slices are specified in
+[orchestration.md](orchestration.md).
+
 ## Local transport
 
 The transport must support ordered streaming, cancellation, reconnection, and
@@ -127,9 +182,12 @@ health probes.
 
 ## Platform strategy
 
-- Phase 1: macOS on Apple Silicon, distributed outside the Mac App Store.
-- Phase 2: Windows, including process-tree and PTY adapters.
-- Phase 3: Linux, including WebKit and distribution-matrix validation.
+- Phase 1 host: macOS on Apple Silicon, distributed outside the Mac App Store.
+- First validation surfaces: bounded local processes, API/server, CLI/TUI, and
+  Playwright web on that host.
+- Native expansion: macOS desktop and Apple simulators, then Android.
+- Host expansion: Windows process/UI Automation/PTY and Linux process,
+  packaging, accessibility, and distribution-matrix adapters.
 
 Platform support means verified builds and behavior, not merely successful
 cross-compilation.

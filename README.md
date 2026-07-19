@@ -19,6 +19,12 @@ choice to an opaque service. The product direction is a complete desktop-first
 application with a shared CLI, durable long-running sessions, dynamic
 subagents, and support for both local models and external agent backends.
 
+The north-star metric is deliberately harder than feature parity: BirdCode is
+designed to produce more complete, buildable, working applications than the
+strongest available Codex Sol/Ultra baseline under fair clean-room comparison.
+That is a measured product target, not a superiority claim the current
+foundation has earned.
+
 The project is currently at the **foundation milestone**. Its local daemon,
 protocol, persistence layer, desktop health shell, CLI probes, typed prompt
 compiler, semantic router, standalone router executor, and LM Studio adapter
@@ -69,6 +75,15 @@ An LLM decides when delegation is useful; a deterministic scheduler will
 enforce concurrency, access, and resource limits. This scheduler and the actual
 subagent execution path are still roadmap work.
 
+### Validation is part of coding
+
+The target loop does not stop at generated source. Agents continuously build,
+start, operate, observe, and repair real applications through one provider-blind
+Execution & Validation Plane. Compiler/test results, exit codes, DOM and
+accessibility state, APIs, logs, traces, and persisted state are primary
+evidence. Screenshots and video support visual and UX review, but vision can
+never turn a mechanically failing result into a pass.
+
 ## Status
 
 BirdCode is pre-alpha and currently optimized and verified first on macOS with
@@ -83,6 +98,7 @@ Apple Silicon.
 | Semantic task router | Implemented standalone | LLM-classified action, access, and delegation strategy with typed collect-all validation and no heuristic fallback |
 | Standalone router executor | Implemented standalone | First-pass routing plus at most one typed, patch-only evidence repair; fake-backend tested and not daemon-wired |
 | LM Studio backend | Implemented standalone | Read-only discovery plus strict structured inference with bounded HTTP behavior and versioned, retained eval reports |
+| Execution & Validation Plane | Implemented typed foundation | Composite surface/platform targets, immutable run manifests, commands, bounds, hash-linked provenance, evidence policy, and blind review packages; no process or platform adapter executes yet |
 | Agent execution loop | **Not wired** | Run specifications can be persisted, but no backend is invoked by the daemon |
 | Context compilation and compaction | Designed | Architecture and invariants are documented; runtime implementation remains |
 | Tools and permission broker | Designed | No shell or filesystem tool execution is exposed to an agent yet |
@@ -95,6 +111,8 @@ The semantic router, its portable executor, and the LM Studio backend currently
 run through standalone tests and evaluation tools. The executor is
 fake-backend validated; it is not connected to the live LM Studio eval and none
 of these components yet appears as a daemon capability in the GUI or CLI.
+The validation-plane crate likewise defines and tests contracts only; it does
+not yet run commands, launch applications, drive Playwright, or capture media.
 
 ## Proof, not promises
 
@@ -136,6 +154,7 @@ flowchart LR
     Prompting["Typed prompt compiler<br/>semantic task router"] -->|"standalone live eval"| LMStudio["LM Studio adapter"]
     Prompting --> RouterExecutor["Portable router executor<br/>one evidence-only repair"]
     RouterExecutor -->|"provider-neutral; fake-backend validated"| ModelBackend["Model backend contract"]
+    Validation["Typed validation contracts<br/>blind evidence policy"] -->|"standalone contract tests"| Blind["Provider-blind review package"]
 
     Runtime -.->|"next: real run execution"| AgentLoop["Agent loop"]
     AgentLoop -.-> Prompting
@@ -143,6 +162,8 @@ flowchart LR
     AgentLoop -.-> Context["Context compiler + compaction"]
     AgentLoop -.-> Tools["Tool + permission broker"]
     AgentLoop -.-> Scheduler["Subagent scheduler"]
+    AgentLoop -.-> Validation
+    Validation -.-> Adapters["Playwright · API · CLI/TUI<br/>desktop · simulator · Android · Windows · Linux"]
     AgentLoop -.-> Providers["Ollama · OpenAI · Codex bridge"]
 ```
 
@@ -150,8 +171,9 @@ The canonical protocol and core runtime are independent of Tauri, operating
 system APIs, and provider-specific payloads. Platform behavior belongs behind
 adapters so Windows and Linux can be added without replacing the core.
 
-More detail is available in [the target architecture](docs/architecture.md)
-and [the validation policy](docs/validation.md).
+Read the normative [product requirements](docs/product-requirements.md),
+[target architecture](docs/architecture.md), [subagent orchestration design](docs/orchestration.md),
+[validation policy](docs/validation.md), and [clean-room benchmark protocol](docs/benchmarking.md).
 
 ## Quick start on Apple Silicon
 
@@ -382,9 +404,10 @@ crates/store       SQLite event log and content-addressed artifacts
 crates/prompting   Versioned prompt registry, compiler, and semantic router
 crates/backends    Provider-neutral model contract and LM Studio adapter
 crates/orchestrator Provider-neutral standalone routing and typed repair
+crates/validation  Typed Execution & Validation Plane contracts and blind evidence policy
 prompts            Application prompt manifests and schemas
 evals              Versioned semantic evaluation cases
-docs               Target architecture and validation policy
+docs               Product, architecture, orchestration, validation, and benchmark specifications
 ```
 
 ## License status
@@ -398,19 +421,22 @@ the application's eventual license decision.
 ## Roadmap
 
 1. Wire the semantic router and LM Studio adapter into the daemon for one real,
-   observable, read-only run path.
-2. Add a durable idempotency ledger, streaming, cancellation, and resumable run
-   orchestration.
-3. Build the tool and permission broker with repository snapshots and isolated
-   write surfaces.
-4. Implement dynamic subagents with budgets, causal branches, mailboxes,
-   worktree/overlay isolation, and structured handoffs.
-5. Implement action-specific context compilation, semantic retrieval, and
+   observable, read-only agent path.
+2. Turn the typed validation foundation into one bounded local process slice
+   with durable receipts, log/artifact capture, cancellation, and resume.
+3. Add the first real Playwright adapter and prove build/start/user-journey/DOM/
+   accessibility/trace/screenshot validation on a web fixture.
+4. Build the permission broker, repository snapshots, and isolated write
+   surfaces; feed validation failures into a bounded repair loop.
+5. Implement dynamic subagents with eval-derived model profiles, budgets,
+   causal branches, parallel candidates, mailboxes, worktree isolation,
+   integration, and independent review.
+6. Implement action-specific context compilation, semantic retrieval, and
    versioned compaction checkpoints without destructive history loss.
-6. Add Ollama, OpenAI, and the clean-room local Codex bridge, then comparable
-   multi-backend evaluation.
-7. Complete the desktop run experience and verify packaging first for macOS
-   ARM64, then Windows and Linux through explicit platform adapters.
+7. Add Ollama, OpenAI, and the clean-room local Codex bridge, then run retained,
+   blind comparisons through the same validation harness.
+8. Complete the desktop run experience and verify explicit adapters for API/
+   server, CLI/TUI, macOS, Apple simulators, Android, Windows, and Linux.
 
 BirdCode's ambition is high: a complete, inspectable coding-agent system that
 can improve with better models without becoming dependent on one provider. The

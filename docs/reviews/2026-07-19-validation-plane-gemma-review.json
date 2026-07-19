@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "review_kind": "local_cross_lineage_secondary_design_review",
+  "reviewed_snapshot": {
+    "base_revision": "53f731b6bf73d6b7b02e29b1a62f5990f65f919b",
+    "instruction_sha256": "67782b68f843c73d488e0ea4795441454f28fab2ad14ce2a2eac1b8ea6553e8b",
+    "corpus_sha256": "b2d8a567e2ce4db826c913691aa2d32abe46c6c8d5e77ad3a4283b7579f27d94",
+    "files": [
+      { "path": "crates/validation/README.md", "sha256": "9c93bc23c73ddfe6ec92ce3226da07866ffd09788b3e46990566b38aff2ec64e" },
+      { "path": "crates/validation/src/lib.rs", "sha256": "543bcd3cc5eee077328fb263f21f5ac35be09611c8cc8f85b8db8e39c8654e97" },
+      { "path": "crates/validation/src/target.rs", "sha256": "1e6cef0a07f8b618f759eb8d420af1dbc5b88bee2ae947d935b29a896fe45d64" },
+      { "path": "crates/validation/src/command.rs", "sha256": "25e7d83acdd30684db3b1bb9a6e6fbe6a00e2e337328a59f0b412e3cfb7ed8a7" },
+      { "path": "crates/validation/src/evidence.rs", "sha256": "a23da4c5de62ee6d81f44279d46491658f937d14ffa3a8ba1337550ce713571f" },
+      { "path": "crates/validation/src/identity.rs", "sha256": "ce4a6926c906c1fc3fa6dac7315072ca02387f9b8a6e784e685a689072824467" },
+      { "path": "crates/validation/src/provenance.rs", "sha256": "808d731d21beb38e21b488f3eec6ac7faea6a6c0aff1d99659eb6e6a5ea29899" },
+      { "path": "crates/validation/src/blind.rs", "sha256": "8190534f3fc9f88777adc8d5526074573e8d50e3515dee8e4deda0267676b820" },
+      { "path": "crates/validation/src/validation.rs", "sha256": "0db26c5df54e5771f3a7e96a98186da86de92f6a7988304e6241764d97a9be7f" }
+    ]
+  },
+  "inference": {
+    "endpoint_class": "local_lm_studio_openai_compatible",
+    "requested_model": "google/gemma-4-26b-a4b",
+    "backend_reported_model": "google/gemma-4-26b-a4b",
+    "completion_id": "chatcmpl-r5w7rv265zrfw26pue5t9f",
+    "created_utc": "2026-07-19T04:13:01Z",
+    "temperature": 0,
+    "maximum_output_tokens": 1800,
+    "finish_reason": "stop",
+    "prompt_tokens": 44980,
+    "completion_tokens": 1007,
+    "reasoning_tokens": 0
+  },
+  "model_result": {
+    "verdict": "fail",
+    "findings": [
+      {
+        "severity": "P0",
+        "symbol": "provenance::is_appendable_prefix",
+        "summary": "The model claimed interleaved attempts could bypass the phase barrier."
+      },
+      {
+        "severity": "P1",
+        "symbol": "validation::validate_environment_snapshot",
+        "summary": "The model claimed saturating byte accumulation could bypass the final bound."
+      },
+      {
+        "severity": "P1",
+        "symbol": "target::reject_credentialed_url",
+        "summary": "The model requested heuristic detection of secrets in URL hosts or other components."
+      },
+      {
+        "severity": "P1",
+        "symbol": "command::EnvironmentValue::resolved_bytes",
+        "summary": "The model claimed usize-to-u64 fail-closed conversion could game resource accounting."
+      },
+      {
+        "severity": "P2",
+        "symbol": "evidence::Sha256Digest::parse_hex",
+        "summary": "The model suggested more granular uppercase-versus-invalid-hex diagnostics."
+      }
+    ]
+  },
+  "adjudication": {
+    "verdict": "go_no_open_p0_p1",
+    "findings": [
+      {
+        "model_finding": "phase_barrier_bypass",
+        "decision": "rejected",
+        "reason": "The append validator rejects ordinal regression and rejects advancement while any attempt in the previous phase remains open. Dedicated phase-regression and all-open-attempt barrier tests pass."
+      },
+      {
+        "model_finding": "saturating_accumulation_bypass",
+        "decision": "rejected",
+        "reason": "Saturation produces u64::MAX, which is fail-closed against every finite configured ceiling. Pre-deserialization allocation is separately documented as an integration boundary."
+      },
+      {
+        "model_finding": "semantic_url_secret_detection",
+        "decision": "rejected",
+        "reason": "Userinfo and passwords are rejected mechanically. Guessing whether arbitrary host, path, or query text is a secret would introduce the brittle semantic heuristic the architecture prohibits; typed broker integration is the declared next gate."
+      },
+      {
+        "model_finding": "usize_conversion_resource_bypass",
+        "decision": "rejected",
+        "reason": "The supported 64-bit targets cannot represent a usize larger than u64. The fallback is u64::MAX and therefore fail-closed under finite bounds."
+      },
+      {
+        "model_finding": "digest_error_granularity",
+        "decision": "non_blocking_p2",
+        "reason": "Canonical parsing is correct; splitting one diagnostic variant would improve ergonomics but not correctness or security."
+      }
+    ],
+    "limitations_retained": [
+      "Artifact bytes are not fetched or attested by the typed crate.",
+      "Blind disclosure and the consuming seal are in-memory and not externally anchored.",
+      "Callers must enforce a transport frame limit before deserialization."
+    ]
+  }
+}
