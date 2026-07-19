@@ -16,7 +16,8 @@ pub use compiler::{
 };
 pub use manifest::{
     MANIFEST_SCHEMA_JSON, PromptError, PromptId, PromptKey, PromptManifest, PromptRegistry,
-    PromptRole, TASK_ROUTER_MANIFEST_JSON, builtin_registry, parse_manifest,
+    PromptRole, TASK_ROUTER_MANIFEST_JSON, TASK_ROUTER_MANIFEST_V1_0_0_JSON, builtin_registry,
+    parse_manifest,
 };
 pub use router::{
     RequiredAccess, RouteAction, RouteEvidence, RouteStrategy, SuggestedSubtask, TaskRouterOutput,

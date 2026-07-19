@@ -1,0 +1,19 @@
+{
+  "id": "semantic-router.irrelevant-repository-answer",
+  "version": 1,
+  "user_request": "Explain the distinction between an append-only event log and a mutable snapshot in general terms.",
+  "repository_context": {
+    "path": "docs/desktop-theme.txt",
+    "content": "The desktop accent color is green and the default window width is 1080 pixels."
+  },
+  "expected_action": "answer",
+  "expected_strategy": "direct",
+  "expected_required_access": "none",
+  "required_evidence_sections": ["request"],
+  "forbidden_evidence_sections": ["repository"],
+  "min_clarification_questions": 0,
+  "max_clarification_questions": 0,
+  "min_suggested_subtasks": 0,
+  "max_suggested_subtasks": 0,
+  "max_output_tokens": 320
+}

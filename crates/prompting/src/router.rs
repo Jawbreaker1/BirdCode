@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
+const TASK_ROUTER_ID: &str = "birdcode.semantic-task-router";
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RouteAction {
@@ -57,7 +59,7 @@ pub struct TaskRouterOutput {
     pub suggested_subtasks: Vec<SuggestedSubtask>,
 }
 
-/// Returns the stable key of the bundled semantic task router.
+/// Returns the stable key of the latest bundled semantic task router.
 ///
 /// # Panics
 ///
@@ -65,10 +67,13 @@ pub struct TaskRouterOutput {
 #[must_use]
 pub fn task_router_key() -> PromptKey {
     PromptKey::new(
-        PromptId::new("birdcode.semantic-task-router")
-            .expect("bundled prompt identifier must be valid"),
-        Version::new(1, 0, 0),
+        PromptId::new(TASK_ROUTER_ID).expect("bundled prompt identifier must be valid"),
+        Version::new(1, 1, 0),
     )
+}
+
+pub(crate) fn is_task_router_key(key: &PromptKey) -> bool {
+    key.id.as_str() == TASK_ROUTER_ID
 }
 
 pub(crate) fn validate_router_output(

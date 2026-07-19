@@ -10,8 +10,10 @@ use std::fmt;
 use thiserror::Error;
 
 pub const MANIFEST_SCHEMA_JSON: &str = include_str!("../schemas/prompt-manifest.schema.json");
-pub const TASK_ROUTER_MANIFEST_JSON: &str =
+pub const TASK_ROUTER_MANIFEST_V1_0_0_JSON: &str =
     include_str!("../../../prompts/semantic-task-router/1.0.0/manifest.json");
+pub const TASK_ROUTER_MANIFEST_JSON: &str =
+    include_str!("../../../prompts/semantic-task-router/1.1.0/manifest.json");
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
 #[derive(Debug, Error)]
@@ -213,7 +215,10 @@ pub fn parse_manifest(bytes: &[u8]) -> Result<PromptManifest, PromptError> {
 ///
 /// Returns an error if a bundled manifest is invalid or duplicated.
 pub fn builtin_registry() -> Result<PromptRegistry, PromptError> {
-    PromptRegistry::new([parse_manifest(TASK_ROUTER_MANIFEST_JSON.as_bytes())?])
+    PromptRegistry::new([
+        parse_manifest(TASK_ROUTER_MANIFEST_V1_0_0_JSON.as_bytes())?,
+        parse_manifest(TASK_ROUTER_MANIFEST_JSON.as_bytes())?,
+    ])
 }
 
 #[derive(Clone, Debug, Default)]
@@ -290,7 +295,7 @@ impl PromptRegistry {
             .ok_or_else(|| PromptError::PromptNotFound(key.clone()))?;
         compiled.validate_against(manifest, invocation)?;
         validate_value(&manifest.output_schema, value, "model output")?;
-        if key == &crate::router::task_router_key() {
+        if crate::router::is_task_router_key(key) {
             let input_sections = invocation
                 .sections
                 .iter()

@@ -1,8 +1,8 @@
 use birdcode_prompting::{
     CanonicalJson, CompiledPrompt, DataProvenance, DataSection, MessageContent, MessageRole,
     PromptError, PromptInvocation, PromptLimits, PromptRegistry, RequiredAccess, RouteAction,
-    RouteStrategy, SourceKind, TASK_ROUTER_MANIFEST_JSON, TaskRouterOutput, TrustLevel,
-    builtin_registry, parse_manifest, task_router_key,
+    RouteStrategy, SourceKind, TASK_ROUTER_MANIFEST_JSON, TASK_ROUTER_MANIFEST_V1_0_0_JSON,
+    TaskRouterOutput, TrustLevel, builtin_registry, parse_manifest, task_router_key,
 };
 use serde_json::{Value, json};
 
@@ -90,8 +90,20 @@ fn bundled_manifest_and_programmatic_registration_are_fully_validated() {
     assert_eq!(manifest.key(), task_router_key());
     assert_eq!(
         manifest.content_sha256().expect("manifest should hash"),
+        "ccb5f747ccbb523e7d8f70a6e91cfe0df0fd024e9490fdbac306ecaac453eee7"
+    );
+    let legacy = parse_manifest(TASK_ROUTER_MANIFEST_V1_0_0_JSON.as_bytes())
+        .expect("legacy bundled manifest should validate");
+    assert_eq!(legacy.version.to_string(), "1.0.0");
+    assert_eq!(
+        legacy
+            .content_sha256()
+            .expect("legacy manifest should hash"),
         "3cad4a0b7200ea36b3cbdd74eef222eb3b14d9e12191aeb6a9f4e16c78c9be29"
     );
+    let bundled = builtin_registry().expect("all bundled versions should register");
+    assert!(bundled.get(&legacy.key()).is_some());
+    assert!(bundled.get(&task_router_key()).is_some());
 
     let duplicate = PromptRegistry::new([manifest.clone(), manifest.clone()])
         .expect_err("duplicate id/version should fail");
@@ -139,6 +151,77 @@ fn bundled_manifest_and_programmatic_registration_are_fully_validated() {
         PromptRegistry::new([invalid_directive]),
         Err(PromptError::GenerationSchemaDirective(_))
     ));
+}
+
+#[test]
+fn latest_router_generation_contract_requires_evidence_and_subtask_completion_criteria() {
+    let manifest =
+        parse_manifest(TASK_ROUTER_MANIFEST_JSON.as_bytes()).expect("manifest should parse");
+    assert_eq!(
+        manifest
+            .generation_schema
+            .pointer("/properties/evidence/minItems"),
+        Some(&json!(1))
+    );
+    assert_eq!(
+        manifest.generation_schema.pointer(
+            "/properties/suggested_subtasks/items/properties/acceptance_criteria/minItems"
+        ),
+        Some(&json!(1))
+    );
+    assert!(
+        manifest
+            .system_policy
+            .contains("every named section whose payload materially affects")
+    );
+    assert!(
+        manifest
+            .system_policy
+            .contains("never emit an empty acceptance_criteria array")
+    );
+    assert!(
+        manifest
+            .system_policy
+            .contains("briefly paraphrase the relevant fact and explain how it affected the route")
+    );
+}
+
+#[test]
+fn legacy_router_version_keeps_authoritative_router_invariants() {
+    let registry = builtin_registry().expect("registry should load");
+    let legacy = parse_manifest(TASK_ROUTER_MANIFEST_V1_0_0_JSON.as_bytes())
+        .expect("legacy manifest should parse");
+    let invocation = routing_invocation();
+    let compiled = registry
+        .compile(&legacy.key(), &invocation)
+        .expect("legacy invocation should compile");
+    let mut unknown_evidence = valid_delegate_output();
+    unknown_evidence["evidence"][0]["section"] = json!("missing");
+    assert!(matches!(
+        registry.validate_output(&compiled, &invocation, &unknown_evidence),
+        Err(PromptError::OutputInvariant(_))
+    ));
+}
+
+#[test]
+fn every_bundled_router_version_rejects_empty_subtask_acceptance_criteria() {
+    let registry = builtin_registry().expect("registry should load");
+    let legacy = parse_manifest(TASK_ROUTER_MANIFEST_V1_0_0_JSON.as_bytes())
+        .expect("legacy manifest should parse");
+    let invocation = routing_invocation();
+    for key in [legacy.key(), task_router_key()] {
+        let compiled = registry
+            .compile(&key, &invocation)
+            .expect("router invocation should compile");
+        let mut empty_criteria = valid_delegate_output();
+        empty_criteria["suggested_subtasks"][0]["acceptance_criteria"] = json!([]);
+        assert!(
+            registry
+                .validate_output(&compiled, &invocation, &empty_criteria)
+                .is_err(),
+            "{key} accepted an empty acceptance_criteria array"
+        );
+    }
 }
 
 #[test]

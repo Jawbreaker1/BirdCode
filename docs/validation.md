@@ -34,7 +34,8 @@ qualities are judged blind from a structured rubric with evidence references.
 The bundled semantic-router catalog covers clarify, answer, inspect, and change
 actions; direct and delegated strategies; read-only and write access; genuine
 English, Japanese, and Arabic intent; multilingual data; repository prompt
-injection; and a zero-delegation limit. Acceptance includes required evidence
+injection; irrelevant repository context that must not be cited; and a
+zero-delegation limit. Acceptance includes required and forbidden evidence
 sections and bounded clarification/subtask counts in addition to the three
 route axes. Its pure catalog and comparison tests live in a normal Cargo test
 target and therefore run under `cargo test --workspace`.

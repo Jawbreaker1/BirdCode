@@ -27,7 +27,7 @@ use url::Url;
 const DEFAULT_URL: &str = "http://127.0.0.1:1234/";
 const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 const ROUTER_MAX_CLARIFICATION_QUESTIONS: u32 = 3;
-const EVAL_CATALOG: &str = include_str!("../../../evals/semantic-router/catalog.v1.json");
+const EVAL_CATALOG: &str = include_str!("../../../evals/semantic-router/catalog.v2.json");
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -48,6 +48,8 @@ struct EvalCase {
     expected_strategy: RouteStrategy,
     expected_required_access: RequiredAccess,
     required_evidence_sections: Vec<String>,
+    #[serde(default)]
+    forbidden_evidence_sections: Vec<String>,
     min_clarification_questions: u32,
     max_clarification_questions: u32,
     min_suggested_subtasks: u32,
@@ -484,6 +486,7 @@ fn expected_case(case: &EvalCase) -> Value {
         "strategy": case.expected_strategy,
         "required_access": case.expected_required_access,
         "required_evidence_sections": case.required_evidence_sections,
+        "forbidden_evidence_sections": case.forbidden_evidence_sections,
         "clarification_questions": {
             "minimum": case.min_clarification_questions,
             "maximum": case.max_clarification_questions,
@@ -594,6 +597,11 @@ fn expectation_mismatches(case: &EvalCase, output: &TaskRouterOutput) -> Vec<Str
             mismatches.push(format!(
                 "evidence did not cite required section {required:?}"
             ));
+        }
+    }
+    for forbidden in &case.forbidden_evidence_sections {
+        if evidence_sections.contains(forbidden.as_str()) {
+            mismatches.push(format!("evidence cited forbidden section {forbidden:?}"));
         }
     }
     check_count(
@@ -988,7 +996,7 @@ fn inference_endpoint_without_auth(base_url: &Url) -> Result<String, io::Error> 
 
 fn load_cases() -> Result<Vec<EvalCase>, Box<dyn Error>> {
     let catalog: EvalCatalog = serde_json::from_str(EVAL_CATALOG)?;
-    if catalog.catalog_version != 1 || catalog.cases.is_empty() {
+    if catalog.catalog_version != 2 || catalog.cases.is_empty() {
         return Err(io::Error::other("unsupported or empty semantic-router eval catalog").into());
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../evals/semantic-router");
@@ -1013,14 +1021,31 @@ fn validate_case_expectations(case: &EvalCase) -> Result<(), Box<dyn Error>> {
     } else {
         ["request"].as_slice()
     };
+    let required_evidence = case
+        .required_evidence_sections
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let forbidden_evidence = case
+        .forbidden_evidence_sections
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
     if case.required_evidence_sections.is_empty()
+        || required_evidence.len() != case.required_evidence_sections.len()
+        || forbidden_evidence.len() != case.forbidden_evidence_sections.len()
         || case
             .required_evidence_sections
             .iter()
             .any(|section| !available_sections.contains(&section.as_str()))
+        || case
+            .forbidden_evidence_sections
+            .iter()
+            .any(|section| !available_sections.contains(&section.as_str()))
+        || !required_evidence.is_disjoint(&forbidden_evidence)
     {
         return Err(io::Error::other(format!(
-            "eval {} has invalid required_evidence_sections",
+            "eval {} has invalid evidence section expectations",
             case.id
         ))
         .into());
@@ -1293,6 +1318,12 @@ mod tests {
                     RequiredAccess::None,
                 ),
                 (
+                    "semantic-router.irrelevant-repository-answer",
+                    RouteAction::Answer,
+                    RouteStrategy::Direct,
+                    RequiredAccess::None,
+                ),
+                (
                     "semantic-router.zero-delegation-read-only",
                     RouteAction::Inspect,
                     RouteStrategy::Direct,
@@ -1362,6 +1393,41 @@ mod tests {
         assert!(expectation_mismatches(&cases[0], &output).is_empty());
         output.required_access = RequiredAccess::WorkspaceWrite;
         assert!(!expectation_mismatches(&cases[0], &output).is_empty());
+    }
+
+    #[test]
+    fn irrelevant_repository_case_rejects_cite_all_evidence() {
+        let cases = load_cases().expect("bundled eval catalog should load");
+        let case = cases
+            .iter()
+            .find(|case| case.id == "semantic-router.irrelevant-repository-answer")
+            .expect("irrelevant repository case should exist");
+        assert_eq!(case.required_evidence_sections, ["request"]);
+        assert_eq!(case.forbidden_evidence_sections, ["repository"]);
+
+        let mut output: TaskRouterOutput = serde_json::from_value(serde_json::json!({
+            "action": "answer",
+            "strategy": "direct",
+            "required_access": "none",
+            "confidence": 0.9,
+            "evidence": [
+                { "section": "request", "basis": "The request asks for a general explanation." }
+            ],
+            "clarification_questions": [],
+            "suggested_subtasks": []
+        }))
+        .expect("test output should decode");
+        assert!(expectation_mismatches(case, &output).is_empty());
+
+        output.evidence.push(birdcode_prompting::RouteEvidence {
+            section: "repository".to_owned(),
+            basis: "Unrelated repository content.".to_owned(),
+        });
+        assert!(
+            expectation_mismatches(case, &output)
+                .iter()
+                .any(|mismatch| mismatch.contains("forbidden section"))
+        );
     }
 
     #[test]

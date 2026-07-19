@@ -195,13 +195,14 @@ Use the exact Git commit or immutable source-snapshot identifier for
 location precisely in `VERSION_SOURCE` (for example, `LM Studio About dialog`);
 the discovery API does not report the application version itself.
 
-The current eight-case catalog covers multilingual delegation, clarification
+The current nine-case catalog covers multilingual delegation, clarification
 instead of unsafe guessing, repository prompt injection, direct informational
-answers, zero-delegation read-only work, an English direct-change request that
-requires workspace write access, intent-bearing Japanese clarification, and
-intent-bearing Arabic delegation. Expectations include required evidence
-sections and bounded clarification/subtask counts, not only route labels. A
-single case can be selected explicitly by adding:
+answers, irrelevant repository context that must not be cited, zero-delegation
+read-only work, an English direct-change request that requires workspace write
+access, intent-bearing Japanese clarification, and intent-bearing Arabic
+delegation. Expectations include required and forbidden evidence sections and
+bounded clarification/subtask counts, not only route labels. A single case can
+be selected explicitly by adding:
 
 ```sh
 --case semantic-router.arabic-delegation
