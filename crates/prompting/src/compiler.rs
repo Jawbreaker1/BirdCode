@@ -50,11 +50,26 @@ pub struct DataSection {
     pub payload: Value,
 }
 
+/// One typed application-owned constraint supplied by the runtime.
+///
+/// Unlike [`DataSection`], these values are rendered into the immutable
+/// application-policy message. Callers must construct them from trusted typed
+/// state; user, repository, tool, and external data can never select this
+/// trust level.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeConstraint {
+    pub name: String,
+    pub payload: Value,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PromptInvocation {
     pub sections: Vec<DataSection>,
     pub limits: PromptLimits,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_constraints: Vec<RuntimeConstraint>,
 }
 
 impl PromptInvocation {
@@ -63,12 +78,32 @@ impl PromptInvocation {
         Self {
             sections,
             limits: PromptLimits::DEFAULT,
+            runtime_constraints: Vec::new(),
         }
     }
 
     #[must_use]
     pub const fn with_limits(sections: Vec<DataSection>, limits: PromptLimits) -> Self {
-        Self { sections, limits }
+        Self {
+            sections,
+            limits,
+            runtime_constraints: Vec::new(),
+        }
+    }
+
+    /// Adds application-owned constraints without promoting any data section
+    /// into policy.
+    #[must_use]
+    pub fn with_runtime_constraints(
+        sections: Vec<DataSection>,
+        limits: PromptLimits,
+        runtime_constraints: Vec<RuntimeConstraint>,
+    ) -> Self {
+        Self {
+            sections,
+            limits,
+            runtime_constraints,
+        }
     }
 }
 
@@ -158,6 +193,8 @@ pub struct CompiledMessage {
 pub struct CompiledPrompt {
     pub manifest: ManifestProvenance,
     pub limits: PromptLimits,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_constraints: Vec<RuntimeConstraint>,
     pub input_sections: Vec<String>,
     pub messages: Vec<CompiledMessage>,
     pub generation_schema: Value,
@@ -179,6 +216,14 @@ impl CompiledPrompt {
             content_sha256: manifest.content_sha256()?,
         };
         let mut messages = Vec::with_capacity(invocation.sections.len() + 2);
+        let runtime_constraints = if invocation.runtime_constraints.is_empty() {
+            serde_json::json!({ "limits": invocation.limits })
+        } else {
+            serde_json::json!({
+                "limits": invocation.limits,
+                "constraints": invocation.runtime_constraints
+            })
+        };
         messages.push(CompiledMessage {
             role: MessageRole::System,
             trust: TrustLevel::ApplicationPolicy,
@@ -193,9 +238,7 @@ impl CompiledPrompt {
             provenance: MessageProvenance::RuntimeConstraints {
                 manifest: manifest_provenance.clone(),
             },
-            content: MessageContent::Json(CanonicalJson::new(serde_json::json!({
-                "limits": invocation.limits
-            }))),
+            content: MessageContent::Json(CanonicalJson::new(runtime_constraints)),
         });
         for section in &invocation.sections {
             messages.push(CompiledMessage {
@@ -210,6 +253,7 @@ impl CompiledPrompt {
         Ok(Self {
             manifest: manifest_provenance,
             limits: invocation.limits,
+            runtime_constraints: invocation.runtime_constraints.clone(),
             input_sections: invocation
                 .sections
                 .iter()
@@ -290,6 +334,19 @@ fn expand_generation_directives(
 }
 
 fn validate_invocation_boundaries(invocation: &PromptInvocation) -> Result<(), PromptError> {
+    let mut constraint_names = BTreeSet::new();
+    for constraint in &invocation.runtime_constraints {
+        if constraint.name.trim().is_empty() || constraint.name.len() > 128 {
+            return Err(PromptError::InvalidRuntimeConstraint(
+                constraint.name.clone(),
+            ));
+        }
+        if !constraint_names.insert(constraint.name.clone()) {
+            return Err(PromptError::DuplicateRuntimeConstraint(
+                constraint.name.clone(),
+            ));
+        }
+    }
     let mut names = BTreeSet::new();
     for section in &invocation.sections {
         if section.name.trim().is_empty() || section.provenance.source_id.trim().is_empty() {

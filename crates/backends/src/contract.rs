@@ -492,6 +492,8 @@ pub struct InferenceEvidence {
     pub endpoint: String,
     pub status: u16,
     pub completion_id: Option<String>,
+    /// SHA-256 of the exact response body bytes received from the provider.
+    pub response_body_sha256: Option<String>,
     pub raw_response: Value,
 }
 

@@ -399,6 +399,7 @@ impl LmStudioBackend {
                 endpoint: http.endpoint,
                 status: http.status,
                 completion_id: completion.id,
+                response_body_sha256: Some(sha256_bytes(&http.body)),
                 raw_response,
             },
         })

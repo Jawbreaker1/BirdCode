@@ -92,6 +92,7 @@ fn response(value: Value) -> StructuredInferenceResponse {
             endpoint: "fake://structured-inference".to_owned(),
             status: 200,
             completion_id: Some("completion-1".to_owned()),
+            response_body_sha256: Some("0".repeat(64)),
             raw_response: json!({"provider_envelope": "retained"}),
         },
     }
@@ -395,7 +396,8 @@ async fn initial_response_contract_violations_are_retained_before_fail_closed() 
         assert_eq!(records.len(), 1);
         assert!(matches!(
             &records[0].attempt,
-            RetainedInferenceAttempt::Response { response } if response == &retained_response
+            RetainedInferenceAttempt::Response { response }
+                if response.as_ref() == &retained_response
         ));
     }
 }
@@ -429,7 +431,8 @@ async fn repair_response_contract_violations_are_retained_without_a_third_call()
         assert_eq!(records.len(), 2);
         assert!(matches!(
             &records[1].attempt,
-            RetainedInferenceAttempt::Response { response } if response == &retained_response
+            RetainedInferenceAttempt::Response { response }
+                if response.as_ref() == &retained_response
         ));
     }
 }

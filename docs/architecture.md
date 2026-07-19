@@ -25,6 +25,24 @@ The initial build and distribution target is `aarch64-apple-darwin`. Core
 crates must compile independently from the desktop shell. Operating-system
 behavior belongs behind platform adapters in the runtime.
 
+### Current product-wired slice
+
+Protocol v4 currently connects both desktop and CLI to a durable daemon-owned
+`PlanOnly` supervisor. It discovers an exact already-loaded LM Studio model,
+compiles one versioned root-planner turn, persists the prompt and request before
+inference, records provider evidence and token use, validates the returned
+`Plan`/`Clarify`/`Escalate` proposal against independently compiled obligations
+and authority, and exposes verified replay/artifacts to the caller. Claims,
+deadlines, cancellation, bounded durable dispatch, and restart recovery are
+mechanical runtime concerns rather than model decisions.
+
+This is intentionally narrower than the durable root-actor capability gate in
+the product requirements. The context contains repository identity and user
+input but no repository observations; there are no live tools, work-order
+execution, child actors, replanning from evidence, or independent semantic
+critic. A structurally valid but semantically poor plan can therefore pass the
+current mechanical gate.
+
 ## Backend taxonomy
 
 A model backend gives BirdCode control over the agent loop. Initial examples
@@ -166,19 +184,24 @@ The transport must support ordered streaming, cancellation, reconnection, and
 protocol-version negotiation. Its public types live in `crates/protocol`.
 Transport-specific code must not leak into runtime domain types.
 
-Protocol v2 encodes workspace paths with a separately versioned wire value:
+Protocol v4 encodes workspace paths with a separately versioned wire value:
 Unix paths carry their exact bytes and Windows paths carry exact UTF-16 code
 units. This avoids forcing either representation through Unicode text, so
 non-UTF-8 POSIX names and unpaired Windows surrogates survive canonical JSON
 round trips. A foreign-family path remains valid protocol data but must not be
 converted to a native `PathBuf` on an incompatible host.
 
-Mutating requests require a client-stable idempotency key whose result is
-recorded atomically with its state change. A lost response may be replayed with
-the same key, but an unknown mutation is never retried under a new key. The
-foundation protocol currently correlates request IDs but does not yet implement
-this durable operation ledger, so automatic reconnect is limited to read-only
-health probes.
+Mutating requests require a client-stable identity whose result is recorded
+atomically with its state change. `CreateRun` in protocol v4 uses a
+client-allocated run ID and accepts replay of the same decoded typed `RunSpec`
+while rejecting reuse with a different spec. Cancellation records one stable
+server-generated cancellation identity for the run. The client classifies
+definitely-unsent, authoritative rejection, and ambiguous outcomes separately.
+It reconnects at most once and replays only the exact retained `CreateRun`;
+generic mutations and `CreateSession` are never replayed.
+The native desktop keeps that pending identity and exposes an explicit typed
+reconciliation action while the process remains alive. Reattaching that run
+after a complete desktop restart is still incomplete.
 
 ## Platform strategy
 

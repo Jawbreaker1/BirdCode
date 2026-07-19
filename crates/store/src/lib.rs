@@ -1,8 +1,10 @@
 //! Durable append-only storage for `BirdCode` sessions, runs, events, and artifacts.
 
 use birdcode_protocol::{
-    ActorId, ArtifactRef, EventEnvelope, EventId, EventPayload, InputItem, NewEvent, Provenance,
-    Run, RunId, RunState, Session, SessionId, WorkspacePath,
+    ActorId, ArtifactRef, EventEnvelope, EventId, EventPayload, InferenceAttemptId, InputItem,
+    NewEvent, PlanProposalRejectionReason, Provenance, RetryDisposition, RootPlanningFailed,
+    RootPlanningFailurePhase, RootPlanningFailureReason, Run, RunId, RunPurpose, RunState, Session,
+    SessionId, Sha256Digest, WorkspacePath,
 };
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -324,6 +326,9 @@ pub const EVENT_PAGE_SIZE: u32 = 512;
 /// Maximum encoded event JSON retained in one sequential page.
 pub const EVENT_PAGE_BYTES: usize = 1024 * 1024;
 
+/// Maximum nonterminal runs returned in one deterministic recovery page.
+pub const RUN_RECOVERY_PAGE_SIZE: u32 = 256;
+
 /// Inline event payload ceiling. Larger backend data must be stored as a
 /// content-addressed artifact and referenced from the event.
 pub const MAX_INLINE_EVENT_BYTES: usize = 256 * 1024;
@@ -338,6 +343,15 @@ pub struct EventPage {
     pub next_sequence: u64,
     pub has_more: bool,
     pub encoded_bytes: usize,
+}
+
+/// A bounded, deterministic page of materialized nonterminal runs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunRecoveryPage {
+    pub runs: Vec<Run>,
+    /// Exclusive run-id cursor for the next page.
+    pub next_run_id: Option<RunId>,
+    pub has_more: bool,
 }
 
 #[derive(Debug, Error)]
@@ -373,6 +387,18 @@ pub enum StoreError {
 }
 
 impl StoreError {
+    /// Reports a transactional uniqueness or integrity conflict. Callers must
+    /// re-read authoritative state before deciding whether an operation was
+    /// an idempotent replay or a genuinely conflicting request.
+    #[must_use]
+    pub fn is_conflict(&self) -> bool {
+        matches!(
+            self,
+            Self::Database(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::ConstraintViolation
+        )
+    }
+
     /// Reports whether retrying the same operation can plausibly succeed
     /// without changing the database or input.
     #[must_use]
@@ -594,7 +620,7 @@ impl Store {
             return Ok(None);
         };
         let state = state.ok_or(StoreError::InvalidStateEvent)?;
-        let mut run = serde_json::from_str::<Run>(&json)?;
+        let mut run = decode_stored_run(&json)?;
         run.state = decode_run_state(&state)?;
         Ok(Some(run))
     }
@@ -681,6 +707,146 @@ impl Store {
             next_sequence,
             has_more,
             encoded_bytes,
+        })
+    }
+
+    /// Loads a count- and byte-bounded page of events for exactly one run.
+    /// Sequence cursors retain their session-global values, so causal and
+    /// provenance ordering is identical to [`Self::events_after`] without a
+    /// supervisor scanning unrelated runs in the same session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the run is unknown, a stored event is oversized,
+    /// or canonical event decoding fails.
+    pub fn events_for_run_after(
+        &self,
+        run_id: RunId,
+        sequence: u64,
+    ) -> Result<EventPage, StoreError> {
+        let session_id = self
+            .connection
+            .query_row(
+                "SELECT session_id FROM runs WHERE id = ?1",
+                [run_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(StoreError::InvalidStateEvent)?;
+        let mut statement = self.connection.prepare(
+            "SELECT sequence,
+                    length(CAST(value_json AS BLOB)),
+                    CASE WHEN length(CAST(value_json AS BLOB)) <= ?5
+                         THEN value_json END
+             FROM events
+             WHERE session_id = ?1 AND run_id = ?2 AND sequence > ?3
+             ORDER BY sequence ASC
+             LIMIT ?4",
+        )?;
+        let rows = statement.query_map(
+            params![
+                session_id,
+                run_id.to_string(),
+                sequence,
+                u64::from(EVENT_PAGE_SIZE) + 1,
+                MAX_INLINE_EVENT_BYTES_U64
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, u64>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )?;
+        let mut events = Vec::with_capacity(EVENT_PAGE_SIZE as usize);
+        let mut encoded_bytes = 0_usize;
+        let mut has_more = false;
+        for row in rows {
+            let (stored_sequence, stored_bytes, json) = row?;
+            if stored_bytes > MAX_INLINE_EVENT_BYTES_U64 {
+                return Err(StoreError::EventTooLarge);
+            }
+            let json = json.ok_or(StoreError::InvalidStateEvent)?;
+            if events.len() == EVENT_PAGE_SIZE as usize
+                || encoded_bytes.saturating_add(json.len()) > EVENT_PAGE_BYTES
+            {
+                has_more = true;
+                break;
+            }
+            let event = decode_canonical_event(&json)?;
+            if event.sequence != stored_sequence
+                || event.run_id != Some(run_id)
+                || event.session_id.to_string() != session_id
+            {
+                return Err(StoreError::InvalidStateEvent);
+            }
+            encoded_bytes += json.len();
+            events.push(event);
+        }
+        let next_sequence = events.last().map_or(sequence, |event| event.sequence);
+        Ok(EventPage {
+            events,
+            next_sequence,
+            has_more,
+            encoded_bytes,
+        })
+    }
+
+    /// Loads one deterministic recovery page of queued, running, or waiting
+    /// runs. Continue with [`RunRecoveryPage::next_run_id`] while `has_more`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when projection state or persisted run JSON is invalid.
+    pub fn nonterminal_runs(
+        &self,
+        after_run_id: Option<RunId>,
+    ) -> Result<RunRecoveryPage, StoreError> {
+        let after = after_run_id.map(|id| id.to_string()).unwrap_or_default();
+        let mut statement = self.connection.prepare(
+            "SELECT runs.id, runs.value_json, run_state_projection.state
+             FROM run_state_projection
+             JOIN runs
+               ON runs.id = run_state_projection.run_id
+              AND runs.session_id = run_state_projection.session_id
+             WHERE run_state_projection.state IN ('queued', 'running', 'waiting')
+               AND runs.id > ?1
+             ORDER BY runs.id ASC
+             LIMIT ?2",
+        )?;
+        let rows = statement
+            .query_map(
+                params![after, u64::from(RUN_RECOVERY_PAGE_SIZE) + 1],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let has_more = rows.len() > RUN_RECOVERY_PAGE_SIZE as usize;
+        let mut runs = Vec::with_capacity(rows.len().min(RUN_RECOVERY_PAGE_SIZE as usize));
+        for (id, json, state) in rows.into_iter().take(RUN_RECOVERY_PAGE_SIZE as usize) {
+            let mut run = decode_stored_run(&json)?;
+            if run.id.to_string() != id {
+                return Err(StoreError::InvalidStateEvent);
+            }
+            run.state = decode_run_state(&state)?;
+            if !matches!(
+                run.state,
+                RunState::Queued | RunState::Running | RunState::Waiting
+            ) {
+                return Err(StoreError::InvalidStateEvent);
+            }
+            runs.push(run);
+        }
+        Ok(RunRecoveryPage {
+            next_run_id: runs.last().map(|run| run.id),
+            runs,
+            has_more,
         })
     }
 
@@ -1077,7 +1243,7 @@ fn copy_legacy_run_batch(
             [id],
             |row| row.get::<_, String>(0),
         )?;
-        let run = serde_json::from_str::<Run>(json).map_err(|error| {
+        let run = decode_stored_run(json).map_err(|error| {
             incompatible(
                 progress.source_version,
                 format!("materialized run {id} is invalid: {error}"),
@@ -1280,10 +1446,7 @@ fn scan_legacy_event_batch(
                         |row| row.get::<_, String>(0),
                     )
                     .optional()?;
-                let materialized = materialized
-                    .as_deref()
-                    .map(serde_json::from_str::<Run>)
-                    .transpose()?;
+                let materialized = materialized.as_deref().map(decode_stored_run).transpose()?;
                 if materialized.as_ref() != Some(run) {
                     return Err(incompatible(
                         progress.source_version,
@@ -1641,7 +1804,7 @@ fn synthesize_run_before_first_dependency(
         params![run_id, session_id],
         |row| row.get::<_, String>(0),
     )?;
-    let run = serde_json::from_str::<Run>(&json)?;
+    let run = decode_stored_run(&json)?;
     if run.state != RunState::Queued {
         return Err(incompatible(
             found,
@@ -2056,7 +2219,7 @@ fn upgrade_path_event_batch(
             &format!("event {id}"),
             false,
         )?;
-        let event = serde_json::from_value::<EventEnvelope>(value).map_err(|error| {
+        let event = decode_stored_event_value(value).map_err(|error| {
             incompatible(
                 progress.source_version,
                 format!("event {id} is invalid after path migration: {error}"),
@@ -2160,7 +2323,7 @@ fn upgrade_replay_run_batch(
             transaction.query_row("SELECT session_id FROM runs WHERE id = ?1", [id], |row| {
                 row.get::<_, String>(0)
             })?;
-        let run = serde_json::from_str::<Run>(json).map_err(|error| {
+        let run = decode_stored_run(json).map_err(|error| {
             incompatible(
                 progress.source_version,
                 format!("materialized run {id} is invalid: {error}"),
@@ -2388,10 +2551,7 @@ fn upgrade_replay_event_batch(
                         |row| row.get::<_, String>(0),
                     )
                     .optional()?;
-                let materialized = materialized
-                    .as_deref()
-                    .map(serde_json::from_str::<Run>)
-                    .transpose()?;
+                let materialized = materialized.as_deref().map(decode_stored_run).transpose()?;
                 if run.state != RunState::Queued
                     || materialized.as_ref() != Some(&run)
                     || transaction.execute(
@@ -2753,7 +2913,7 @@ fn validate_legacy_payload_semantics(
         [run_id.to_string()],
         |row| row.get::<_, String>(0),
     )?;
-    let run: Run = serde_json::from_str(&run_json).map_err(|error| {
+    let run = decode_stored_run(&run_json).map_err(|error| {
         incompatible(
             found,
             format!("materialized run {run_id} is invalid: {error}"),
@@ -3593,35 +3753,1219 @@ fn validate_generic_event(
     transaction: &Transaction<'_>,
     event: &NewEvent,
 ) -> Result<(), StoreError> {
+    validate_root_planning_failure_fence(transaction, event)?;
     match &event.payload {
         EventPayload::SessionCreated { .. } | EventPayload::RunCreated { .. } => {
             Err(StoreError::InvalidStateEvent)
         }
         EventPayload::RunStateChanged { from, to } => {
-            let run_id = event.run_id.ok_or(StoreError::InvalidStateEvent)?;
-            let current = transaction
-                .query_row(
-                    "SELECT state FROM run_state_projection
-                     WHERE run_id = ?1 AND session_id = ?2",
-                    params![run_id.to_string(), event.session_id.to_string()],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?;
-            let current = current
-                .as_deref()
-                .map(decode_run_state)
-                .transpose()?
-                .ok_or(StoreError::InvalidStateEvent)?;
-            if current != *from || !valid_run_transition(*from, *to) {
-                return Err(StoreError::InvalidStateEvent);
-            }
-            Ok(())
+            validate_run_state_change(transaction, event, *from, *to)
+        }
+        EventPayload::RunClaimed(claim) => validate_run_claim(transaction, event, claim),
+        EventPayload::CancellationRequested(cancellation) => {
+            validate_cancellation(transaction, event, cancellation)
+        }
+        EventPayload::RootPlanningFailed(failure) => {
+            validate_root_planning_failed(transaction, event, failure)
+        }
+        EventPayload::PlannerInferencePrepared(prepared) => {
+            validate_planner_inference_prepared(transaction, event, prepared)
+        }
+        EventPayload::PlannerInferenceObserved(observed) => {
+            validate_planner_inference_observed(transaction, event, observed)
+        }
+        EventPayload::PlannerInferenceOutcomeUnknown(unknown) => {
+            validate_planner_inference_unknown(transaction, event, unknown)
+        }
+        EventPayload::ReadOperationPrepared(prepared) => {
+            validate_read_operation_prepared(transaction, event, prepared)
+        }
+        EventPayload::ReadOperationObserved(observed) => {
+            validate_read_operation_observed(transaction, event, observed)
+        }
+        EventPayload::PlanProposalRejected(rejected) => {
+            validate_plan_proposal_rejected(transaction, event, rejected)
+        }
+        EventPayload::PlanProposalAccepted(accepted) => {
+            validate_plan_proposal_accepted(transaction, event, accepted)
         }
         EventPayload::BackendEvent { .. } if event.run_id.is_none() => {
             Err(StoreError::InvalidStateEvent)
         }
         _ => Ok(()),
     }
+}
+
+fn validate_root_planning_failure_fence(
+    transaction: &Transaction<'_>,
+    event: &NewEvent,
+) -> Result<(), StoreError> {
+    let Some(run_id) = event.run_id else {
+        return Ok(());
+    };
+    if root_planning_failure_count(transaction, event.session_id, run_id)? == 0 {
+        return Ok(());
+    }
+    if matches!(
+        event.payload,
+        EventPayload::RunClaimed(_)
+            | EventPayload::CancellationRequested(_)
+            | EventPayload::RunStateChanged { .. }
+    ) {
+        Ok(())
+    } else {
+        Err(StoreError::InvalidStateEvent)
+    }
+}
+
+fn planner_run_id(event: &NewEvent) -> Result<RunId, StoreError> {
+    event.run_id.ok_or(StoreError::InvalidStateEvent)
+}
+
+fn current_run_state(
+    transaction: &Transaction<'_>,
+    session_id: SessionId,
+    run_id: RunId,
+) -> Result<RunState, StoreError> {
+    let state = transaction
+        .query_row(
+            "SELECT state FROM run_state_projection
+             WHERE run_id = ?1 AND session_id = ?2",
+            params![run_id.to_string(), session_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or(StoreError::InvalidStateEvent)?;
+    decode_run_state(&state)
+}
+
+fn require_nonterminal_run(
+    transaction: &Transaction<'_>,
+    event: &NewEvent,
+    run_id: RunId,
+) -> Result<RunState, StoreError> {
+    let state = current_run_state(transaction, event.session_id, run_id)?;
+    if is_terminal_run_state(state) {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    Ok(state)
+}
+
+fn require_running_run(
+    transaction: &Transaction<'_>,
+    event: &NewEvent,
+    run_id: RunId,
+) -> Result<(), StoreError> {
+    if current_run_state(transaction, event.session_id, run_id)? != RunState::Running {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    Ok(())
+}
+
+fn latest_run_event(
+    transaction: &Transaction<'_>,
+    session_id: SessionId,
+    run_id: RunId,
+) -> Result<EventEnvelope, StoreError> {
+    let json = transaction
+        .query_row(
+            "SELECT value_json FROM events
+             WHERE run_id = ?1 AND session_id = ?2
+             ORDER BY sequence DESC LIMIT 1",
+            params![run_id.to_string(), session_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or(StoreError::InvalidStateEvent)?;
+    decode_canonical_event(&json)
+}
+
+fn require_latest_run_parent(
+    transaction: &Transaction<'_>,
+    event: &NewEvent,
+    run_id: RunId,
+) -> Result<(), StoreError> {
+    let latest = latest_run_event(transaction, event.session_id, run_id)?;
+    if event.causal_parent != Some(latest.id) {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    Ok(())
+}
+
+fn event_by_id_for_run(
+    transaction: &Transaction<'_>,
+    session_id: SessionId,
+    run_id: RunId,
+    event_id: EventId,
+) -> Result<EventEnvelope, StoreError> {
+    let json = transaction
+        .query_row(
+            "SELECT value_json FROM events
+             WHERE id = ?1 AND run_id = ?2 AND session_id = ?3",
+            params![
+                event_id.to_string(),
+                run_id.to_string(),
+                session_id.to_string()
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or(StoreError::InvalidStateEvent)?;
+    decode_canonical_event(&json)
+}
+
+fn event_count_by_json_identity(
+    transaction: &Transaction<'_>,
+    event_type: &str,
+    json_path: &str,
+    identity: &str,
+) -> Result<u64, StoreError> {
+    let query = format!(
+        "SELECT COUNT(*) FROM events
+         WHERE json_extract(value_json, '$.payload.type') = ?1
+           AND json_extract(value_json, '{json_path}') = ?2"
+    );
+    transaction
+        .query_row(&query, params![event_type, identity], |row| row.get(0))
+        .map_err(StoreError::from)
+}
+
+fn latest_claim_for_run(
+    transaction: &Transaction<'_>,
+    session_id: SessionId,
+    run_id: RunId,
+) -> Result<Option<EventEnvelope>, StoreError> {
+    let json = transaction
+        .query_row(
+            "SELECT value_json FROM events
+             WHERE run_id = ?1 AND session_id = ?2
+               AND json_extract(value_json, '$.payload.type') = 'run_claimed'
+             ORDER BY sequence DESC LIMIT 1",
+            params![run_id.to_string(), session_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    json.as_deref().map(decode_canonical_event).transpose()
+}
+
+fn latest_cancellation_generation(
+    transaction: &Transaction<'_>,
+    session_id: SessionId,
+    run_id: RunId,
+) -> Result<u64, StoreError> {
+    transaction
+        .query_row(
+            "SELECT COALESCE(MAX(CAST(
+                 json_extract(value_json, '$.payload.data.cancellation_generation') AS INTEGER
+             )), 0)
+             FROM events
+             WHERE run_id = ?1 AND session_id = ?2
+               AND json_extract(value_json, '$.payload.type') = 'cancellation_requested'",
+            params![run_id.to_string(), session_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(StoreError::from)
+}
+
+fn require_active_claim_owner(
+    transaction: &Transaction<'_>,
+    event: &NewEvent,
+    run_id: RunId,
+) -> Result<EventEnvelope, StoreError> {
+    let claim_event = latest_claim_for_run(transaction, event.session_id, run_id)?
+        .ok_or(StoreError::InvalidStateEvent)?;
+    let EventPayload::RunClaimed(claim) = &claim_event.payload else {
+        return Err(StoreError::InvalidStateEvent);
+    };
+    if claim_event.actor_id != event.actor_id || claim.lease_expires_at <= Utc::now() {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    Ok(claim_event)
+}
+
+fn require_current_claim_owner(
+    transaction: &Transaction<'_>,
+    event: &NewEvent,
+    run_id: RunId,
+    cancellation_generation: u64,
+) -> Result<EventEnvelope, StoreError> {
+    let claim_event = require_active_claim_owner(transaction, event, run_id)?;
+    let EventPayload::RunClaimed(claim) = &claim_event.payload else {
+        return Err(StoreError::InvalidStateEvent);
+    };
+    let latest_cancellation =
+        latest_cancellation_generation(transaction, event.session_id, run_id)?;
+    if claim.cancellation_generation != cancellation_generation
+        || latest_cancellation != cancellation_generation
+    {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    Ok(claim_event)
+}
+
+fn require_latest_claim_owner(
+    transaction: &Transaction<'_>,
+    event: &NewEvent,
+    run_id: RunId,
+) -> Result<EventEnvelope, StoreError> {
+    let claim_event = require_active_claim_owner(transaction, event, run_id)?;
+    let EventPayload::RunClaimed(claim) = &claim_event.payload else {
+        return Err(StoreError::InvalidStateEvent);
+    };
+    let cancellation_generation =
+        latest_cancellation_generation(transaction, event.session_id, run_id)?;
+    if claim.cancellation_generation != cancellation_generation {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    Ok(claim_event)
+}
+
+fn validate_run_state_change(
+    transaction: &Transaction<'_>,
+    event: &NewEvent,
+    from: RunState,
+    to: RunState,
+) -> Result<(), StoreError> {
+    let run_id = planner_run_id(event)?;
+    if current_run_state(transaction, event.session_id, run_id)? != from
+        || !valid_run_transition(from, to)
+    {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    require_latest_run_parent(transaction, event, run_id)?;
+    let latest = latest_run_event(transaction, event.session_id, run_id)?;
+    let cancellation_generation =
+        latest_cancellation_generation(transaction, event.session_id, run_id)?;
+    if cancellation_generation > 0 && to != RunState::Cancelled {
+        return Err(StoreError::InvalidStateEvent);
+    }
+
+    if root_planning_failure_count(transaction, event.session_id, run_id)? != 0 {
+        let latest_non_claim = latest_non_claim_event(transaction, event.session_id, run_id)?;
+        match latest_non_claim.payload {
+            EventPayload::RootPlanningFailed(_) if to != RunState::Failed => {
+                return Err(StoreError::InvalidStateEvent);
+            }
+            EventPayload::CancellationRequested(_) if to != RunState::Cancelled => {
+                return Err(StoreError::InvalidStateEvent);
+            }
+            EventPayload::RootPlanningFailed(_) | EventPayload::CancellationRequested(_) => {}
+            _ => return Err(StoreError::InvalidStateEvent),
+        }
+    }
+
+    match (from, to) {
+        (RunState::Queued | RunState::Waiting, RunState::Cancelled) => {
+            if !matches!(latest.payload, EventPayload::CancellationRequested(_)) {
+                return Err(StoreError::InvalidStateEvent);
+            }
+            // The durable request, rather than an ephemeral runtime actor,
+            // authorizes terminalization. This lets a replacement runtime
+            // finish a cancellation after a crash while the latest-parent
+            // and current-state checks above still close stale histories.
+        }
+        (RunState::Queued | RunState::Waiting, RunState::Running) => {
+            if !matches!(latest.payload, EventPayload::RunClaimed(_)) {
+                return Err(StoreError::InvalidStateEvent);
+            }
+            require_latest_claim_owner(transaction, event, run_id)?;
+        }
+        (RunState::Running, RunState::Cancelled) => {
+            if cancellation_generation == 0 {
+                return Err(StoreError::InvalidStateEvent);
+            }
+            // An already-running provider call may observe cancellation after
+            // its claim was issued. The still-live owner may terminate it
+            // without first manufacturing a renewal solely to copy the new
+            // cancellation generation into the claim.
+            require_active_claim_owner(transaction, event, run_id)?;
+        }
+        _ => {
+            require_latest_claim_owner(transaction, event, run_id)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_run_claim(
+    transaction: &Transaction<'_>,
+    event: &NewEvent,
+    claim: &birdcode_protocol::RunClaimed,
+) -> Result<(), StoreError> {
+    let run_id = planner_run_id(event)?;
+    let run_state = require_nonterminal_run(transaction, event, run_id)?;
+    require_latest_run_parent(transaction, event, run_id)?;
+    if claim.claim_generation == 0
+        || claim.lease_expires_at <= Utc::now()
+        || event_count_by_json_identity(
+            transaction,
+            "run_claimed",
+            "$.payload.data.claim_id",
+            &claim.claim_id.to_string(),
+        )? != 0
+    {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    let expected_cancellation =
+        latest_cancellation_generation(transaction, event.session_id, run_id)?;
+    if claim.cancellation_generation != expected_cancellation {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    if expected_cancellation > 0 && matches!(run_state, RunState::Queued | RunState::Waiting) {
+        // Inactive runs are cancelled directly by the runtime. Refusing a new
+        // claim after the durable request prevents a claim/terminal-state race.
+        return Err(StoreError::InvalidStateEvent);
+    }
+    let previous = latest_claim_for_run(transaction, event.session_id, run_id)?;
+    let expected_generation = previous
+        .as_ref()
+        .and_then(|envelope| match &envelope.payload {
+            EventPayload::RunClaimed(previous) => previous.claim_generation.checked_add(1),
+            _ => None,
+        })
+        .unwrap_or(1);
+    if claim.claim_generation != expected_generation {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    if let Some(previous_event) = previous {
+        let EventPayload::RunClaimed(previous_claim) = previous_event.payload else {
+            return Err(StoreError::InvalidStateEvent);
+        };
+        if previous_claim.lease_expires_at > Utc::now()
+            && (previous_claim.runtime_instance_id != claim.runtime_instance_id
+                || previous_event.actor_id != event.actor_id)
+        {
+            return Err(StoreError::InvalidStateEvent);
+        }
+    }
+    let conflicting_runtime_owner = transaction.query_row(
+        "SELECT COUNT(*) FROM events
+         WHERE json_extract(value_json, '$.payload.type') = 'run_claimed'
+           AND json_extract(value_json, '$.payload.data.runtime_instance_id') = ?1
+           AND json_extract(value_json, '$.actor_id') != ?2",
+        params![
+            claim.runtime_instance_id.to_string(),
+            event.actor_id.to_string()
+        ],
+        |row| row.get::<_, u64>(0),
+    )?;
+    if conflicting_runtime_owner != 0 {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    Ok(())
+}
+
+fn validate_cancellation(
+    transaction: &Transaction<'_>,
+    event: &NewEvent,
+    cancellation: &birdcode_protocol::CancellationRequested,
+) -> Result<(), StoreError> {
+    let run_id = planner_run_id(event)?;
+    require_nonterminal_run(transaction, event, run_id)?;
+    require_latest_run_parent(transaction, event, run_id)?;
+    if cancellation.cancellation_generation != 1
+        || latest_cancellation_generation(transaction, event.session_id, run_id)? != 0
+        || event_count_by_json_identity(
+            transaction,
+            "cancellation_requested",
+            "$.payload.data.cancellation_request_id",
+            &cancellation.cancellation_request_id.to_string(),
+        )? != 0
+    {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    Ok(())
+}
+
+fn root_planning_failure_count(
+    transaction: &Transaction<'_>,
+    session_id: SessionId,
+    run_id: RunId,
+) -> Result<u64, StoreError> {
+    transaction
+        .query_row(
+            "SELECT COUNT(*) FROM events
+             WHERE run_id = ?1 AND session_id = ?2
+               AND json_extract(value_json, '$.payload.type') = 'root_planning_failed'",
+            params![run_id.to_string(), session_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(StoreError::from)
+}
+
+fn latest_non_claim_event(
+    transaction: &Transaction<'_>,
+    session_id: SessionId,
+    run_id: RunId,
+) -> Result<EventEnvelope, StoreError> {
+    let json = transaction
+        .query_row(
+            "SELECT value_json FROM events
+             WHERE run_id = ?1 AND session_id = ?2
+               AND json_extract(value_json, '$.payload.type') != 'run_claimed'
+             ORDER BY sequence DESC LIMIT 1",
+            params![run_id.to_string(), session_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or(StoreError::InvalidStateEvent)?;
+    decode_canonical_event(&json)
+}
+
+fn validate_root_planning_failed(
+    transaction: &Transaction<'_>,
+    event: &NewEvent,
+    failure: &RootPlanningFailed,
+) -> Result<(), StoreError> {
+    let run_id = planner_run_id(event)?;
+    require_running_run(transaction, event, run_id)?;
+    require_latest_run_parent(transaction, event, run_id)?;
+    if failure.cancellation_generation != 0
+        || root_planning_failure_count(transaction, event.session_id, run_id)? != 0
+        || !valid_root_planning_failure_classification(failure.phase, failure.reason)
+    {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    let inference_count = transaction.query_row(
+        "SELECT COUNT(*) FROM events
+         WHERE run_id = ?1 AND session_id = ?2
+           AND json_extract(value_json, '$.payload.type') = 'planner_inference_prepared'",
+        params![run_id.to_string(), event.session_id.to_string()],
+        |row| row.get::<_, u64>(0),
+    )?;
+    if inference_count != 0 {
+        return Err(StoreError::InvalidStateEvent);
+    }
+
+    let claim_event =
+        require_current_claim_owner(transaction, event, run_id, failure.cancellation_generation)?;
+    let EventPayload::RunClaimed(claim) = &claim_event.payload else {
+        return Err(StoreError::InvalidStateEvent);
+    };
+    if failure.claim_event_id != claim_event.id
+        || failure.claim_id != claim.claim_id
+        || event.provenance.raw_artifact.as_ref() != Some(&failure.evidence_artifact)
+    {
+        return Err(StoreError::InvalidStateEvent);
+    }
+
+    let run_json = transaction.query_row(
+        "SELECT value_json FROM runs WHERE id = ?1 AND session_id = ?2",
+        params![run_id.to_string(), event.session_id.to_string()],
+        |row| row.get::<_, String>(0),
+    )?;
+    let run = decode_stored_run(&run_json)?;
+    if run.spec.purpose != RunPurpose::PlanOnly
+        || event.provenance.backend.as_ref() != Some(&run.spec.backend)
+    {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    Ok(())
+}
+
+const fn valid_root_planning_failure_classification(
+    phase: RootPlanningFailurePhase,
+    reason: RootPlanningFailureReason,
+) -> bool {
+    matches!(
+        (phase, reason),
+        (
+            RootPlanningFailurePhase::Preflight,
+            RootPlanningFailureReason::InvalidWallDeadline
+                | RootPlanningFailureReason::InvalidRunConfiguration
+                | RootPlanningFailureReason::WallDeadlineExceeded
+        ) | (
+            RootPlanningFailurePhase::ModelDiscovery,
+            RootPlanningFailureReason::InvalidRunConfiguration
+                | RootPlanningFailureReason::BackendDiscoveryFailed
+                | RootPlanningFailureReason::DiscoveryTimedOut
+                | RootPlanningFailureReason::InvalidDiscoveryCatalog
+                | RootPlanningFailureReason::SelectedModelUnavailable
+                | RootPlanningFailureReason::WallDeadlineExceeded
+        ) | (
+            RootPlanningFailurePhase::PromptPreparation,
+            RootPlanningFailureReason::InvalidRunConfiguration
+                | RootPlanningFailureReason::WallDeadlineExceeded
+                | RootPlanningFailureReason::PromptCompilationFailed
+                | RootPlanningFailureReason::DurableStateConflict
+        )
+    )
+}
+
+fn prepared_inference_for_attempt(
+    transaction: &Transaction<'_>,
+    session_id: SessionId,
+    run_id: RunId,
+    attempt_id: InferenceAttemptId,
+) -> Result<EventEnvelope, StoreError> {
+    let json = transaction
+        .query_row(
+            "SELECT value_json FROM events
+             WHERE run_id = ?1 AND session_id = ?2
+               AND json_extract(value_json, '$.payload.type') = 'planner_inference_prepared'
+               AND json_extract(value_json, '$.payload.data.attempt_id') = ?3
+             ORDER BY sequence ASC LIMIT 1",
+            params![
+                run_id.to_string(),
+                session_id.to_string(),
+                attempt_id.to_string()
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or(StoreError::InvalidStateEvent)?;
+    decode_canonical_event(&json)
+}
+
+fn current_plan_base(
+    transaction: &Transaction<'_>,
+    session_id: SessionId,
+    run_id: RunId,
+) -> Result<Option<(u64, Sha256Digest)>, StoreError> {
+    let json = transaction
+        .query_row(
+            "SELECT value_json FROM events
+             WHERE run_id = ?1 AND session_id = ?2
+               AND json_extract(value_json, '$.payload.type') = 'plan_proposal_accepted'
+             ORDER BY sequence DESC LIMIT 1",
+            params![run_id.to_string(), session_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(json) = json else {
+        return Ok(None);
+    };
+    let event = decode_canonical_event(&json)?;
+    let EventPayload::PlanProposalAccepted(accepted) = event.payload else {
+        return Err(StoreError::InvalidStateEvent);
+    };
+    Ok(Some((
+        accepted.accepted_plan_revision,
+        accepted.accepted_plan_digest,
+    )))
+}
+
+fn genesis_plan_digest(
+    transaction: &Transaction<'_>,
+    session_id: SessionId,
+    run_id: RunId,
+) -> Result<Option<Sha256Digest>, StoreError> {
+    let json = transaction
+        .query_row(
+            "SELECT value_json FROM events
+             WHERE run_id = ?1 AND session_id = ?2
+               AND json_extract(value_json, '$.payload.type') = 'planner_inference_prepared'
+             ORDER BY sequence ASC LIMIT 1",
+            params![run_id.to_string(), session_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(json) = json else {
+        return Ok(None);
+    };
+    let event = decode_canonical_event(&json)?;
+    let EventPayload::PlannerInferencePrepared(prepared) = event.payload else {
+        return Err(StoreError::InvalidStateEvent);
+    };
+    if prepared.plan_revision != 0 {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    Ok(Some(prepared.plan_digest))
+}
+
+fn first_prepared_inference(
+    transaction: &Transaction<'_>,
+    session_id: SessionId,
+    run_id: RunId,
+) -> Result<Option<birdcode_protocol::PlannerInferencePrepared>, StoreError> {
+    let json = transaction
+        .query_row(
+            "SELECT value_json FROM events
+             WHERE run_id = ?1 AND session_id = ?2
+               AND json_extract(value_json, '$.payload.type') = 'planner_inference_prepared'
+             ORDER BY sequence ASC LIMIT 1",
+            params![run_id.to_string(), session_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(json) = json else {
+        return Ok(None);
+    };
+    let event = decode_canonical_event(&json)?;
+    let EventPayload::PlannerInferencePrepared(prepared) = event.payload else {
+        return Err(StoreError::InvalidStateEvent);
+    };
+    Ok(Some(prepared))
+}
+
+fn require_current_plan_base(
+    transaction: &Transaction<'_>,
+    session_id: SessionId,
+    run_id: RunId,
+    revision: u64,
+    digest: &Sha256Digest,
+    allow_first_genesis: bool,
+) -> Result<(), StoreError> {
+    if let Some((current_revision, current_digest)) =
+        current_plan_base(transaction, session_id, run_id)?
+    {
+        if current_revision != revision || &current_digest != digest {
+            return Err(StoreError::InvalidStateEvent);
+        }
+        return Ok(());
+    }
+    if revision != 0 {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    match genesis_plan_digest(transaction, session_id, run_id)? {
+        Some(genesis) if &genesis == digest => Ok(()),
+        None if allow_first_genesis => Ok(()),
+        _ => Err(StoreError::InvalidStateEvent),
+    }
+}
+
+fn parent_attempt_is_terminal(
+    transaction: &Transaction<'_>,
+    session_id: SessionId,
+    run_id: RunId,
+    parent_attempt_id: InferenceAttemptId,
+) -> Result<bool, StoreError> {
+    let parent =
+        prepared_inference_for_attempt(transaction, session_id, run_id, parent_attempt_id)?;
+    let terminal_json = transaction
+        .query_row(
+            "SELECT value_json FROM events
+             WHERE run_id = ?1 AND session_id = ?2 AND sequence > ?3
+               AND (
+                    (json_extract(value_json, '$.payload.type') = 'planner_inference_outcome_unknown'
+                     AND json_extract(value_json, '$.payload.data.attempt_id') = ?4)
+                 OR (json_extract(value_json, '$.payload.type') IN
+                        ('plan_proposal_accepted', 'plan_proposal_rejected')
+                     AND json_extract(value_json, '$.payload.data.inference_attempt_id') = ?4)
+                 OR (json_extract(value_json, '$.payload.type') = 'planner_inference_observed'
+                     AND json_extract(value_json, '$.payload.data.attempt_id') = ?4)
+               )
+             ORDER BY sequence DESC LIMIT 1",
+            params![
+                run_id.to_string(),
+                session_id.to_string(),
+                parent.sequence,
+                parent_attempt_id.to_string()
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(json) = terminal_json else {
+        return Ok(false);
+    };
+    let terminal = decode_canonical_event(&json)?;
+    match terminal.payload {
+        EventPayload::PlannerInferenceOutcomeUnknown(_)
+        | EventPayload::PlanProposalAccepted(_)
+        | EventPayload::PlanProposalRejected(_) => Ok(true),
+        EventPayload::PlannerInferenceObserved(observed) => Ok(matches!(
+            observed.outcome,
+            birdcode_protocol::PlannerInferenceObservation::Failed {
+                error: birdcode_protocol::PlannerInferenceError {
+                    retry: RetryDisposition::RequiresNewAttempt,
+                    ..
+                }
+            }
+        )),
+        _ => Err(StoreError::InvalidStateEvent),
+    }
+}
+
+fn validate_planner_inference_prepared(
+    transaction: &Transaction<'_>,
+    event: &NewEvent,
+    prepared: &birdcode_protocol::PlannerInferencePrepared,
+) -> Result<(), StoreError> {
+    let run_id = planner_run_id(event)?;
+    require_running_run(transaction, event, run_id)?;
+    if latest_cancellation_generation(transaction, event.session_id, run_id)? != 0 {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    require_latest_run_parent(transaction, event, run_id)?;
+    require_current_claim_owner(transaction, event, run_id, prepared.cancellation_generation)?;
+    if prepared.token_reservation.reserved_tokens == 0
+        || prepared.token_reservation.max_output_tokens == 0
+        || prepared.token_reservation.reserved_tokens < prepared.token_reservation.max_output_tokens
+        || event_count_by_json_identity(
+            transaction,
+            "planner_inference_prepared",
+            "$.payload.data.attempt_id",
+            &prepared.attempt_id.to_string(),
+        )? != 0
+        || event_count_by_json_identity(
+            transaction,
+            "planner_inference_prepared",
+            "$.payload.data.token_reservation.id",
+            &prepared.token_reservation.id.to_string(),
+        )? != 0
+    {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    if prepared.parent_attempt_id.is_none()
+        && prepared_attempts_for_plan(
+            transaction,
+            event.session_id,
+            run_id,
+            prepared.plan_revision,
+            &prepared.plan_digest,
+        )? != 0
+    {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    if let Some(parent_attempt_id) = prepared.parent_attempt_id
+        && (parent_attempt_id == prepared.attempt_id
+            || !parent_attempt_is_terminal(
+                transaction,
+                event.session_id,
+                run_id,
+                parent_attempt_id,
+            )?)
+    {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    if let Some(first) = first_prepared_inference(transaction, event.session_id, run_id)?
+        && (first.obligation_snapshot_digest != prepared.obligation_snapshot_digest
+            || first.acceptance_policy_digest != prepared.acceptance_policy_digest
+            || first.planner_policy_digest != prepared.planner_policy_digest)
+    {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    require_current_plan_base(
+        transaction,
+        event.session_id,
+        run_id,
+        prepared.plan_revision,
+        &prepared.plan_digest,
+        true,
+    )?;
+    let run_json = transaction.query_row(
+        "SELECT value_json FROM runs WHERE id = ?1 AND session_id = ?2",
+        params![run_id.to_string(), event.session_id.to_string()],
+        |row| row.get::<_, String>(0),
+    )?;
+    let run = decode_stored_run(&run_json)?;
+    if run.spec.purpose != RunPurpose::PlanOnly
+        || run.spec.backend.backend_id != prepared.backend_model.backend_id
+        || run.spec.backend.kind != prepared.backend_model.kind
+        || run
+            .spec
+            .backend
+            .model
+            .as_ref()
+            .is_some_and(|model| model != &prepared.backend_model.model_id)
+        || run
+            .spec
+            .limits
+            .max_output_tokens
+            .is_some_and(|limit| prepared.token_reservation.max_output_tokens > limit)
+    {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    if let Some(limit) = run.spec.limits.max_output_tokens {
+        let already_reserved =
+            reserved_output_tokens_for_run(transaction, event.session_id, run_id)?;
+        if already_reserved
+            .checked_add(prepared.token_reservation.max_output_tokens)
+            .ok_or(StoreError::InvalidStateEvent)?
+            > limit
+        {
+            return Err(StoreError::InvalidStateEvent);
+        }
+    }
+    Ok(())
+}
+
+fn prepared_attempts_for_plan(
+    transaction: &Transaction<'_>,
+    session_id: SessionId,
+    run_id: RunId,
+    plan_revision: u64,
+    plan_digest: &Sha256Digest,
+) -> Result<u64, StoreError> {
+    transaction
+        .query_row(
+            "SELECT COUNT(*) FROM events
+             WHERE run_id = ?1 AND session_id = ?2
+               AND json_extract(value_json, '$.payload.type') = 'planner_inference_prepared'
+               AND json_extract(value_json, '$.payload.data.plan_revision') = ?3
+               AND json_extract(value_json, '$.payload.data.plan_digest') = ?4",
+            params![
+                run_id.to_string(),
+                session_id.to_string(),
+                plan_revision,
+                plan_digest.as_str()
+            ],
+            |row| row.get(0),
+        )
+        .map_err(StoreError::from)
+}
+
+fn reserved_output_tokens_for_run(
+    transaction: &Transaction<'_>,
+    session_id: SessionId,
+    run_id: RunId,
+) -> Result<u64, StoreError> {
+    let mut statement = transaction.prepare(
+        "SELECT value_json FROM events
+         WHERE run_id = ?1 AND session_id = ?2
+           AND json_extract(value_json, '$.payload.type') = 'planner_inference_prepared'
+         ORDER BY sequence ASC",
+    )?;
+    let rows = statement.query_map(params![run_id.to_string(), session_id.to_string()], |row| {
+        row.get::<_, String>(0)
+    })?;
+    let mut reserved = 0_u64;
+    for row in rows {
+        let envelope = decode_canonical_event(&row?)?;
+        let EventPayload::PlannerInferencePrepared(prepared) = envelope.payload else {
+            return Err(StoreError::InvalidStateEvent);
+        };
+        reserved = reserved
+            .checked_add(prepared.token_reservation.max_output_tokens)
+            .ok_or(StoreError::InvalidStateEvent)?;
+    }
+    Ok(reserved)
+}
+
+fn inference_terminal_count(
+    transaction: &Transaction<'_>,
+    session_id: SessionId,
+    run_id: RunId,
+    attempt_id: InferenceAttemptId,
+) -> Result<u64, StoreError> {
+    transaction
+        .query_row(
+            "SELECT COUNT(*) FROM events
+             WHERE run_id = ?1 AND session_id = ?2
+               AND json_extract(value_json, '$.payload.type') IN
+                   ('planner_inference_observed', 'planner_inference_outcome_unknown')
+               AND json_extract(value_json, '$.payload.data.attempt_id') = ?3",
+            params![
+                run_id.to_string(),
+                session_id.to_string(),
+                attempt_id.to_string()
+            ],
+            |row| row.get(0),
+        )
+        .map_err(StoreError::from)
+}
+
+fn validate_planner_inference_observed(
+    transaction: &Transaction<'_>,
+    event: &NewEvent,
+    observed: &birdcode_protocol::PlannerInferenceObserved,
+) -> Result<(), StoreError> {
+    let run_id = planner_run_id(event)?;
+    require_running_run(transaction, event, run_id)?;
+    let prepared_event = event_by_id_for_run(
+        transaction,
+        event.session_id,
+        run_id,
+        observed.prepared_event_id,
+    )?;
+    let EventPayload::PlannerInferencePrepared(prepared) = &prepared_event.payload else {
+        return Err(StoreError::InvalidStateEvent);
+    };
+    if event.causal_parent != Some(prepared_event.id)
+        || event.actor_id != prepared_event.actor_id
+        || observed.attempt_id != prepared.attempt_id
+        || observed.token_reservation_id != prepared.token_reservation.id
+        || inference_terminal_count(transaction, event.session_id, run_id, observed.attempt_id)?
+            != 0
+    {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    require_active_claim_owner(transaction, event, run_id)?;
+    if let birdcode_protocol::PlannerInferenceObservation::Succeeded {
+        reported_backend_model,
+        token_usage,
+    } = &observed.outcome
+        && (reported_backend_model != &prepared.backend_model
+            || token_usage.output_tokens > prepared.token_reservation.max_output_tokens
+            || token_usage.total_tokens > prepared.token_reservation.reserved_tokens
+            || token_usage.total_tokens
+                != token_usage
+                    .input_tokens
+                    .checked_add(token_usage.output_tokens)
+                    .ok_or(StoreError::InvalidStateEvent)?
+            || token_usage
+                .cached_input_tokens
+                .is_some_and(|cached| cached > token_usage.input_tokens))
+    {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    Ok(())
+}
+
+fn validate_planner_inference_unknown(
+    transaction: &Transaction<'_>,
+    event: &NewEvent,
+    unknown: &birdcode_protocol::PlannerInferenceOutcomeUnknown,
+) -> Result<(), StoreError> {
+    let run_id = planner_run_id(event)?;
+    require_running_run(transaction, event, run_id)?;
+    let prepared_event = event_by_id_for_run(
+        transaction,
+        event.session_id,
+        run_id,
+        unknown.prepared_event_id,
+    )?;
+    let EventPayload::PlannerInferencePrepared(prepared) = &prepared_event.payload else {
+        return Err(StoreError::InvalidStateEvent);
+    };
+    require_current_claim_owner(transaction, event, run_id, unknown.cancellation_generation)?;
+    if event.causal_parent != Some(prepared_event.id)
+        || unknown.attempt_id != prepared.attempt_id
+        || unknown.token_reservation_id != prepared.token_reservation.id
+        || inference_terminal_count(transaction, event.session_id, run_id, unknown.attempt_id)? != 0
+    {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    Ok(())
+}
+
+fn validate_read_operation_prepared(
+    transaction: &Transaction<'_>,
+    event: &NewEvent,
+    prepared: &birdcode_protocol::ReadOperationPrepared,
+) -> Result<(), StoreError> {
+    let run_id = planner_run_id(event)?;
+    require_running_run(transaction, event, run_id)?;
+    if latest_cancellation_generation(transaction, event.session_id, run_id)? != 0 {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    require_latest_run_parent(transaction, event, run_id)?;
+    require_current_claim_owner(transaction, event, run_id, prepared.cancellation_generation)?;
+    if event_count_by_json_identity(
+        transaction,
+        "read_operation_prepared",
+        "$.payload.data.operation_id",
+        &prepared.operation_id.to_string(),
+    )? != 0
+    {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    require_current_plan_base(
+        transaction,
+        event.session_id,
+        run_id,
+        prepared.plan_revision,
+        &prepared.plan_digest,
+        false,
+    )
+}
+
+fn validate_read_operation_observed(
+    transaction: &Transaction<'_>,
+    event: &NewEvent,
+    observed: &birdcode_protocol::ReadOperationObserved,
+) -> Result<(), StoreError> {
+    let run_id = planner_run_id(event)?;
+    require_running_run(transaction, event, run_id)?;
+    let prepared_event = event_by_id_for_run(
+        transaction,
+        event.session_id,
+        run_id,
+        observed.prepared_event_id,
+    )?;
+    let EventPayload::ReadOperationPrepared(prepared) = &prepared_event.payload else {
+        return Err(StoreError::InvalidStateEvent);
+    };
+    let existing = transaction.query_row(
+        "SELECT COUNT(*) FROM events
+         WHERE run_id = ?1 AND session_id = ?2
+           AND json_extract(value_json, '$.payload.type') = 'read_operation_observed'
+           AND json_extract(value_json, '$.payload.data.operation_id') = ?3",
+        params![
+            run_id.to_string(),
+            event.session_id.to_string(),
+            observed.operation_id.to_string()
+        ],
+        |row| row.get::<_, u64>(0),
+    )?;
+    if event.causal_parent != Some(prepared_event.id)
+        || event.actor_id != prepared_event.actor_id
+        || observed.operation_id != prepared.operation_id
+        || existing != 0
+    {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    require_active_claim_owner(transaction, event, run_id)?;
+    Ok(())
+}
+
+fn successful_observed_for_decision(
+    transaction: &Transaction<'_>,
+    event: &NewEvent,
+    run_id: RunId,
+    observed_event_id: EventId,
+    attempt_id: InferenceAttemptId,
+) -> Result<EventEnvelope, StoreError> {
+    let observed_event =
+        event_by_id_for_run(transaction, event.session_id, run_id, observed_event_id)?;
+    let EventPayload::PlannerInferenceObserved(observed) = &observed_event.payload else {
+        return Err(StoreError::InvalidStateEvent);
+    };
+    if event.causal_parent != Some(observed_event.id)
+        || observed.attempt_id != attempt_id
+        || !matches!(
+            observed.outcome,
+            birdcode_protocol::PlannerInferenceObservation::Succeeded { .. }
+        )
+    {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    Ok(observed_event)
+}
+
+fn plan_decision_count(
+    transaction: &Transaction<'_>,
+    session_id: SessionId,
+    run_id: RunId,
+    attempt_id: InferenceAttemptId,
+) -> Result<u64, StoreError> {
+    transaction
+        .query_row(
+            "SELECT COUNT(*) FROM events
+             WHERE run_id = ?1 AND session_id = ?2
+               AND json_extract(value_json, '$.payload.type') IN
+                   ('plan_proposal_accepted', 'plan_proposal_rejected')
+               AND json_extract(value_json, '$.payload.data.inference_attempt_id') = ?3",
+            params![
+                run_id.to_string(),
+                session_id.to_string(),
+                attempt_id.to_string()
+            ],
+            |row| row.get(0),
+        )
+        .map_err(StoreError::from)
+}
+
+fn validate_plan_proposal_rejected(
+    transaction: &Transaction<'_>,
+    event: &NewEvent,
+    rejected: &birdcode_protocol::PlanProposalRejected,
+) -> Result<(), StoreError> {
+    let run_id = planner_run_id(event)?;
+    require_running_run(transaction, event, run_id)?;
+    successful_observed_for_decision(
+        transaction,
+        event,
+        run_id,
+        rejected.observed_event_id,
+        rejected.inference_attempt_id,
+    )?;
+    let prepared = prepared_inference_for_attempt(
+        transaction,
+        event.session_id,
+        run_id,
+        rejected.inference_attempt_id,
+    )?;
+    let EventPayload::PlannerInferencePrepared(prepared) = prepared.payload else {
+        return Err(StoreError::InvalidStateEvent);
+    };
+    require_current_claim_owner(transaction, event, run_id, prepared.cancellation_generation)?;
+    if rejected.base_plan_revision != prepared.plan_revision
+        || rejected.base_plan_digest != prepared.plan_digest
+        || plan_decision_count(
+            transaction,
+            event.session_id,
+            run_id,
+            rejected.inference_attempt_id,
+        )? != 0
+        || event_count_by_json_identity(
+            transaction,
+            "plan_proposal_rejected",
+            "$.payload.data.proposal_id",
+            &rejected.proposal_id.to_string(),
+        )? != 0
+        || event_count_by_json_identity(
+            transaction,
+            "plan_proposal_accepted",
+            "$.payload.data.proposal_id",
+            &rejected.proposal_id.to_string(),
+        )? != 0
+    {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    let current = current_plan_base(transaction, event.session_id, run_id)?
+        .unwrap_or((0, prepared.plan_digest.clone()));
+    let reason_matches_cas = match rejected.reason {
+        PlanProposalRejectionReason::StaleBaseRevision => current.0 != rejected.base_plan_revision,
+        PlanProposalRejectionReason::StaleBaseDigest => {
+            current.0 == rejected.base_plan_revision && current.1 != rejected.base_plan_digest
+        }
+        _ => current.0 == rejected.base_plan_revision && current.1 == rejected.base_plan_digest,
+    };
+    if !reason_matches_cas {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    Ok(())
+}
+
+fn validate_plan_proposal_accepted(
+    transaction: &Transaction<'_>,
+    event: &NewEvent,
+    accepted: &birdcode_protocol::PlanProposalAccepted,
+) -> Result<(), StoreError> {
+    let run_id = planner_run_id(event)?;
+    require_running_run(transaction, event, run_id)?;
+    successful_observed_for_decision(
+        transaction,
+        event,
+        run_id,
+        accepted.observed_event_id,
+        accepted.inference_attempt_id,
+    )?;
+    let prepared = prepared_inference_for_attempt(
+        transaction,
+        event.session_id,
+        run_id,
+        accepted.inference_attempt_id,
+    )?;
+    let EventPayload::PlannerInferencePrepared(prepared) = prepared.payload else {
+        return Err(StoreError::InvalidStateEvent);
+    };
+    require_current_claim_owner(transaction, event, run_id, prepared.cancellation_generation)?;
+    let current = current_plan_base(transaction, event.session_id, run_id)?
+        .unwrap_or((0, prepared.plan_digest.clone()));
+    if accepted.previous_plan_revision != prepared.plan_revision
+        || accepted.previous_plan_digest != prepared.plan_digest
+        || current.0 != accepted.previous_plan_revision
+        || current.1 != accepted.previous_plan_digest
+        || accepted.accepted_plan_revision
+            != accepted
+                .previous_plan_revision
+                .checked_add(1)
+                .ok_or(StoreError::InvalidStateEvent)?
+        || accepted.accepted_plan_digest.as_str() != accepted.accepted_plan_artifact.sha256.as_str()
+        || plan_decision_count(
+            transaction,
+            event.session_id,
+            run_id,
+            accepted.inference_attempt_id,
+        )? != 0
+        || event_count_by_json_identity(
+            transaction,
+            "plan_proposal_rejected",
+            "$.payload.data.proposal_id",
+            &accepted.proposal_id.to_string(),
+        )? != 0
+        || event_count_by_json_identity(
+            transaction,
+            "plan_proposal_accepted",
+            "$.payload.data.proposal_id",
+            &accepted.proposal_id.to_string(),
+        )? != 0
+    {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    Ok(())
 }
 
 fn encode_run_state(state: RunState) -> &'static str {
@@ -3660,8 +5004,16 @@ const fn valid_run_transition(from: RunState, to: RunState) -> bool {
     )
 }
 
+const fn is_terminal_run_state(state: RunState) -> bool {
+    matches!(
+        state,
+        RunState::Completed | RunState::Failed | RunState::Cancelled
+    )
+}
+
 fn decode_canonical_event(json: &str) -> Result<EventEnvelope, StoreError> {
-    serde_json::from_str(json).map_err(StoreError::from)
+    let value = serde_json::from_str::<serde_json::Value>(json)?;
+    decode_stored_event_value(value)
 }
 
 fn decode_legacy_event(connection: &Connection, json: &str) -> Result<EventEnvelope, StoreError> {
@@ -3672,7 +5024,34 @@ fn decode_legacy_event(connection: &Connection, json: &str) -> Result<EventEnvel
             .or_insert(serde_json::Value::Null);
     }
     upgrade_legacy_creation_payload(connection, &mut value)?;
+    decode_stored_event_value(value)
+}
+
+/// Protocol v2 persisted runs predate `RunPurpose`. Store replay upgrades only
+/// that missing historical field to `Execute`; the protocol's v3 serde types
+/// remain strict and continue rejecting wire requests without `purpose`.
+fn decode_stored_run(json: &str) -> Result<Run, StoreError> {
+    let mut value = serde_json::from_str::<serde_json::Value>(json)?;
+    insert_legacy_execute_purpose(&mut value, "/spec")?;
     serde_json::from_value(value).map_err(StoreError::from)
+}
+
+fn decode_stored_event_value(mut value: serde_json::Value) -> Result<EventEnvelope, StoreError> {
+    insert_legacy_execute_purpose(&mut value, "/payload/data/run/spec")?;
+    serde_json::from_value(value).map_err(StoreError::from)
+}
+
+fn insert_legacy_execute_purpose(
+    value: &mut serde_json::Value,
+    spec_pointer: &str,
+) -> Result<(), StoreError> {
+    let Some(spec) = value.pointer_mut(spec_pointer) else {
+        return Ok(());
+    };
+    let spec = spec.as_object_mut().ok_or(StoreError::InvalidStateEvent)?;
+    spec.entry("purpose")
+        .or_insert_with(|| serde_json::Value::String("execute".to_owned()));
+    Ok(())
 }
 
 fn validate_typed_artifact_refs(
@@ -3691,6 +5070,31 @@ fn validate_typed_artifact_refs(
         EventPayload::UserInput { items } => cost.add_inputs(items)?,
         EventPayload::RunCreated { run } => cost.add_inputs(&run.spec.input)?,
         EventPayload::ArtifactStored { artifact } => cost.add(artifact)?,
+        EventPayload::PlannerInferencePrepared(prepared) => {
+            cost.add(&prepared.prompt_artifact)?;
+            cost.add(&prepared.request_artifact)?;
+        }
+        EventPayload::RootPlanningFailed(failure) => {
+            cost.add(&failure.evidence_artifact)?;
+        }
+        EventPayload::PlannerInferenceObserved(observed) => {
+            cost.add(&observed.normalized_complete_evidence_artifact)?;
+        }
+        EventPayload::ReadOperationPrepared(prepared) => {
+            cost.add(&prepared.request_artifact)?;
+        }
+        EventPayload::ReadOperationObserved(observed) => {
+            cost.add(&observed.normalized_complete_evidence_artifact)?;
+        }
+        EventPayload::PlanProposalRejected(rejected) => {
+            cost.add(&rejected.proposal_artifact)?;
+            cost.add(&rejected.validation_evidence_artifact)?;
+        }
+        EventPayload::PlanProposalAccepted(accepted) => {
+            cost.add(&accepted.proposal_artifact)?;
+            cost.add(&accepted.accepted_plan_artifact)?;
+            cost.add(&accepted.validation_evidence_artifact)?;
+        }
         _ => {}
     }
     cost.enforce_event_limit()?;
@@ -3703,6 +5107,33 @@ fn validate_typed_artifact_refs(
         EventPayload::RunCreated { run } => verify_input_artifacts(artifact_root, &run.spec.input),
         EventPayload::ArtifactStored { artifact } => {
             verify_artifact_at_root(artifact_root, artifact)
+        }
+        EventPayload::PlannerInferencePrepared(prepared) => {
+            verify_artifact_at_root(artifact_root, &prepared.prompt_artifact)?;
+            verify_artifact_at_root(artifact_root, &prepared.request_artifact)
+        }
+        EventPayload::RootPlanningFailed(failure) => {
+            verify_artifact_at_root(artifact_root, &failure.evidence_artifact)
+        }
+        EventPayload::PlannerInferenceObserved(observed) => verify_artifact_at_root(
+            artifact_root,
+            &observed.normalized_complete_evidence_artifact,
+        ),
+        EventPayload::ReadOperationPrepared(prepared) => {
+            verify_artifact_at_root(artifact_root, &prepared.request_artifact)
+        }
+        EventPayload::ReadOperationObserved(observed) => verify_artifact_at_root(
+            artifact_root,
+            &observed.normalized_complete_evidence_artifact,
+        ),
+        EventPayload::PlanProposalRejected(rejected) => {
+            verify_artifact_at_root(artifact_root, &rejected.proposal_artifact)?;
+            verify_artifact_at_root(artifact_root, &rejected.validation_evidence_artifact)
+        }
+        EventPayload::PlanProposalAccepted(accepted) => {
+            verify_artifact_at_root(artifact_root, &accepted.proposal_artifact)?;
+            verify_artifact_at_root(artifact_root, &accepted.accepted_plan_artifact)?;
+            verify_artifact_at_root(artifact_root, &accepted.validation_evidence_artifact)
         }
         _ => Ok(()),
     }
@@ -4099,8 +5530,14 @@ fn read_json<T: serde::de::DeserializeOwned>(
 mod tests {
     use super::*;
     use birdcode_protocol::{
-        ActorId, BackendKind, BackendSelection, CreateSessionRequest, EventPayload, InputItem,
-        Provenance, RunLimits, RunSpec, WORKSPACE_PATH_WIRE_VERSION,
+        ActorId, BackendKind, BackendModelIdentity, BackendSelection, CancellationRequested,
+        CreateSessionRequest, EventPayload, InferenceAttemptId, InputItem, PlanProposalAccepted,
+        PlanProposalId, PlanProposalRejected, PlannerInferenceObservation,
+        PlannerInferenceObserved, PlannerInferenceOutcomeUnknown, PlannerInferencePrepared,
+        Provenance, ReadOperation, ReadOperationId, ReadOperationObservation,
+        ReadOperationObserved, ReadOperationPrepared, RunClaimId, RunClaimed, RunLimits,
+        RunPurpose, RunSpec, RuntimeInstanceId, TokenReservation, TokenReservationId, TokenUsage,
+        UnknownInferenceOutcomeReason, WORKSPACE_PATH_WIRE_VERSION,
     };
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
@@ -4185,6 +5622,7 @@ mod tests {
     fn run_for(session: &Session) -> Run {
         Run::new(RunSpec {
             session_id: session.id,
+            purpose: RunPurpose::PlanOnly,
             backend: BackendSelection {
                 backend_id: "test".to_owned(),
                 kind: BackendKind::Model,
@@ -4196,6 +5634,213 @@ mod tests {
             }],
             limits: RunLimits::default(),
         })
+    }
+
+    fn digest(byte: char) -> Sha256Digest {
+        Sha256Digest::parse(byte.to_string().repeat(Sha256Digest::HEX_LENGTH))
+            .expect("fixture digest should be canonical")
+    }
+
+    fn fixture_artifact(store: &Store, label: &str) -> ArtifactRef {
+        store
+            .put_artifact(label.as_bytes(), "application/json")
+            .expect("fixture artifact should persist")
+    }
+
+    #[allow(
+        clippy::type_complexity,
+        reason = "the tuple makes planner store fixtures explicit in adversarial tests"
+    )]
+    fn planner_store() -> (
+        TempDir,
+        Store,
+        Session,
+        Run,
+        ActorId,
+        RuntimeInstanceId,
+        EventEnvelope,
+        ArtifactRef,
+        Sha256Digest,
+    ) {
+        planner_store_with_output_limit(None)
+    }
+
+    #[allow(
+        clippy::type_complexity,
+        reason = "the tuple makes planner store fixtures explicit in adversarial tests"
+    )]
+    fn planner_store_with_output_limit(
+        max_output_tokens: Option<u64>,
+    ) -> (
+        TempDir,
+        Store,
+        Session,
+        Run,
+        ActorId,
+        RuntimeInstanceId,
+        EventEnvelope,
+        ArtifactRef,
+        Sha256Digest,
+    ) {
+        let (directory, mut store) = test_store();
+        let actor_id = ActorId::new();
+        let runtime_instance_id = RuntimeInstanceId::new();
+        let session = Session::new(CreateSessionRequest {
+            workspace_root: PathBuf::from("/tmp/planner-store").into(),
+            title: Some("Durable planner".to_owned()),
+        });
+        let session_created = store
+            .create_session(&session, session_event(&session, actor_id))
+            .expect("session should persist");
+        let mut run = run_for(&session);
+        run.spec.limits.max_output_tokens = max_output_tokens;
+        let run_created = store
+            .create_run(
+                &run,
+                NewEvent {
+                    session_id: session.id,
+                    run_id: Some(run.id),
+                    actor_id,
+                    causal_parent: Some(session_created.id),
+                    provenance: provenance(),
+                    payload: EventPayload::RunCreated { run: run.clone() },
+                },
+            )
+            .expect("run should persist");
+        let claim = store
+            .append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(run_created.id),
+                provenance: provenance(),
+                payload: EventPayload::RunClaimed(RunClaimed {
+                    claim_id: RunClaimId::new(),
+                    runtime_instance_id,
+                    claim_generation: 1,
+                    cancellation_generation: 0,
+                    lease_expires_at: Utc::now() + chrono::Duration::minutes(10),
+                }),
+            })
+            .expect("claim should persist");
+        let running = store
+            .append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(claim.id),
+                provenance: provenance(),
+                payload: EventPayload::RunStateChanged {
+                    from: RunState::Queued,
+                    to: RunState::Running,
+                },
+            })
+            .expect("the live claim should start the planner run");
+        let artifact = fixture_artifact(&store, "planner-fixture-artifact");
+        let genesis_digest = digest('a');
+        (
+            directory,
+            store,
+            session,
+            run,
+            actor_id,
+            runtime_instance_id,
+            running,
+            artifact,
+            genesis_digest,
+        )
+    }
+
+    fn prepared_payload(
+        attempt_id: InferenceAttemptId,
+        reservation_id: TokenReservationId,
+        parent_attempt_id: Option<InferenceAttemptId>,
+        artifact: &ArtifactRef,
+        plan_revision: u64,
+        plan_digest: Sha256Digest,
+        cancellation_generation: u64,
+    ) -> PlannerInferencePrepared {
+        PlannerInferencePrepared {
+            attempt_id,
+            parent_attempt_id,
+            backend_model: BackendModelIdentity {
+                backend_id: "test".to_owned(),
+                kind: BackendKind::Model,
+                model_id: "gemma-fixture".to_owned(),
+            },
+            prompt_artifact: artifact.clone(),
+            prompt_manifest_digest: digest('b'),
+            request_artifact: artifact.clone(),
+            token_reservation: TokenReservation {
+                id: reservation_id,
+                reserved_tokens: 128,
+                max_output_tokens: 64,
+            },
+            plan_revision,
+            plan_digest,
+            obligation_snapshot_digest: digest('c'),
+            acceptance_policy_digest: digest('d'),
+            context_manifest_digest: digest('e'),
+            planner_policy_digest: digest('f'),
+            cancellation_generation,
+        }
+    }
+
+    fn append_prepared(
+        store: &mut Store,
+        session: &Session,
+        run: &Run,
+        actor_id: ActorId,
+        causal_parent: EventId,
+        payload: PlannerInferencePrepared,
+    ) -> EventEnvelope {
+        store
+            .append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(causal_parent),
+                provenance: provenance(),
+                payload: EventPayload::PlannerInferencePrepared(payload),
+            })
+            .expect("prepared inference should persist")
+    }
+
+    fn append_success_observation(
+        store: &mut Store,
+        session: &Session,
+        run: &Run,
+        actor_id: ActorId,
+        prepared_event: &EventEnvelope,
+        artifact: &ArtifactRef,
+    ) -> EventEnvelope {
+        let EventPayload::PlannerInferencePrepared(prepared) = &prepared_event.payload else {
+            panic!("fixture must be a prepared inference")
+        };
+        store
+            .append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(prepared_event.id),
+                provenance: provenance(),
+                payload: EventPayload::PlannerInferenceObserved(PlannerInferenceObserved {
+                    attempt_id: prepared.attempt_id,
+                    token_reservation_id: prepared.token_reservation.id,
+                    prepared_event_id: prepared_event.id,
+                    normalized_complete_evidence_artifact: artifact.clone(),
+                    outcome: PlannerInferenceObservation::Succeeded {
+                        reported_backend_model: prepared.backend_model.clone(),
+                        token_usage: TokenUsage {
+                            input_tokens: 20,
+                            output_tokens: 30,
+                            total_tokens: 50,
+                            cached_input_tokens: Some(5),
+                        },
+                    },
+                }),
+            })
+            .expect("observed inference should persist")
     }
 
     fn legacy_workspace_root_text(session: &Session) -> String {
@@ -4590,6 +6235,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the migration regression also proves new writes require a durable live claim"
+    )]
     fn migrates_materialized_v1_state_into_self_contained_creation_events() {
         let directory = TempDir::new().expect("temporary directory should be created");
         let database = directory.path().join("legacy.sqlite3");
@@ -4633,12 +6282,29 @@ mod tests {
                 .all(|json| serde_json::from_str::<EventEnvelope>(json).is_ok())
         );
 
+        let actor_id = ActorId::new();
+        let claim = store
+            .append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(events.events[1].id),
+                provenance: provenance(),
+                payload: EventPayload::RunClaimed(RunClaimed {
+                    claim_id: RunClaimId::new(),
+                    runtime_instance_id: RuntimeInstanceId::new(),
+                    claim_generation: 1,
+                    cancellation_generation: 0,
+                    lease_expires_at: Utc::now() + chrono::Duration::minutes(10),
+                }),
+            })
+            .expect("claim should append after migration");
         let running = store
             .append_event(NewEvent {
                 session_id: session.id,
                 run_id: Some(run.id),
-                actor_id: ActorId::new(),
-                causal_parent: Some(events.events[1].id),
+                actor_id,
+                causal_parent: Some(claim.id),
                 provenance: provenance(),
                 payload: EventPayload::RunStateChanged {
                     from: RunState::Queued,
@@ -4646,7 +6312,7 @@ mod tests {
                 },
             })
             .expect("append should continue after migration");
-        assert_eq!(running.sequence, 3);
+        assert_eq!(running.sequence, 4);
         assert_eq!(
             store
                 .get_run(run.id)
@@ -5152,7 +6818,7 @@ mod tests {
             .create_session(&session, session_event(&session, actor_id))
             .expect("session should persist");
         let run = run_for(&session);
-        store
+        let run_created = store
             .create_run(
                 &run,
                 NewEvent {
@@ -5165,12 +6831,28 @@ mod tests {
                 },
             )
             .expect("run should persist");
+        let claim = store
+            .append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(run_created.id),
+                provenance: provenance(),
+                payload: EventPayload::RunClaimed(RunClaimed {
+                    claim_id: RunClaimId::new(),
+                    runtime_instance_id: RuntimeInstanceId::new(),
+                    claim_generation: 1,
+                    cancellation_generation: 0,
+                    lease_expires_at: Utc::now() + chrono::Duration::minutes(10),
+                }),
+            })
+            .expect("run claim should persist");
         store
             .append_event(NewEvent {
                 session_id: session.id,
                 run_id: Some(run.id),
                 actor_id,
-                causal_parent: None,
+                causal_parent: Some(claim.id),
                 provenance: provenance(),
                 payload: EventPayload::RunStateChanged {
                     from: RunState::Queued,
@@ -5206,7 +6888,7 @@ mod tests {
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)),
             )
             .expect("projection should read");
-        assert_eq!(projected, ("running".to_owned(), 3));
+        assert_eq!(projected, ("running".to_owned(), 4));
 
         let plan = {
             let mut statement = store
@@ -5267,9 +6949,10 @@ mod tests {
             .create_session(&session, session_event(&session, actor_id))
             .expect("session should persist");
         let mut runs = Vec::new();
+        let mut first_run_created = None;
         for _ in 0..=MIGRATION_ROW_BATCH_SIZE {
             let run = run_for(&session);
-            store
+            let created = store
                 .create_run(
                     &run,
                     NewEvent {
@@ -5282,14 +6965,31 @@ mod tests {
                     },
                 )
                 .expect("run should persist");
+            first_run_created.get_or_insert(created.id);
             runs.push(run);
         }
+        let claim = store
+            .append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(runs[0].id),
+                actor_id,
+                causal_parent: first_run_created,
+                provenance: provenance(),
+                payload: EventPayload::RunClaimed(RunClaimed {
+                    claim_id: RunClaimId::new(),
+                    runtime_instance_id: RuntimeInstanceId::new(),
+                    claim_generation: 1,
+                    cancellation_generation: 0,
+                    lease_expires_at: Utc::now() + chrono::Duration::minutes(10),
+                }),
+            })
+            .expect("run claim should persist");
         store
             .append_event(NewEvent {
                 session_id: session.id,
                 run_id: Some(runs[0].id),
                 actor_id,
-                causal_parent: None,
+                causal_parent: Some(claim.id),
                 provenance: provenance(),
                 payload: EventPayload::RunStateChanged {
                     from: RunState::Queued,
@@ -6190,6 +7890,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one adversarial flow covers state, parent, claim, and actor authority"
+    )]
     fn generic_append_rejects_creation_events_and_invalid_state_transitions() {
         let (_directory, mut store) = test_store();
         let actor_id = ActorId::new();
@@ -6201,7 +7905,7 @@ mod tests {
             .create_session(&session, session_event(&session, actor_id))
             .expect("session should persist");
         let run = run_for(&session);
-        store
+        let run_created = store
             .create_run(
                 &run,
                 NewEvent {
@@ -6252,19 +7956,49 @@ mod tests {
             Err(StoreError::InvalidStateEvent)
         ));
 
+        let claim = store
+            .append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(run_created.id),
+                provenance: provenance(),
+                payload: EventPayload::RunClaimed(RunClaimed {
+                    claim_id: RunClaimId::new(),
+                    runtime_instance_id: RuntimeInstanceId::new(),
+                    claim_generation: 1,
+                    cancellation_generation: 0,
+                    lease_expires_at: Utc::now() + chrono::Duration::minutes(10),
+                }),
+            })
+            .expect("claim should append before a running transition");
+        assert!(matches!(
+            store.append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id: ActorId::new(),
+                causal_parent: Some(claim.id),
+                provenance: provenance(),
+                payload: EventPayload::RunStateChanged {
+                    from: RunState::Queued,
+                    to: RunState::Running,
+                },
+            }),
+            Err(StoreError::InvalidStateEvent)
+        ));
         store
             .append_event(NewEvent {
                 session_id: session.id,
                 run_id: Some(run.id),
                 actor_id,
-                causal_parent: None,
+                causal_parent: Some(claim.id),
                 provenance: provenance(),
                 payload: EventPayload::RunStateChanged {
                     from: RunState::Queued,
                     to: RunState::Running,
                 },
             })
-            .expect("valid state transition should append");
+            .expect("the live claim owner should start the run");
         assert_eq!(
             store
                 .get_run(run.id)
@@ -6849,6 +8583,7 @@ mod tests {
             .expect("second session should persist");
         let run = Run::new(RunSpec {
             session_id: second.id,
+            purpose: RunPurpose::PlanOnly,
             backend: BackendSelection {
                 backend_id: "test".to_owned(),
                 kind: BackendKind::Model,
@@ -7104,5 +8839,1550 @@ mod tests {
         assert_eq!(page.events.len(), 2);
         assert!(!page.has_more);
         assert_eq!(page.next_sequence, 2);
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one adversarial flow proves the complete pre-inference failure fence"
+    )]
+    fn root_planning_failure_binds_exact_claim_cause_artifact_and_failed_transition() {
+        let (_directory, mut store, session, run, actor_id, runtime_id, running, artifact, genesis) =
+            planner_store();
+        let events = store
+            .events_for_run_after(run.id, 0)
+            .expect("planner history should replay")
+            .events;
+        let claim_event = events
+            .iter()
+            .find(|event| matches!(event.payload, EventPayload::RunClaimed(_)))
+            .expect("planner fixture should contain its exact claim");
+        let EventPayload::RunClaimed(claim) = &claim_event.payload else {
+            panic!("claim event should retain its typed payload")
+        };
+        let failure = RootPlanningFailed {
+            claim_event_id: claim_event.id,
+            claim_id: claim.claim_id,
+            cancellation_generation: 0,
+            phase: RootPlanningFailurePhase::ModelDiscovery,
+            reason: RootPlanningFailureReason::BackendDiscoveryFailed,
+            evidence_artifact: artifact.clone(),
+        };
+        let failure_provenance = Provenance {
+            producer: "root-planning-failure-test".to_owned(),
+            backend: Some(run.spec.backend.clone()),
+            raw_artifact: Some(artifact.clone()),
+        };
+
+        let mut wrong_claim = failure.clone();
+        wrong_claim.claim_id = RunClaimId::new();
+        assert!(matches!(
+            store.append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(running.id),
+                provenance: failure_provenance.clone(),
+                payload: EventPayload::RootPlanningFailed(wrong_claim),
+            }),
+            Err(StoreError::InvalidStateEvent)
+        ));
+
+        let mut wrong_classification = failure.clone();
+        wrong_classification.phase = RootPlanningFailurePhase::Preflight;
+        wrong_classification.reason = RootPlanningFailureReason::BackendDiscoveryFailed;
+        assert!(matches!(
+            store.append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(running.id),
+                provenance: failure_provenance.clone(),
+                payload: EventPayload::RootPlanningFailed(wrong_classification),
+            }),
+            Err(StoreError::InvalidStateEvent)
+        ));
+
+        let other_artifact = fixture_artifact(&store, "different-failure-evidence");
+        assert!(matches!(
+            store.append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(running.id),
+                provenance: Provenance {
+                    raw_artifact: Some(other_artifact),
+                    ..failure_provenance.clone()
+                },
+                payload: EventPayload::RootPlanningFailed(failure.clone()),
+            }),
+            Err(StoreError::InvalidStateEvent)
+        ));
+        assert!(matches!(
+            store.append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(claim_event.id),
+                provenance: failure_provenance.clone(),
+                payload: EventPayload::RootPlanningFailed(failure.clone()),
+            }),
+            Err(StoreError::InvalidStateEvent)
+        ));
+
+        let failed = store
+            .append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(running.id),
+                provenance: failure_provenance,
+                payload: EventPayload::RootPlanningFailed(failure),
+            })
+            .expect("exact typed pre-inference failure should persist");
+        assert!(matches!(
+            store.append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(failed.id),
+                provenance: provenance(),
+                payload: EventPayload::PlannerInferencePrepared(prepared_payload(
+                    InferenceAttemptId::new(),
+                    TokenReservationId::new(),
+                    None,
+                    &artifact,
+                    0,
+                    genesis,
+                    0,
+                )),
+            }),
+            Err(StoreError::InvalidStateEvent)
+        ));
+        assert!(matches!(
+            store.append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(failed.id),
+                provenance: provenance(),
+                payload: EventPayload::RunStateChanged {
+                    from: RunState::Running,
+                    to: RunState::Waiting,
+                },
+            }),
+            Err(StoreError::InvalidStateEvent)
+        ));
+
+        let renewed_claim = store
+            .append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(failed.id),
+                provenance: provenance(),
+                payload: EventPayload::RunClaimed(RunClaimed {
+                    claim_id: RunClaimId::new(),
+                    runtime_instance_id: runtime_id,
+                    claim_generation: 2,
+                    cancellation_generation: 0,
+                    lease_expires_at: Utc::now() + chrono::Duration::minutes(10),
+                }),
+            })
+            .expect("same owner may renew solely to terminalize replay");
+        store
+            .append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(renewed_claim.id),
+                provenance: provenance(),
+                payload: EventPayload::RunStateChanged {
+                    from: RunState::Running,
+                    to: RunState::Failed,
+                },
+            })
+            .expect("Failed remains causally consistent across a replay claim");
+        assert_eq!(
+            store
+                .get_run(run.id)
+                .expect("run should load")
+                .expect("run should exist")
+                .state,
+            RunState::Failed
+        );
+    }
+
+    #[test]
+    fn planner_inference_requires_prepared_before_exactly_one_terminal_outcome() {
+        let (_directory, mut store, session, run, actor_id, _runtime_id, claim, artifact, genesis) =
+            planner_store();
+        let attempt_id = InferenceAttemptId::new();
+        let reservation_id = TokenReservationId::new();
+        let before_prepared = store.append_event(NewEvent {
+            session_id: session.id,
+            run_id: Some(run.id),
+            actor_id,
+            causal_parent: Some(claim.id),
+            provenance: provenance(),
+            payload: EventPayload::PlannerInferenceObserved(PlannerInferenceObserved {
+                attempt_id,
+                token_reservation_id: reservation_id,
+                prepared_event_id: claim.id,
+                normalized_complete_evidence_artifact: artifact.clone(),
+                outcome: PlannerInferenceObservation::Failed {
+                    error: birdcode_protocol::PlannerInferenceError {
+                        kind: birdcode_protocol::PlannerInferenceErrorKind::Transport,
+                        retry: RetryDisposition::RequiresNewAttempt,
+                    },
+                },
+            }),
+        });
+        assert!(matches!(
+            before_prepared,
+            Err(StoreError::InvalidStateEvent)
+        ));
+
+        let prepared = append_prepared(
+            &mut store,
+            &session,
+            &run,
+            actor_id,
+            claim.id,
+            prepared_payload(
+                attempt_id,
+                reservation_id,
+                None,
+                &artifact,
+                0,
+                genesis.clone(),
+                0,
+            ),
+        );
+        let observed =
+            append_success_observation(&mut store, &session, &run, actor_id, &prepared, &artifact);
+        let duplicate_outcome = store.append_event(NewEvent {
+            session_id: session.id,
+            run_id: Some(run.id),
+            actor_id,
+            causal_parent: Some(prepared.id),
+            provenance: provenance(),
+            payload: EventPayload::PlannerInferenceOutcomeUnknown(PlannerInferenceOutcomeUnknown {
+                attempt_id,
+                token_reservation_id: reservation_id,
+                prepared_event_id: prepared.id,
+                reason: UnknownInferenceOutcomeReason::EvidenceCommitIndeterminate,
+                cancellation_generation: 0,
+            }),
+        });
+        assert!(matches!(
+            duplicate_outcome,
+            Err(StoreError::InvalidStateEvent)
+        ));
+
+        for duplicate in [
+            prepared_payload(
+                attempt_id,
+                TokenReservationId::new(),
+                None,
+                &artifact,
+                0,
+                genesis.clone(),
+                0,
+            ),
+            prepared_payload(
+                InferenceAttemptId::new(),
+                reservation_id,
+                None,
+                &artifact,
+                0,
+                genesis.clone(),
+                0,
+            ),
+        ] {
+            assert!(matches!(
+                store.append_event(NewEvent {
+                    session_id: session.id,
+                    run_id: Some(run.id),
+                    actor_id,
+                    causal_parent: Some(observed.id),
+                    provenance: provenance(),
+                    payload: EventPayload::PlannerInferencePrepared(duplicate),
+                }),
+                Err(StoreError::InvalidStateEvent)
+            ));
+        }
+        assert_eq!(
+            store.events_for_run_after(run.id, 0).unwrap().events.len(),
+            5
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one adversarial flow verifies claim, cancellation, generation, and run binding"
+    )]
+    fn planner_claim_cancellation_and_cross_run_generations_fail_closed() {
+        let (_directory, mut store, session, run, actor_id, runtime_id, claim, artifact, genesis) =
+            planner_store();
+        let bad_generation = store.append_event(NewEvent {
+            session_id: session.id,
+            run_id: Some(run.id),
+            actor_id,
+            causal_parent: Some(claim.id),
+            provenance: provenance(),
+            payload: EventPayload::RunClaimed(RunClaimed {
+                claim_id: RunClaimId::new(),
+                runtime_instance_id: runtime_id,
+                claim_generation: 3,
+                cancellation_generation: 0,
+                lease_expires_at: Utc::now() + chrono::Duration::minutes(10),
+            }),
+        });
+        assert!(matches!(bad_generation, Err(StoreError::InvalidStateEvent)));
+
+        let cancellation_id = birdcode_protocol::CancellationRequestId::new();
+        let cancellation = store
+            .append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(claim.id),
+                provenance: provenance(),
+                payload: EventPayload::CancellationRequested(CancellationRequested {
+                    cancellation_request_id: cancellation_id,
+                    cancellation_generation: 1,
+                }),
+            })
+            .expect("first cancellation should persist");
+        for request_id in [
+            cancellation_id,
+            birdcode_protocol::CancellationRequestId::new(),
+        ] {
+            assert!(matches!(
+                store.append_event(NewEvent {
+                    session_id: session.id,
+                    run_id: Some(run.id),
+                    actor_id,
+                    causal_parent: Some(cancellation.id),
+                    provenance: provenance(),
+                    payload: EventPayload::CancellationRequested(CancellationRequested {
+                        cancellation_request_id: request_id,
+                        cancellation_generation: 2,
+                    }),
+                }),
+                Err(StoreError::InvalidStateEvent)
+            ));
+        }
+        let renewed_claim = store
+            .append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(cancellation.id),
+                provenance: provenance(),
+                payload: EventPayload::RunClaimed(RunClaimed {
+                    claim_id: RunClaimId::new(),
+                    runtime_instance_id: runtime_id,
+                    claim_generation: 2,
+                    cancellation_generation: 1,
+                    lease_expires_at: Utc::now() + chrono::Duration::minutes(10),
+                }),
+            })
+            .expect("same owner should renew at the current cancellation generation");
+        let wrong_generation = prepared_payload(
+            InferenceAttemptId::new(),
+            TokenReservationId::new(),
+            None,
+            &artifact,
+            0,
+            genesis,
+            0,
+        );
+        assert!(matches!(
+            store.append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(renewed_claim.id),
+                provenance: provenance(),
+                payload: EventPayload::PlannerInferencePrepared(wrong_generation),
+            }),
+            Err(StoreError::InvalidStateEvent)
+        ));
+        let cancelled_generation = prepared_payload(
+            InferenceAttemptId::new(),
+            TokenReservationId::new(),
+            None,
+            &artifact,
+            0,
+            digest('a'),
+            1,
+        );
+        assert!(matches!(
+            store.append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(renewed_claim.id),
+                provenance: provenance(),
+                payload: EventPayload::PlannerInferencePrepared(cancelled_generation),
+            }),
+            Err(StoreError::InvalidStateEvent)
+        ));
+        let cancelled = store
+            .append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(renewed_claim.id),
+                provenance: provenance(),
+                payload: EventPayload::RunStateChanged {
+                    from: RunState::Running,
+                    to: RunState::Cancelled,
+                },
+            })
+            .expect("the live owner should honor the durable cancellation");
+
+        let second_run = run_for(&session);
+        let second_created = store
+            .create_run(
+                &second_run,
+                NewEvent {
+                    session_id: session.id,
+                    run_id: Some(second_run.id),
+                    actor_id,
+                    causal_parent: Some(cancelled.id),
+                    provenance: provenance(),
+                    payload: EventPayload::RunCreated {
+                        run: second_run.clone(),
+                    },
+                },
+            )
+            .expect("second run should persist");
+        assert!(matches!(
+            store.append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(second_run.id),
+                actor_id,
+                causal_parent: Some(claim.id),
+                provenance: provenance(),
+                payload: EventPayload::RunClaimed(RunClaimed {
+                    claim_id: RunClaimId::new(),
+                    runtime_instance_id: RuntimeInstanceId::new(),
+                    claim_generation: 1,
+                    cancellation_generation: 0,
+                    lease_expires_at: Utc::now() + chrono::Duration::minutes(10),
+                }),
+            }),
+            Err(StoreError::InvalidStateEvent)
+        ));
+        assert_eq!(
+            store.events_for_run_after(second_run.id, 0).unwrap().events,
+            vec![second_created]
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one proposal flow verifies digest binding, single decision, and plan CAS"
+    )]
+    fn proposal_decisions_are_single_success_bound_plan_cas_operations() {
+        let (_directory, mut store, session, run, actor_id, _runtime_id, claim, artifact, genesis) =
+            planner_store();
+        let attempt_id = InferenceAttemptId::new();
+        let prepared = append_prepared(
+            &mut store,
+            &session,
+            &run,
+            actor_id,
+            claim.id,
+            prepared_payload(
+                attempt_id,
+                TokenReservationId::new(),
+                None,
+                &artifact,
+                0,
+                genesis.clone(),
+                0,
+            ),
+        );
+        let observed =
+            append_success_observation(&mut store, &session, &run, actor_id, &prepared, &artifact);
+        let accepted_digest = Sha256Digest::parse(artifact.sha256.clone())
+            .expect("accepted plan artifact hash should be canonical");
+        assert!(matches!(
+            store.append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(observed.id),
+                provenance: provenance(),
+                payload: EventPayload::PlanProposalAccepted(PlanProposalAccepted {
+                    proposal_id: PlanProposalId::new(),
+                    inference_attempt_id: attempt_id,
+                    observed_event_id: observed.id,
+                    proposal_artifact: artifact.clone(),
+                    previous_plan_revision: 0,
+                    previous_plan_digest: genesis.clone(),
+                    accepted_plan_revision: 1,
+                    accepted_plan_digest: digest('9'),
+                    accepted_plan_artifact: artifact.clone(),
+                    validation_evidence_artifact: artifact.clone(),
+                }),
+            }),
+            Err(StoreError::InvalidStateEvent)
+        ));
+        let accepted = store
+            .append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(observed.id),
+                provenance: provenance(),
+                payload: EventPayload::PlanProposalAccepted(PlanProposalAccepted {
+                    proposal_id: PlanProposalId::new(),
+                    inference_attempt_id: attempt_id,
+                    observed_event_id: observed.id,
+                    proposal_artifact: artifact.clone(),
+                    previous_plan_revision: 0,
+                    previous_plan_digest: genesis.clone(),
+                    accepted_plan_revision: 1,
+                    accepted_plan_digest: accepted_digest.clone(),
+                    accepted_plan_artifact: artifact.clone(),
+                    validation_evidence_artifact: artifact.clone(),
+                }),
+            })
+            .expect("matching proposal should be accepted");
+        assert!(matches!(
+            store.append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(observed.id),
+                provenance: provenance(),
+                payload: EventPayload::PlanProposalRejected(PlanProposalRejected {
+                    proposal_id: PlanProposalId::new(),
+                    inference_attempt_id: attempt_id,
+                    observed_event_id: observed.id,
+                    proposal_artifact: artifact.clone(),
+                    base_plan_revision: 0,
+                    base_plan_digest: genesis.clone(),
+                    reason: PlanProposalRejectionReason::StaleBaseRevision,
+                    validation_evidence_artifact: artifact.clone(),
+                }),
+            }),
+            Err(StoreError::InvalidStateEvent)
+        ));
+        assert!(matches!(
+            store.append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(accepted.id),
+                provenance: provenance(),
+                payload: EventPayload::PlannerInferencePrepared(prepared_payload(
+                    InferenceAttemptId::new(),
+                    TokenReservationId::new(),
+                    None,
+                    &artifact,
+                    0,
+                    genesis,
+                    0,
+                )),
+            }),
+            Err(StoreError::InvalidStateEvent)
+        ));
+        let next_attempt = InferenceAttemptId::new();
+        append_prepared(
+            &mut store,
+            &session,
+            &run,
+            actor_id,
+            accepted.id,
+            prepared_payload(
+                next_attempt,
+                TokenReservationId::new(),
+                None,
+                &artifact,
+                1,
+                accepted_digest,
+                0,
+            ),
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the read prepare/observe fixture deliberately shows the full causal record"
+    )]
+    fn read_operations_are_prepared_first_unique_and_plan_bound() {
+        let (_directory, mut store, session, run, actor_id, _runtime_id, claim, artifact, genesis) =
+            planner_store();
+        let attempt_id = InferenceAttemptId::new();
+        let inference = append_prepared(
+            &mut store,
+            &session,
+            &run,
+            actor_id,
+            claim.id,
+            prepared_payload(
+                attempt_id,
+                TokenReservationId::new(),
+                None,
+                &artifact,
+                0,
+                genesis.clone(),
+                0,
+            ),
+        );
+        let unknown = store
+            .append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(inference.id),
+                provenance: provenance(),
+                payload: EventPayload::PlannerInferenceOutcomeUnknown(
+                    PlannerInferenceOutcomeUnknown {
+                        attempt_id,
+                        token_reservation_id: match &inference.payload {
+                            EventPayload::PlannerInferencePrepared(value) => {
+                                value.token_reservation.id
+                            }
+                            _ => unreachable!(),
+                        },
+                        prepared_event_id: inference.id,
+                        reason: UnknownInferenceOutcomeReason::RuntimeRestartedBeforeObservation,
+                        cancellation_generation: 0,
+                    },
+                ),
+            })
+            .expect("unknown inference should persist");
+        let operation_id = ReadOperationId::new();
+        assert!(matches!(
+            store.append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(unknown.id),
+                provenance: provenance(),
+                payload: EventPayload::ReadOperationObserved(ReadOperationObserved {
+                    operation_id,
+                    prepared_event_id: unknown.id,
+                    normalized_complete_evidence_artifact: artifact.clone(),
+                    outcome: ReadOperationObservation::Succeeded {
+                        bytes_read: 1,
+                        entries_read: 0,
+                        truncated: false,
+                    },
+                }),
+            }),
+            Err(StoreError::InvalidStateEvent)
+        ));
+        let read_prepared = store
+            .append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(unknown.id),
+                provenance: provenance(),
+                payload: EventPayload::ReadOperationPrepared(ReadOperationPrepared {
+                    operation_id,
+                    operation: ReadOperation::ReadFile {
+                        path: PathBuf::from("/tmp/planner-store/README.md").into(),
+                        offset_bytes: 0,
+                        max_bytes: 4096,
+                    },
+                    request_artifact: artifact.clone(),
+                    plan_revision: 0,
+                    plan_digest: genesis,
+                    cancellation_generation: 0,
+                }),
+            })
+            .expect("read prepare should persist");
+        let observation = NewEvent {
+            session_id: session.id,
+            run_id: Some(run.id),
+            actor_id,
+            causal_parent: Some(read_prepared.id),
+            provenance: provenance(),
+            payload: EventPayload::ReadOperationObserved(ReadOperationObserved {
+                operation_id,
+                prepared_event_id: read_prepared.id,
+                normalized_complete_evidence_artifact: artifact,
+                outcome: ReadOperationObservation::Succeeded {
+                    bytes_read: 8,
+                    entries_read: 0,
+                    truncated: false,
+                },
+            }),
+        };
+        store
+            .append_event(observation.clone())
+            .expect("first read observation should persist");
+        assert!(matches!(
+            store.append_event(observation),
+            Err(StoreError::InvalidStateEvent)
+        ));
+    }
+
+    #[test]
+    fn planner_nested_artifacts_must_exist_and_match_content() {
+        let (_directory, mut store, session, run, actor_id, _runtime_id, claim, artifact, genesis) =
+            planner_store();
+        let missing = ArtifactRef {
+            sha256: "0".repeat(64),
+            size_bytes: 4,
+            media_type: "application/json".to_owned(),
+        };
+        let missing_payload = prepared_payload(
+            InferenceAttemptId::new(),
+            TokenReservationId::new(),
+            None,
+            &missing,
+            0,
+            genesis.clone(),
+            0,
+        );
+        assert!(
+            store
+                .append_event(NewEvent {
+                    session_id: session.id,
+                    run_id: Some(run.id),
+                    actor_id,
+                    causal_parent: Some(claim.id),
+                    provenance: provenance(),
+                    payload: EventPayload::PlannerInferencePrepared(missing_payload),
+                })
+                .is_err()
+        );
+
+        let path = store
+            .artifact_path(&artifact.sha256)
+            .expect("fixture artifact path should resolve");
+        fs::write(
+            &path,
+            vec![b'x'; usize::try_from(artifact.size_bytes).unwrap()],
+        )
+        .expect("fixture artifact should be tampered");
+        assert!(matches!(
+            store.append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(claim.id),
+                provenance: provenance(),
+                payload: EventPayload::PlannerInferencePrepared(prepared_payload(
+                    InferenceAttemptId::new(),
+                    TokenReservationId::new(),
+                    None,
+                    &artifact,
+                    0,
+                    genesis,
+                    0,
+                )),
+            }),
+            Err(StoreError::ArtifactIntegrity)
+        ));
+    }
+
+    #[test]
+    fn planner_owner_operations_require_a_live_claim_lease() {
+        let (
+            _directory,
+            mut store,
+            session,
+            run,
+            actor_id,
+            _runtime_id,
+            running,
+            artifact,
+            genesis,
+        ) = planner_store();
+        let mut claim = store
+            .events_for_run_after(run.id, 0)
+            .unwrap()
+            .events
+            .into_iter()
+            .find(|event| matches!(event.payload, EventPayload::RunClaimed(_)))
+            .expect("planner fixture should contain a claim");
+        let EventPayload::RunClaimed(value) = &mut claim.payload else {
+            unreachable!()
+        };
+        value.lease_expires_at = Utc::now() - chrono::Duration::seconds(1);
+        store
+            .connection
+            .execute_batch(
+                "DROP TRIGGER events_are_immutable_on_update;
+                 DROP TRIGGER events_are_immutable_on_delete;",
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE events SET value_json = ?1 WHERE id = ?2",
+                params![serde_json::to_string(&claim).unwrap(), claim.id.to_string()],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute_batch(SCHEMA_V2_IMMUTABILITY_TRIGGERS_SQL)
+            .unwrap();
+
+        let before = store.events_for_run_after(run.id, 0).unwrap().events.len();
+        assert!(matches!(
+            store.append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(running.id),
+                provenance: provenance(),
+                payload: EventPayload::PlannerInferencePrepared(prepared_payload(
+                    InferenceAttemptId::new(),
+                    TokenReservationId::new(),
+                    None,
+                    &artifact,
+                    0,
+                    genesis,
+                    0,
+                )),
+            }),
+            Err(StoreError::InvalidStateEvent)
+        ));
+        assert_eq!(
+            store.events_for_run_after(run.id, 0).unwrap().events.len(),
+            before
+        );
+    }
+
+    #[test]
+    fn planner_attempts_bind_selected_backend_and_reserved_token_ceiling() {
+        let (
+            _directory,
+            mut store,
+            session,
+            run,
+            actor_id,
+            _runtime_id,
+            running,
+            artifact,
+            genesis,
+        ) = planner_store();
+        let mut wrong_backend = prepared_payload(
+            InferenceAttemptId::new(),
+            TokenReservationId::new(),
+            None,
+            &artifact,
+            0,
+            genesis.clone(),
+            0,
+        );
+        wrong_backend.backend_model.backend_id = "different-backend".to_owned();
+        assert!(matches!(
+            store.append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(running.id),
+                provenance: provenance(),
+                payload: EventPayload::PlannerInferencePrepared(wrong_backend),
+            }),
+            Err(StoreError::InvalidStateEvent)
+        ));
+
+        let attempt_id = InferenceAttemptId::new();
+        let prepared = append_prepared(
+            &mut store,
+            &session,
+            &run,
+            actor_id,
+            running.id,
+            prepared_payload(
+                attempt_id,
+                TokenReservationId::new(),
+                None,
+                &artifact,
+                0,
+                genesis,
+                0,
+            ),
+        );
+        let EventPayload::PlannerInferencePrepared(prepared_payload) = &prepared.payload else {
+            unreachable!()
+        };
+        assert!(matches!(
+            store.append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(prepared.id),
+                provenance: provenance(),
+                payload: EventPayload::PlannerInferenceObserved(PlannerInferenceObserved {
+                    attempt_id,
+                    token_reservation_id: prepared_payload.token_reservation.id,
+                    prepared_event_id: prepared.id,
+                    normalized_complete_evidence_artifact: artifact,
+                    outcome: PlannerInferenceObservation::Succeeded {
+                        reported_backend_model: prepared_payload.backend_model.clone(),
+                        token_usage: TokenUsage {
+                            input_tokens: 65,
+                            output_tokens: 64,
+                            total_tokens: 129,
+                            cached_input_tokens: None,
+                        },
+                    },
+                }),
+            }),
+            Err(StoreError::InvalidStateEvent)
+        ));
+    }
+
+    #[test]
+    fn terminal_runs_reject_new_claims_cancellations_and_planner_work() {
+        let (_directory, mut store, session, run, actor_id, runtime_id, running, artifact, genesis) =
+            planner_store();
+        let cancellation = store
+            .append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(running.id),
+                provenance: provenance(),
+                payload: EventPayload::CancellationRequested(CancellationRequested {
+                    cancellation_request_id: birdcode_protocol::CancellationRequestId::new(),
+                    cancellation_generation: 1,
+                }),
+            })
+            .expect("cancellation should be durable before terminal state");
+        let terminal = store
+            .append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(cancellation.id),
+                provenance: provenance(),
+                payload: EventPayload::RunStateChanged {
+                    from: RunState::Running,
+                    to: RunState::Cancelled,
+                },
+            })
+            .expect("the still-live original claim may honor cancellation without renewal");
+        let before = store.events_for_run_after(run.id, 0).unwrap().events.len();
+
+        let terminal_events = [
+            EventPayload::RunClaimed(RunClaimed {
+                claim_id: RunClaimId::new(),
+                runtime_instance_id: runtime_id,
+                claim_generation: 2,
+                cancellation_generation: 0,
+                lease_expires_at: Utc::now() + chrono::Duration::minutes(10),
+            }),
+            EventPayload::CancellationRequested(CancellationRequested {
+                cancellation_request_id: birdcode_protocol::CancellationRequestId::new(),
+                cancellation_generation: 1,
+            }),
+            EventPayload::PlannerInferencePrepared(prepared_payload(
+                InferenceAttemptId::new(),
+                TokenReservationId::new(),
+                None,
+                &artifact,
+                0,
+                genesis.clone(),
+                0,
+            )),
+            EventPayload::ReadOperationPrepared(ReadOperationPrepared {
+                operation_id: ReadOperationId::new(),
+                operation: ReadOperation::ReadFile {
+                    path: PathBuf::from("/tmp/planner-store/README.md").into(),
+                    offset_bytes: 0,
+                    max_bytes: 4_096,
+                },
+                request_artifact: artifact,
+                plan_revision: 0,
+                plan_digest: genesis,
+                cancellation_generation: 0,
+            }),
+        ];
+        for payload in terminal_events {
+            assert!(matches!(
+                store.append_event(NewEvent {
+                    session_id: session.id,
+                    run_id: Some(run.id),
+                    actor_id,
+                    causal_parent: Some(terminal.id),
+                    provenance: provenance(),
+                    payload,
+                }),
+                Err(StoreError::InvalidStateEvent)
+            ));
+        }
+        assert_eq!(
+            store.events_for_run_after(run.id, 0).unwrap().events.len(),
+            before
+        );
+    }
+
+    #[test]
+    fn replacement_actor_may_terminalize_latest_durable_inactive_cancellation() {
+        let (_directory, mut store) = test_store();
+        let requesting_actor = ActorId::new();
+        let replacement_actor = ActorId::new();
+        let session = Session::new(CreateSessionRequest {
+            workspace_root: PathBuf::from("/tmp/replacement-cancellation").into(),
+            title: Some("Replacement cancellation owner".to_owned()),
+        });
+        let session_created = store
+            .create_session(&session, session_event(&session, requesting_actor))
+            .expect("session should persist");
+        let run = run_for(&session);
+        let run_created = store
+            .create_run(
+                &run,
+                NewEvent {
+                    session_id: session.id,
+                    run_id: Some(run.id),
+                    actor_id: requesting_actor,
+                    causal_parent: Some(session_created.id),
+                    provenance: provenance(),
+                    payload: EventPayload::RunCreated { run: run.clone() },
+                },
+            )
+            .expect("queued run should persist");
+        let cancellation = store
+            .append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id: requesting_actor,
+                causal_parent: Some(run_created.id),
+                provenance: provenance(),
+                payload: EventPayload::CancellationRequested(CancellationRequested {
+                    cancellation_request_id: birdcode_protocol::CancellationRequestId::new(),
+                    cancellation_generation: 1,
+                }),
+            })
+            .expect("cancellation should persist before the simulated crash");
+
+        assert!(matches!(
+            store.append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id: replacement_actor,
+                causal_parent: Some(run_created.id),
+                provenance: provenance(),
+                payload: EventPayload::RunStateChanged {
+                    from: RunState::Queued,
+                    to: RunState::Cancelled,
+                },
+            }),
+            Err(StoreError::InvalidStateEvent)
+        ));
+        let terminal = store
+            .append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id: replacement_actor,
+                causal_parent: Some(cancellation.id),
+                provenance: provenance(),
+                payload: EventPayload::RunStateChanged {
+                    from: RunState::Queued,
+                    to: RunState::Cancelled,
+                },
+            })
+            .expect("durable cancellation should authorize the replacement actor");
+
+        assert_eq!(terminal.causal_parent, Some(cancellation.id));
+        assert_eq!(
+            store
+                .get_run(run.id)
+                .unwrap()
+                .expect("run should exist")
+                .state,
+            RunState::Cancelled
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one retry flow proves unknown outcomes consume budget and authority stays immutable"
+    )]
+    fn unknown_attempts_keep_their_aggregate_run_budget_consumed() {
+        let (
+            _directory,
+            mut store,
+            session,
+            run,
+            actor_id,
+            _runtime_id,
+            running,
+            artifact,
+            genesis,
+        ) = planner_store_with_output_limit(Some(100));
+        let first_attempt = InferenceAttemptId::new();
+        let first = append_prepared(
+            &mut store,
+            &session,
+            &run,
+            actor_id,
+            running.id,
+            prepared_payload(
+                first_attempt,
+                TokenReservationId::new(),
+                None,
+                &artifact,
+                0,
+                genesis.clone(),
+                0,
+            ),
+        );
+        let EventPayload::PlannerInferencePrepared(first_payload) = &first.payload else {
+            unreachable!()
+        };
+        let unknown = store
+            .append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(first.id),
+                provenance: provenance(),
+                payload: EventPayload::PlannerInferenceOutcomeUnknown(
+                    PlannerInferenceOutcomeUnknown {
+                        attempt_id: first_attempt,
+                        token_reservation_id: first_payload.token_reservation.id,
+                        prepared_event_id: first.id,
+                        reason: UnknownInferenceOutcomeReason::RuntimeRestartedBeforeObservation,
+                        cancellation_generation: 0,
+                    },
+                ),
+            })
+            .expect("unknown outcome should retain its reservation");
+        let before = store.events_for_run_after(run.id, 0).unwrap().events.len();
+        let second_attempt = InferenceAttemptId::new();
+        assert!(matches!(
+            store.append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(unknown.id),
+                provenance: provenance(),
+                payload: EventPayload::PlannerInferencePrepared(prepared_payload(
+                    second_attempt,
+                    TokenReservationId::new(),
+                    Some(first_attempt),
+                    &artifact,
+                    0,
+                    genesis.clone(),
+                    0,
+                )),
+            }),
+            Err(StoreError::InvalidStateEvent)
+        ));
+        assert_eq!(
+            store.events_for_run_after(run.id, 0).unwrap().events.len(),
+            before
+        );
+
+        let mut authority_mutation = prepared_payload(
+            second_attempt,
+            TokenReservationId::new(),
+            Some(first_attempt),
+            &artifact,
+            0,
+            genesis.clone(),
+            0,
+        );
+        authority_mutation.token_reservation.max_output_tokens = 36;
+        authority_mutation.obligation_snapshot_digest = digest('0');
+        assert!(matches!(
+            store.append_event(NewEvent {
+                session_id: session.id,
+                run_id: Some(run.id),
+                actor_id,
+                causal_parent: Some(unknown.id),
+                provenance: provenance(),
+                payload: EventPayload::PlannerInferencePrepared(authority_mutation),
+            }),
+            Err(StoreError::InvalidStateEvent)
+        ));
+
+        let mut exact_remaining = prepared_payload(
+            second_attempt,
+            TokenReservationId::new(),
+            Some(first_attempt),
+            &artifact,
+            0,
+            genesis,
+            0,
+        );
+        exact_remaining.token_reservation.max_output_tokens = 36;
+        append_prepared(
+            &mut store,
+            &session,
+            &run,
+            actor_id,
+            unknown.id,
+            exact_remaining,
+        );
+    }
+
+    #[test]
+    fn concurrent_distinct_reservations_cannot_oversubscribe_one_run() {
+        let (directory, store, session, run, actor_id, _runtime_id, running, artifact, genesis) =
+            planner_store_with_output_limit(Some(64));
+        let database = directory.path().join("state.sqlite3");
+        let artifacts = directory.path().join("artifacts");
+        drop(store);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles = (0..2)
+            .map(|_| {
+                let barrier = std::sync::Arc::clone(&barrier);
+                let database = database.clone();
+                let artifacts = artifacts.clone();
+                let artifact = artifact.clone();
+                let genesis = genesis.clone();
+                std::thread::spawn(move || {
+                    let mut store = Store::open(database, artifacts).unwrap();
+                    barrier.wait();
+                    store
+                        .append_event(NewEvent {
+                            session_id: session.id,
+                            run_id: Some(run.id),
+                            actor_id,
+                            causal_parent: Some(running.id),
+                            provenance: provenance(),
+                            payload: EventPayload::PlannerInferencePrepared(prepared_payload(
+                                InferenceAttemptId::new(),
+                                TokenReservationId::new(),
+                                None,
+                                &artifact,
+                                0,
+                                genesis,
+                                0,
+                            )),
+                        })
+                        .is_ok()
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|accepted| **accepted).count(), 1);
+        let reopened = Store::open(database, artifacts).unwrap();
+        let prepared = reopened
+            .events_for_run_after(run.id, 0)
+            .unwrap()
+            .events
+            .into_iter()
+            .filter(|event| matches!(event.payload, EventPayload::PlannerInferencePrepared(_)))
+            .count();
+        assert_eq!(prepared, 1);
+    }
+
+    #[test]
+    fn protocol_v2_persisted_runs_default_to_execute_only_inside_store_decode() {
+        let (_directory, mut store) = test_store();
+        let actor_id = ActorId::new();
+        let session = Session::new(CreateSessionRequest {
+            workspace_root: PathBuf::from("/tmp/v2-run-purpose").into(),
+            title: None,
+        });
+        let session_created = store
+            .create_session(&session, session_event(&session, actor_id))
+            .unwrap();
+        let run = run_for(&session);
+        let run_created = store
+            .create_run(
+                &run,
+                NewEvent {
+                    session_id: session.id,
+                    run_id: Some(run.id),
+                    actor_id,
+                    causal_parent: Some(session_created.id),
+                    provenance: provenance(),
+                    payload: EventPayload::RunCreated { run: run.clone() },
+                },
+            )
+            .unwrap();
+        let mut run_value = serde_json::to_value(&run).unwrap();
+        run_value["spec"].as_object_mut().unwrap().remove("purpose");
+        assert!(serde_json::from_value::<Run>(run_value.clone()).is_err());
+        let mut event_value = serde_json::to_value(&run_created).unwrap();
+        event_value["payload"]["data"]["run"]["spec"]
+            .as_object_mut()
+            .unwrap()
+            .remove("purpose");
+        store
+            .connection
+            .execute_batch(
+                "DROP TRIGGER events_are_immutable_on_update;
+                 DROP TRIGGER events_are_immutable_on_delete;",
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE runs SET value_json = ?1 WHERE id = ?2",
+                params![run_value.to_string(), run.id.to_string()],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE events SET value_json = ?1 WHERE id = ?2",
+                params![event_value.to_string(), run_created.id.to_string()],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute_batch(SCHEMA_V2_IMMUTABILITY_TRIGGERS_SQL)
+            .unwrap();
+        assert_eq!(
+            store.get_run(run.id).unwrap().unwrap().spec.purpose,
+            RunPurpose::Execute
+        );
+        let replayed = store.events_for_run_after(run.id, 0).unwrap();
+        assert!(matches!(
+            &replayed.events[0].payload,
+            EventPayload::RunCreated { run } if run.spec.purpose == RunPurpose::Execute
+        ));
+    }
+
+    #[test]
+    fn recovery_queries_are_run_bounded_deterministic_and_survive_reopen() {
+        let (directory, mut store) = test_store();
+        let actor_id = ActorId::new();
+        let session = Session::new(CreateSessionRequest {
+            workspace_root: PathBuf::from("/tmp/recovery-page").into(),
+            title: None,
+        });
+        let session_created = store
+            .create_session(&session, session_event(&session, actor_id))
+            .unwrap();
+        let first = run_for(&session);
+        let first_created = store
+            .create_run(
+                &first,
+                NewEvent {
+                    session_id: session.id,
+                    run_id: Some(first.id),
+                    actor_id,
+                    causal_parent: Some(session_created.id),
+                    provenance: provenance(),
+                    payload: EventPayload::RunCreated { run: first.clone() },
+                },
+            )
+            .unwrap();
+        store
+            .append_event(NewEvent {
+                session_id: session.id,
+                run_id: None,
+                actor_id,
+                causal_parent: Some(first_created.id),
+                provenance: provenance(),
+                payload: EventPayload::UserInput { items: Vec::new() },
+            })
+            .unwrap();
+        let second = run_for(&session);
+        let second_created = store
+            .create_run(
+                &second,
+                NewEvent {
+                    session_id: session.id,
+                    run_id: Some(second.id),
+                    actor_id,
+                    causal_parent: Some(first_created.id),
+                    provenance: provenance(),
+                    payload: EventPayload::RunCreated {
+                        run: second.clone(),
+                    },
+                },
+            )
+            .unwrap();
+        let page = store.nonterminal_runs(None).unwrap();
+        let mut expected = vec![first.id, second.id];
+        expected.sort();
+        assert_eq!(
+            page.runs.iter().map(|run| run.id).collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            store.events_for_run_after(second.id, 0).unwrap().events,
+            vec![second_created]
+        );
+        let database = directory.path().join("state.sqlite3");
+        let artifacts = directory.path().join("artifacts");
+        drop(store);
+        let reopened = Store::open(database, artifacts).unwrap();
+        assert_eq!(reopened.nonterminal_runs(None).unwrap().runs.len(), 2);
+        assert_eq!(
+            reopened.events_for_run_after(first.id, 0).unwrap().events,
+            vec![first_created]
+        );
+    }
+
+    #[test]
+    fn nonterminal_recovery_pagination_crosses_its_page_boundary_exactly_once() {
+        fn collect(store: &Store) -> (Vec<RunId>, usize) {
+            let mut cursor = None;
+            let mut ids = Vec::new();
+            let mut pages = 0;
+            loop {
+                let page = store.nonterminal_runs(cursor).unwrap();
+                pages += 1;
+                for run in &page.runs {
+                    if let Some(previous) = ids.last() {
+                        assert!(previous < &run.id, "recovery cursor must increase strictly");
+                    }
+                    ids.push(run.id);
+                }
+                assert_eq!(page.next_run_id, ids.last().copied());
+                cursor = page.next_run_id;
+                if !page.has_more {
+                    return (ids, pages);
+                }
+            }
+        }
+
+        let (directory, mut store) = test_store();
+        let actor_id = ActorId::new();
+        let session = Session::new(CreateSessionRequest {
+            workspace_root: PathBuf::from("/tmp/recovery-page-boundary").into(),
+            title: None,
+        });
+        let mut causal_parent = Some(
+            store
+                .create_session(&session, session_event(&session, actor_id))
+                .unwrap()
+                .id,
+        );
+        let mut expected = Vec::new();
+        for _ in 0..usize::try_from(RUN_RECOVERY_PAGE_SIZE).unwrap() + 3 {
+            let run = run_for(&session);
+            let created = store
+                .create_run(
+                    &run,
+                    NewEvent {
+                        session_id: session.id,
+                        run_id: Some(run.id),
+                        actor_id,
+                        causal_parent,
+                        provenance: provenance(),
+                        payload: EventPayload::RunCreated { run: run.clone() },
+                    },
+                )
+                .unwrap();
+            causal_parent = Some(created.id);
+            expected.push(run.id);
+        }
+        expected.sort_unstable();
+
+        let (ids, pages) = collect(&store);
+        assert_eq!(pages, 2);
+        assert_eq!(ids, expected);
+
+        let database = directory.path().join("state.sqlite3");
+        let artifacts = directory.path().join("artifacts");
+        drop(store);
+        let reopened = Store::open(database, artifacts).unwrap();
+        assert_eq!(collect(&reopened), (expected, 2));
+    }
+
+    #[test]
+    fn concurrent_connections_commit_exactly_one_claim_and_one_prepared_attempt() {
+        let (directory, store, session, run, actor_id, runtime_id, claim, artifact, genesis) =
+            planner_store();
+        let database = directory.path().join("state.sqlite3");
+        let artifacts = directory.path().join("artifacts");
+        drop(store);
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let claim_handles = (0..2)
+            .map(|_| {
+                let barrier = std::sync::Arc::clone(&barrier);
+                let database = database.clone();
+                let artifacts = artifacts.clone();
+                std::thread::spawn(move || {
+                    let mut store = Store::open(database, artifacts).unwrap();
+                    barrier.wait();
+                    store
+                        .append_event(NewEvent {
+                            session_id: session.id,
+                            run_id: Some(run.id),
+                            actor_id,
+                            causal_parent: Some(claim.id),
+                            provenance: provenance(),
+                            payload: EventPayload::RunClaimed(RunClaimed {
+                                claim_id: RunClaimId::new(),
+                                runtime_instance_id: runtime_id,
+                                claim_generation: 2,
+                                cancellation_generation: 0,
+                                lease_expires_at: Utc::now() + chrono::Duration::minutes(10),
+                            }),
+                        })
+                        .is_ok()
+                })
+            })
+            .collect::<Vec<_>>();
+        let claim_results = claim_handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(claim_results.iter().filter(|result| **result).count(), 1);
+
+        let reopened = Store::open(&database, &artifacts).unwrap();
+        let latest_claim = reopened
+            .events_for_run_after(run.id, 0)
+            .unwrap()
+            .events
+            .into_iter()
+            .rev()
+            .find(|event| matches!(event.payload, EventPayload::RunClaimed(_)))
+            .unwrap();
+        drop(reopened);
+        let attempt_id = InferenceAttemptId::new();
+        let reservation_id = TokenReservationId::new();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let prepared_handles = (0..2)
+            .map(|_| {
+                let barrier = std::sync::Arc::clone(&barrier);
+                let database = database.clone();
+                let artifacts = artifacts.clone();
+                let artifact = artifact.clone();
+                let genesis = genesis.clone();
+                std::thread::spawn(move || {
+                    let mut store = Store::open(database, artifacts).unwrap();
+                    barrier.wait();
+                    store
+                        .append_event(NewEvent {
+                            session_id: session.id,
+                            run_id: Some(run.id),
+                            actor_id,
+                            causal_parent: Some(latest_claim.id),
+                            provenance: provenance(),
+                            payload: EventPayload::PlannerInferencePrepared(prepared_payload(
+                                attempt_id,
+                                reservation_id,
+                                None,
+                                &artifact,
+                                0,
+                                genesis,
+                                0,
+                            )),
+                        })
+                        .is_ok()
+                })
+            })
+            .collect::<Vec<_>>();
+        let prepared_results = prepared_handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(prepared_results.iter().filter(|result| **result).count(), 1);
     }
 }
