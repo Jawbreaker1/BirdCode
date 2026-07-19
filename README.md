@@ -25,16 +25,22 @@ strongest available Codex Sol/Ultra baseline under fair clean-room comparison.
 That is a measured product target, not a superiority claim the current
 foundation has earned.
 
-The project is currently at the **foundation milestone**. Its local daemon,
-protocol, persistence layer, desktop health shell, CLI probes, typed prompt
-compiler, semantic router, standalone router executor, and LM Studio adapter
-are real and testable. The agent execution loop is not wired yet, so BirdCode
-is not currently a usable replacement for Codex or another production coding
-agent.
+The project is currently at the **durable root-planner milestone**. The native
+desktop and CLI can discover an exact already-loaded LM Studio model, submit a
+real `PlanOnly` run to the local daemon, and replay the resulting typed events
+and hash-verified artifacts. The daemon retains the compiled prompt, exact
+request, provider evidence, proposed plan, deterministic validation, accepted
+plan, budget use, claims, cancellation, and terminal state.
 
-> **Plainly:** BirdCode has a substantial, tested systems foundation, but no
-> operational coding-agent path yet. It is a working foundation—not yet a
-> working coding agent.
+That is the first operational model-authored product path, not yet a coding
+agent. The live root planner receives the user's goal and repository identity;
+it does not yet inspect repository contents, call tools, edit files, execute
+work orders, launch child agents, replan from tool evidence, or commission an
+independent semantic critic.
+
+> **Plainly:** BirdCode can now ask a real local model for a durable, typed root
+> plan through the GUI or CLI. It cannot execute that plan yet, so it is still
+> not a Codex replacement.
 
 ## Parallel agency is the execution model
 
@@ -53,26 +59,29 @@ blind outcome review. Semantic decisions stay model-driven through versioned
 typed contracts; the local runtime enforces permissions, budgets, isolation,
 causal history, cancellation, mailbox delivery, and publication gates.
 
-**Current truth:** this execution topology is designed but not running yet. No
-child actor, scheduler dispatch, isolated worktree, mailbox, handoff, or
-integration path executes today.
+**Current truth:** the product-wired path performs one initial root-planning
+turn only. A separate tested planner/replanner kernel already represents
+model-authored `Execute`, `Delegate`, `Clarify`, `Escalate`, and `Finish`
+directives plus bounded plan patches and revisions, but it is not connected to
+the daemon path. No child actor, worktree lease, mailbox, handoff, integration,
+or independent review actor executes today.
 
 ## Current interface
 
 <p align="center">
-  <img src="docs/assets/screenshots/desktop-overview.png" alt="BirdCode desktop overview with the local runtime ready and backend setup still required" width="1200">
+  <img src="docs/assets/screenshots/desktop-root-planner-ready.png" alt="BirdCode native macOS root planner with the local runtime ready and an exact LM Studio model discovered" width="1200">
 </p>
 
-<p align="center"><sub>Native macOS desktop foundation connected to the real local Rust daemon. Repository selection, model-backend execution, and agent runs are deliberately shown as not wired yet.</sub></p>
+<p align="center"><sub>The real native macOS application: local daemon ready, protocol v4 negotiated, and the exact loaded Gemma model discovered. No model output is simulated.</sub></p>
 
 <table>
   <tr>
-    <td width="74%"><img src="docs/assets/screenshots/multilingual-composer.png" alt="BirdCode browser preview preserving a multilingual task while execution remains disabled"></td>
-    <td width="26%"><img src="docs/assets/screenshots/runtime-setup.png" alt="BirdCode native run setup panel showing repository, backend, permissions, and runtime protocol status"></td>
+    <td width="66%"><img src="docs/assets/screenshots/multilingual-composer.png" alt="BirdCode composer preserving a multilingual task verbatim"></td>
+    <td width="34%"><img src="docs/assets/screenshots/desktop-root-planner-inspector.png" alt="BirdCode native PlanOnly run setup with exact model, bounded limits, authority and protocol v4 status"></td>
   </tr>
   <tr>
-    <td><sub>Real 1280 × 720 browser-preview state. Multilingual input is preserved verbatim; execution remains disabled without the desktop bridge and a daemon-integrated backend.</sub></td>
-    <td><sub>Native run setup with actual daemon health and protocol 2. Backend and permission policy remain explicitly unconnected.</sub></td>
+    <td><sub>Earlier composer-focused capture: multilingual goals remain data; language intent is interpreted by the model contract rather than keyword or regular-expression branches.</sub></td>
+    <td><sub>Cropped detail from the native capture: exact loaded-model selection, bounded PlanOnly authority, local stdio transport, and protocol v4.</sub></td>
   </tr>
 </table>
 
@@ -152,16 +161,18 @@ Apple Silicon.
 
 | Area | Status | What works now |
 | --- | --- | --- |
-| Tauri 2 + React desktop | Implemented foundation | Starts the real daemon sidecar, negotiates the protocol, polls runtime health, and never fabricates model activity |
-| Rust CLI | Implemented subset | `doctor` and a durable create/reload session smoke path through the same daemon client |
-| Local daemon and client | Implemented foundation | Typed, bounded JSON-lines over stdio, exact protocol negotiation, request deadlines, and conservative reconnect behavior |
-| Durable store | Implemented foundation | Append-only events, bounded paging, checkpointed upgrades, O(1) run-state projection, closed-world schema health, and verified content-addressed artifacts |
+| Tauri 2 + React desktop | Implemented PlanOnly slice | Starts the real daemon, discovers exact loaded LM Studio models, submits/cancels one root-planning run, holds ambiguous starts for exact typed reconciliation, replays typed events, and verifies every displayed artifact hash |
+| Rust CLI | Implemented PlanOnly subset | `doctor`, `session-smoke`, `models`, and `plan`; successful plan output is only the verified accepted JSON artifact |
+| Local daemon and client | Implemented PlanOnly slice | Protocol v4 over bounded JSON-lines/stdio, durable background supervision, client-stable run identity, bounded dispatch, claims, typed failures, deadlines, cancellation, replay, and exact model selection |
+| Durable store | Implemented foundation | Append-only events, bounded paging, checkpointed upgrades, indexed run state, closed-world schema health, token ledgers, claim leases, and verified content-addressed artifacts |
+| Durable root planner | **Product-wired** | One real LM Studio inference produces `Plan`, `Clarify`, or `Escalate`; prompt/request/raw evidence/proposal/validation/accepted plan are retained and causally bound |
 | Semantic task router | Implemented standalone | LLM-classified action, access, and delegation strategy with typed collect-all validation and no heuristic fallback |
 | Standalone router executor | Implemented standalone | First-pass routing plus at most one typed, patch-only evidence repair; fake-backend tested and not daemon-wired |
+| Planner/replanner kernel | Implemented standalone | Model-authored plan patches and `Execute`/`Delegate`/`Clarify`/`Escalate`/`Finish` directives are bounded against independent obligations, context, budgets, and authority; not daemon-wired |
 | Actor-graph scheduler kernel | Implemented standalone | Validates model-authored DAGs against an independent trusted policy, executes read-only dependency-ready workers concurrently, bounds retries/deadlines/cleanup/budgets, and retains typed causal provenance; writes fail closed and no production worker or durable journal exists yet |
-| LM Studio backend | Implemented standalone | Read-only discovery plus strict structured inference with bounded HTTP behavior and versioned, retained eval reports |
+| LM Studio backend | Implemented; PlanOnly-wired | Exact read-only discovery plus strict structured inference with bounded HTTP behavior; used by the durable root planner and standalone versioned evals |
 | Execution & Validation Plane | Implemented typed foundation | Composite surface/platform targets, immutable run manifests, commands, bounds, hash-linked provenance, evidence policy, and blind review packages; no process or platform adapter executes yet |
-| Agent execution loop | **Not wired** | Run specifications can be persisted, but no backend is invoked by the daemon |
+| Agent execution loop | **Initial planning turn only** | The daemon invokes LM Studio for root planning; repository discovery, tool use, work-order execution, repair, and semantic review do not execute yet |
 | Context compilation and compaction | Designed | Architecture and invariants are documented; runtime implementation remains |
 | General Tooling Plane and permission broker | Designed, not implemented | No repository, shell, filesystem, Git, browser, or platform tool is exposed to a live agent yet |
 | Parallel agent runtime | **Kernel only; not product-wired** | A standalone generic scheduler executes test workers with real overlap, but no model-backed child, broker-provisioned workspace, durable mailbox/journal, cancellation/recovery, or integration path executes through the daemon |
@@ -169,11 +180,11 @@ Apple Silicon.
 | Local Codex bridge | Planned | Clean-room adapter direction is documented; no product integration exists yet |
 | Windows and Linux | Planned | Core boundaries are portable, but builds and platform behavior are not yet verified |
 
-The semantic router, its portable executor, actor-graph scheduler kernel, and
-LM Studio backend currently run through standalone tests and evaluation tools.
-The executors are fake-worker/backend validated; they are not connected to the
-live LM Studio eval and none of these components yet appears as a daemon
-capability in the GUI or CLI.
+The durable root planner is the exception to the otherwise standalone agent
+kernels: it is connected end to end through both GUI and CLI and has been run
+against the locally loaded Gemma model. The semantic router, portable router
+executor, richer planner/replanner, and actor-graph scheduler remain
+fake-worker/backend validated kernels and are not yet daemon capabilities.
 The validation-plane crate likewise defines and tests contracts only; it does
 not yet run commands, launch applications, drive Playwright, or capture media.
 
@@ -182,6 +193,19 @@ not yet run commands, launch applications, drive Playwright, or capture media.
 The strongest retained signals for this foundation are deliberately narrow and
 reproducible:
 
+- **A real durable root-planning turn completed through the product path—and
+  exposed the next missing layer.** From source
+  `006786caec7f484a07a3d8fb1851e0246e56e154`, the CLI selected exact loaded
+  model `google/gemma-4-26b-a4b`, submitted multilingual Swedish/Japanese
+  input, and completed run `019f7bdc-f4a1-7d40-84d3-347ab32013e8`. The daemon
+  retained eight ordered run events, 2,912 reported tokens, and six
+  hash-addressed artifacts. Mechanical validation accepted the typed plan;
+  independent semantic review rejected it because it proposed two sequential
+  discovery orders rather than the requested parallel audits and structured
+  handoffs. This proves transport, persistence, inference, mechanical
+  acceptance, and honest failure retention—not planning quality or code
+  execution. [Inspect the review](docs/reviews/2026-07-19-durable-root-planner-review.md)
+  and [the exact retained artifacts](docs/evidence/2026-07-19-root-planner-live/).
 - **9/9 semantic-router cases passed in one non-repairing inference per case.**
   The run used `google/gemma-4-26b-a4b` Q8_0 with reasoning off on macOS ARM64.
   [Inspect the retained report](evals/reports/2026-07-19-gemma-4-26b-q8-router-v1.1.3.json),
@@ -203,11 +227,13 @@ reproducible:
   contract foundation—not any process or platform adapter.
   [Read the validation-plane release gate](docs/reviews/2026-07-19-validation-plane-review.md).
 - **Failures are retained too.** [The report history](evals/reports/) preserves
-  four earlier failing snapshots instead of replacing them with the green run.
-- **Scope matters.** This proves the standalone router against this nine-case
-  catalog and the current mechanical foundation. It does not validate the
-  daemon agent loop, router repair with a live model, tools, subagents, or
-  product security.
+  four earlier router snapshots, while the root-planner review preserves two
+  schema failures and the final semantically insufficient plan instead of
+  cherry-picking only green-looking output.
+- **Scope matters.** This proves the standalone router against its nine-case
+  catalog and the initial daemon-owned planning turn against one retained live
+  request. It does not validate work-order execution, live-model repair,
+  repository tools, child agents, compaction, or product security.
 
 ## Architecture
 
@@ -219,15 +245,19 @@ flowchart LR
     Desktop["Tauri / React desktop"] --> Client["Typed Rust client"]
     CLI["Rust CLI"] --> Client
     Client -->|"bounded JSONL over stdio"| Daemon["Local Rust daemon"]
+    Daemon --> Supervisor["Durable PlanOnly supervisor"]
+    Supervisor --> RootPrompt["Typed root-planner contract"]
+    RootPrompt -->|"exact loaded model"| LMStudio["LM Studio adapter"]
+    Supervisor --> Store["SQLite event log + artifact store"]
     Daemon --> Runtime["Portable runtime"]
-    Runtime --> Store["SQLite event log + artifact store"]
+    Runtime --> Store
 
-    Prompting["Typed prompt compiler<br/>semantic task router"] -->|"standalone live eval"| LMStudio["LM Studio adapter"]
+    Prompting["Typed prompt compiler<br/>semantic task router"] -->|"standalone live eval"| LMStudio
     Prompting --> RouterExecutor["Portable router executor<br/>one evidence-only repair"]
     RouterExecutor -->|"provider-neutral; fake-backend validated"| ModelBackend["Model backend contract"]
     Validation["Typed validation contracts<br/>blind evidence policy"] -->|"standalone contract tests"| Blind["Provider-blind review package"]
 
-    Runtime -.->|"next: real actor execution"| Orchestrator["Durable orchestration runtime"]
+    Supervisor -.->|"next: execute accepted work orders"| Orchestrator["Durable orchestration runtime"]
     Orchestrator -.-> Actors["Root · specialist · candidate<br/>integration · review actors"]
     Orchestrator -.-> Coordination["Scheduler · budgets · permissions<br/>mailboxes · worktree manager"]
     Actors -.-> Prompting
@@ -264,8 +294,9 @@ npm run dev
 ```
 
 `npm run dev` prepares the host-native daemon sidecar and opens the Tauri
-desktop application. The UI reports actual runtime state; disabled agent
-controls remain disabled until a backend execution path really exists.
+desktop application. With one language model already loaded in LM Studio, the
+UI discovers its exact ID and can perform the real read-only root-planning
+turn. Controls for later execution and comparison stages remain disabled.
 
 To build and exercise the current CLI subset:
 
@@ -273,6 +304,9 @@ To build and exercise the current CLI subset:
 cargo build --workspace
 target/debug/birdcode doctor
 target/debug/birdcode session-smoke
+target/debug/birdcode models
+target/debug/birdcode plan --model <exact-loaded-model-id> \
+  --goal "Plan the complete outcome" --workspace /path/to/repository
 ```
 
 `session-smoke` creates a multilingual test session, reloads it through the
@@ -376,6 +410,13 @@ stable ID, semantic version, declared role, typed invocation and output
 schemas, and deterministic contract coverage. The task router additionally has
 a retained live-model eval; its evidence-repair prompt is currently
 fake-backend tested only.
+
+The product-wired root planner follows the same boundary. Its model-authored
+proposal is bound to independently compiled user obligations, context,
+authority, budgets, prompt manifest, and exact backend/model identity. Local
+code validates those bindings and the plan graph mechanically; it does not use
+keywords or regular expressions to infer the user's language or intent, and it
+does not mistake structural validity for semantic quality.
 
 The implemented task router returns three independent axes:
 
@@ -492,9 +533,9 @@ the application's eventual license decision.
 
 ## Roadmap
 
-1. Execute one real durable root actor through the daemon and LM Studio, with
-   an action-specific context manifest, read-only repository tools, budgets,
-   streaming, cancellation, resume, and truthful GUI/CLI events.
+1. Connect the richer model-authored planner/replanner to durable runtime
+   state, repository discovery, bounded context evidence, independent semantic
+   review, and explicit acceptance/rejection/repair transitions.
 2. Wire two read-only child actors through the standalone scheduler with
    isolated model contexts, broker-attested immutable snapshot leases, durable
    handoffs, cancellation, event replay, and truthful GUI/CLI timelines.

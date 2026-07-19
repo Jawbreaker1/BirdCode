@@ -1,0 +1,68 @@
+{
+  "clarification_questions": [],
+  "context_manifest_sha256": "2c2c0a0c632b93130d753adabdf52f1f4a19663591ddd0e492fc8597e599fc54",
+  "decision_evidence": [
+    {
+      "basis": "run_input",
+      "section": "run_input"
+    }
+  ],
+  "directive": "plan",
+  "escalation_requests": [],
+  "planner_policy_sha256": "4146ae1df37f85e541d81cc68bb2dccc3f12e212023ec0b0d5c3b14dc13256ac",
+  "rationale": "The user intends to plan a new BirdCode slice focused on connecting the model-driven planner/replanner core to a daemon. The goal involves the root agent creating typed plans, delegating two parallel read-only repository audits with separate contexts, and collecting structured handoffs without using language-specific shortcuts. It also requires preserving causal history for post-compaction continuity and maintaining Japanese semantic constraints. I must first explore the repository to locate existing planner/daemon components and understand the current architecture.",
+  "root_snapshot_sha256": "c08078a1183d0ce9fb47daa0af38ad9eab061994512afdda592dd113c94cf8eb",
+  "schema_version": 1,
+  "work_orders": [
+    {
+      "depends_on": [],
+      "local_id": "explore_architecture",
+      "objective": "Identify the existing planner/replanner core and daemon components to understand current integration points.",
+      "obligation_refs": [
+        {
+          "obligation_id": "root_user_goal",
+          "obligation_sha256": "2ce75f311b994c50b8688bb48ba48fe22e22176fed59f6ab032845dee0f6999b"
+        }
+      ],
+      "proposed_verification_targets": [
+        {
+          "kind": "repository_tree",
+          "obligation_refs": [
+            {
+              "obligation_id": "root_user_goal",
+              "obligation_sha256": "2ce75f311b994c50b8688bb48ba48fe22e22176fed59f6ab032845dee0f6999b"
+            }
+          ],
+          "question": "Explore the repository root to locate planner, replanner, and daemon-related directories or files.",
+          "selector": "."
+        }
+      ]
+    },
+    {
+      "depends_on": [
+        "explore_architecture"
+      ],
+      "local_id": "analyze_planner_daemon_interface",
+      "objective": "Examine the current implementation of the planner and daemon to identify how they interact or where the connection needs to be established.",
+      "obligation_refs": [
+        {
+          "obligation_id": "root_user_goal",
+          "obligation_sha256": "2ce75f311b994c50b8688bb48ba48fe22e22176fed59f6ab032845dee0f6999b"
+        }
+      ],
+      "proposed_verification_targets": [
+        {
+          "kind": "repository_search",
+          "obligation_refs": [
+            {
+              "obligation_id": "root_user_goal",
+              "obligation_sha256": "2ce75f311b994c50b8688bb48ba48fe22e22176fed59f6ab032845dee0f6999b"
+            }
+          ],
+          "question": "Search for 'planner' and 'daemon' to identify relevant implementation files.",
+          "selector": "planner daemon"
+        }
+      ]
+    }
+  ]
+}
