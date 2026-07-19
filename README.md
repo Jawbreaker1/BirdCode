@@ -32,6 +32,25 @@ are real and testable. The agent execution loop is not wired yet, so BirdCode
 is not currently a usable replacement for Codex or another production coding
 agent.
 
+## Current interface
+
+<p align="center">
+  <img src="docs/assets/screenshots/desktop-overview.png" alt="BirdCode desktop overview with the local runtime ready and backend setup still required" width="1200">
+</p>
+
+<p align="center"><sub>Native macOS desktop foundation connected to the real local Rust daemon. Repository selection, model-backend execution, and agent runs are deliberately shown as not wired yet.</sub></p>
+
+<table>
+  <tr>
+    <td width="74%"><img src="docs/assets/screenshots/multilingual-composer.jpg" alt="Compact BirdCode browser preview preserving a multilingual task while execution remains disabled"></td>
+    <td width="26%"><img src="docs/assets/screenshots/runtime-setup.png" alt="BirdCode native run setup panel showing repository, backend, permissions, and runtime protocol status"></td>
+  </tr>
+  <tr>
+    <td><sub>Real 1050 px compact layout in browser-preview mode. Multilingual input is preserved; execution remains disabled without the desktop bridge and a daemon-integrated backend.</sub></td>
+    <td><sub>Native run setup with actual daemon health and protocol 2. Backend and permission policy remain explicitly unconnected.</sub></td>
+  </tr>
+</table>
+
 ## Why BirdCode
 
 ### Semantics belong to the model
