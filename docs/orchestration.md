@@ -1,11 +1,14 @@
 # Target subagent orchestration
 
 This document specifies BirdCode's intended subagent orchestration architecture.
-It is an implementable target, not a claim that the scheduler, agent loop,
-worktree manager, mailboxes, or integration pipeline exist today. The current
-foundation is described in the repository [README](../README.md); the broader
-system boundaries are described in [architecture.md](architecture.md), the
-normative direction is in [product-requirements.md](product-requirements.md),
+Most of it remains an implementable target. A standalone, read-only-workspace
+actor-graph validator and concurrent executor now exist in `crates/orchestrator`.
+It has a bounded adapter cleanup callback but not yet a process supervisor; the
+daemon-owned agent loop, durable scheduler journal, atomic write-lease manager,
+mailboxes, subtree cancellation/recovery, tools, and integration pipeline do
+not. The current foundation is described in the repository [README](../README.md);
+the broader system boundaries are described in [architecture.md](architecture.md),
+the normative direction is in [product-requirements.md](product-requirements.md),
 and clean-room comparisons follow [benchmarking.md](benchmarking.md).
 
 The product objective is better completed software, not more agent activity.

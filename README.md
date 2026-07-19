@@ -158,20 +158,22 @@ Apple Silicon.
 | Durable store | Implemented foundation | Append-only events, bounded paging, checkpointed upgrades, O(1) run-state projection, closed-world schema health, and verified content-addressed artifacts |
 | Semantic task router | Implemented standalone | LLM-classified action, access, and delegation strategy with typed collect-all validation and no heuristic fallback |
 | Standalone router executor | Implemented standalone | First-pass routing plus at most one typed, patch-only evidence repair; fake-backend tested and not daemon-wired |
+| Actor-graph scheduler kernel | Implemented standalone | Validates model-authored DAGs against an independent trusted policy, executes read-only dependency-ready workers concurrently, bounds retries/deadlines/cleanup/budgets, and retains typed causal provenance; writes fail closed and no production worker or durable journal exists yet |
 | LM Studio backend | Implemented standalone | Read-only discovery plus strict structured inference with bounded HTTP behavior and versioned, retained eval reports |
 | Execution & Validation Plane | Implemented typed foundation | Composite surface/platform targets, immutable run manifests, commands, bounds, hash-linked provenance, evidence policy, and blind review packages; no process or platform adapter executes yet |
 | Agent execution loop | **Not wired** | Run specifications can be persisted, but no backend is invoked by the daemon |
 | Context compilation and compaction | Designed | Architecture and invariants are documented; runtime implementation remains |
 | General Tooling Plane and permission broker | Designed, not implemented | No repository, shell, filesystem, Git, browser, or platform tool is exposed to a live agent yet |
-| Parallel agent runtime | **Designed, not implemented** | The semantic router can propose bounded subtasks, but no child actor, scheduler dispatch, isolated workspace, mailbox, handoff, or integration path executes today |
+| Parallel agent runtime | **Kernel only; not product-wired** | A standalone generic scheduler executes test workers with real overlap, but no model-backed child, broker-provisioned workspace, durable mailbox/journal, cancellation/recovery, or integration path executes through the daemon |
 | Ollama and OpenAI adapters | Planned | Provider contract exists; adapters do not |
 | Local Codex bridge | Planned | Clean-room adapter direction is documented; no product integration exists yet |
 | Windows and Linux | Planned | Core boundaries are portable, but builds and platform behavior are not yet verified |
 
-The semantic router, its portable executor, and the LM Studio backend currently
-run through standalone tests and evaluation tools. The executor is
-fake-backend validated; it is not connected to the live LM Studio eval and none
-of these components yet appears as a daemon capability in the GUI or CLI.
+The semantic router, its portable executor, actor-graph scheduler kernel, and
+LM Studio backend currently run through standalone tests and evaluation tools.
+The executors are fake-worker/backend validated; they are not connected to the
+live LM Studio eval and none of these components yet appears as a daemon
+capability in the GUI or CLI.
 The validation-plane crate likewise defines and tests contracts only; it does
 not yet run commands, launch applications, drive Playwright, or capture media.
 
@@ -473,7 +475,7 @@ crates/runtime     Portable mechanical runtime state transitions
 crates/store       SQLite event log and content-addressed artifacts
 crates/prompting   Versioned prompt registry, compiler, and semantic router
 crates/backends    Provider-neutral model contract and LM Studio adapter
-crates/orchestrator Provider-neutral standalone routing and typed repair
+crates/orchestrator Standalone semantic routing plus trusted-policy actor-graph scheduling
 crates/validation  Typed Execution & Validation Plane contracts and blind evidence policy
 prompts            Application prompt manifests and schemas
 evals              Versioned semantic evaluation cases
@@ -493,22 +495,25 @@ the application's eventual license decision.
 1. Execute one real durable root actor through the daemon and LM Studio, with
    an action-specific context manifest, read-only repository tools, budgets,
    streaming, cancellation, resume, and truthful GUI/CLI events.
-2. Execute one isolated writing child through a minimal scheduler and
-   permission broker, with a Git worktree/overlay, hash-bound handoff,
-   deterministic integration ownership, and bounded local build validation.
-3. Prove a genuinely parallel actor graph: overlapping children, atomic budget
-   reservations, durable mailboxes, candidate groups, subtree cancellation,
-   integration, and review by an actor that did not author the result.
-4. Broaden the Tooling and Execution & Validation planes, starting with local
+2. Wire two read-only child actors through the standalone scheduler with
+   isolated model contexts, broker-attested immutable snapshot leases, durable
+   handoffs, cancellation, event replay, and truthful GUI/CLI timelines.
+3. Execute one isolated writing child with a Git worktree/overlay, hash-bound
+   patch handoff, deterministic integration ownership, and bounded local build
+   validation.
+4. Prove a genuinely parallel writing graph with atomic live budget ledgers,
+   durable mailboxes, candidate selection, subtree cancellation, integration,
+   and independent review.
+5. Broaden the Tooling and Execution & Validation planes, starting with local
    process and Playwright web slices, then API/server and CLI/TUI adapters.
-5. Feed retained evidence back into bounded repair and graph replanning, then
+6. Feed retained evidence back into bounded repair and graph replanning, then
    prove a complete multi-agent build/start/use/repair/revalidate journey.
-6. Add semantic retrieval and versioned compaction checkpoints without
+7. Add semantic retrieval and versioned compaction checkpoints without
    destructive history loss; use eval-derived model profiles to adapt context,
    decomposition, specialists, parallel candidates, and escalation.
-7. Add Ollama, OpenAI, and the clean-room local Codex bridge, then run retained,
+8. Add Ollama, OpenAI, and the clean-room local Codex bridge, then run retained,
    blind comparisons through the same harness.
-8. Complete the desktop run experience and verify explicit adapters for macOS,
+9. Complete the desktop run experience and verify explicit adapters for macOS,
    Apple simulators, Android, Windows, and Linux.
 
 BirdCode's ambition is high: a complete, inspectable coding-agent system that
