@@ -69,7 +69,7 @@ pub struct TaskRouterOutput {
 pub fn task_router_key() -> PromptKey {
     PromptKey::new(
         PromptId::new(TASK_ROUTER_ID).expect("bundled prompt identifier must be valid"),
-        Version::new(1, 1, 2),
+        Version::new(1, 1, 3),
     )
 }
 

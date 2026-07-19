@@ -1,0 +1,20 @@
+{
+  "id": "semantic-router.english-change",
+  "version": 2,
+  "user_request": "Implement a focused change in the runtime so a cancellation request persists the Cancelled transition before acknowledging it. Update the relevant tests. Work directly without delegating this task.",
+  "repository_context": {
+    "workspace": "BirdCode",
+    "relevant_areas": ["crates/runtime", "crates/store"],
+    "requested_outcome": "A tested implementation that writes to the workspace."
+  },
+  "expected_action": "change",
+  "expected_strategy": "direct",
+  "expected_required_access": "workspace_write",
+  "required_evidence_sections": ["request"],
+  "forbidden_evidence_sections": ["repository"],
+  "min_clarification_questions": 0,
+  "max_clarification_questions": 0,
+  "min_suggested_subtasks": 0,
+  "max_suggested_subtasks": 0,
+  "max_output_tokens": 320
+}

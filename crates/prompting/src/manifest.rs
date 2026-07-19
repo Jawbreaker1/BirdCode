@@ -16,8 +16,10 @@ pub const TASK_ROUTER_MANIFEST_V1_1_0_JSON: &str =
     include_str!("../../../prompts/semantic-task-router/1.1.0/manifest.json");
 pub const TASK_ROUTER_MANIFEST_V1_1_1_JSON: &str =
     include_str!("../../../prompts/semantic-task-router/1.1.1/manifest.json");
-pub const TASK_ROUTER_MANIFEST_JSON: &str =
+pub const TASK_ROUTER_MANIFEST_V1_1_2_JSON: &str =
     include_str!("../../../prompts/semantic-task-router/1.1.2/manifest.json");
+pub const TASK_ROUTER_MANIFEST_JSON: &str =
+    include_str!("../../../prompts/semantic-task-router/1.1.3/manifest.json");
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
 #[derive(Debug, Error)]
@@ -223,6 +225,7 @@ pub fn builtin_registry() -> Result<PromptRegistry, PromptError> {
         parse_manifest(TASK_ROUTER_MANIFEST_V1_0_0_JSON.as_bytes())?,
         parse_manifest(TASK_ROUTER_MANIFEST_V1_1_0_JSON.as_bytes())?,
         parse_manifest(TASK_ROUTER_MANIFEST_V1_1_1_JSON.as_bytes())?,
+        parse_manifest(TASK_ROUTER_MANIFEST_V1_1_2_JSON.as_bytes())?,
         parse_manifest(TASK_ROUTER_MANIFEST_JSON.as_bytes())?,
     ])
 }

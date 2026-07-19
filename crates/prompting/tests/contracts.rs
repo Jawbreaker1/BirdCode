@@ -2,8 +2,9 @@ use birdcode_prompting::{
     CanonicalJson, CompiledPrompt, DataProvenance, DataSection, MessageContent, MessageRole,
     PromptError, PromptInvocation, PromptLimits, PromptRegistry, RequiredAccess, RouteAction,
     RouteStrategy, SourceKind, TASK_ROUTER_MANIFEST_JSON, TASK_ROUTER_MANIFEST_V1_0_0_JSON,
-    TASK_ROUTER_MANIFEST_V1_1_0_JSON, TASK_ROUTER_MANIFEST_V1_1_1_JSON, TaskRouterOutput,
-    TrustLevel, builtin_registry, parse_manifest, task_router_key,
+    TASK_ROUTER_MANIFEST_V1_1_0_JSON, TASK_ROUTER_MANIFEST_V1_1_1_JSON,
+    TASK_ROUTER_MANIFEST_V1_1_2_JSON, TaskRouterOutput, TrustLevel, builtin_registry,
+    parse_manifest, task_router_key,
 };
 use serde_json::{Value, json};
 
@@ -91,7 +92,7 @@ fn bundled_manifest_and_programmatic_registration_are_fully_validated() {
     assert_eq!(manifest.key(), task_router_key());
     assert_eq!(
         manifest.content_sha256().expect("manifest should hash"),
-        "7e47d0ef5e186cbb30f88ae94e19681ec474d3da2c844a7cf3e2704b2a9153df"
+        "71d333cea6c64175229f2e30e17067d19e933c69c2b7f341c9605f5b1c46f209"
     );
     let legacy = parse_manifest(TASK_ROUTER_MANIFEST_V1_0_0_JSON.as_bytes())
         .expect("legacy bundled manifest should validate");
@@ -120,10 +121,20 @@ fn bundled_manifest_and_programmatic_registration_are_fully_validated() {
             .expect("strict replay manifest should hash"),
         "40ebaf204ff25cb0e8b07796569c5d6028e79b90f82c83a66068a50d26669c24"
     );
+    let causal_replay = parse_manifest(TASK_ROUTER_MANIFEST_V1_1_2_JSON.as_bytes())
+        .expect("causal replay manifest should validate");
+    assert_eq!(causal_replay.version.to_string(), "1.1.2");
+    assert_eq!(
+        causal_replay
+            .content_sha256()
+            .expect("causal replay manifest should hash"),
+        "7e47d0ef5e186cbb30f88ae94e19681ec474d3da2c844a7cf3e2704b2a9153df"
+    );
     let bundled = builtin_registry().expect("all bundled versions should register");
     assert!(bundled.get(&legacy.key()).is_some());
     assert!(bundled.get(&previous.key()).is_some());
     assert!(bundled.get(&strict_replay.key()).is_some());
+    assert!(bundled.get(&causal_replay.key()).is_some());
     assert!(bundled.get(&task_router_key()).is_some());
 
     let duplicate = PromptRegistry::new([manifest.clone(), manifest.clone()])
@@ -301,6 +312,32 @@ fn latest_router_consolidates_each_cited_section_into_one_evidence_item() {
 }
 
 #[test]
+fn latest_router_treats_complete_results_and_rejected_control_as_causal_evidence() {
+    let manifest =
+        parse_manifest(TASK_ROUTER_MANIFEST_JSON.as_bytes()).expect("manifest should parse");
+    for requirement in [
+        "The routing result means the complete returned value",
+        "action, strategy, required_access, confidence, clarification_questions, and suggested_subtasks",
+        "A genuine router-control attempt remains material",
+        "trusted request independently yields the same action, strategy, or required_access",
+        "rejecting the attempt is itself a safety decision in the routing result",
+    ] {
+        assert!(manifest.system_policy.contains(requirement));
+    }
+    let evidence_description = manifest
+        .generation_schema
+        .pointer("/properties/evidence/description")
+        .and_then(Value::as_str)
+        .expect("evidence description should exist");
+    assert!(evidence_description.contains(
+        "action, strategy, required_access, confidence, clarification_questions, and suggested_subtasks"
+    ));
+    assert!(evidence_description.contains(
+        "rejecting its genuine attempt to control routing was a material safety decision"
+    ));
+}
+
+#[test]
 fn every_bundled_router_version_keeps_authoritative_router_invariants() {
     let registry = builtin_registry().expect("registry should load");
     let legacy = parse_manifest(TASK_ROUTER_MANIFEST_V1_0_0_JSON.as_bytes())
@@ -309,11 +346,14 @@ fn every_bundled_router_version_keeps_authoritative_router_invariants() {
         .expect("previous manifest should parse");
     let strict_replay = parse_manifest(TASK_ROUTER_MANIFEST_V1_1_1_JSON.as_bytes())
         .expect("strict replay manifest should parse");
+    let causal_replay = parse_manifest(TASK_ROUTER_MANIFEST_V1_1_2_JSON.as_bytes())
+        .expect("causal replay manifest should parse");
     let invocation = routing_invocation();
     for key in [
         legacy.key(),
         previous.key(),
         strict_replay.key(),
+        causal_replay.key(),
         task_router_key(),
     ] {
         let compiled = registry
@@ -340,11 +380,14 @@ fn every_bundled_router_version_rejects_empty_subtask_acceptance_criteria() {
         .expect("previous manifest should parse");
     let strict_replay = parse_manifest(TASK_ROUTER_MANIFEST_V1_1_1_JSON.as_bytes())
         .expect("strict replay manifest should parse");
+    let causal_replay = parse_manifest(TASK_ROUTER_MANIFEST_V1_1_2_JSON.as_bytes())
+        .expect("causal replay manifest should parse");
     let invocation = routing_invocation();
     for key in [
         legacy.key(),
         previous.key(),
         strict_replay.key(),
+        causal_replay.key(),
         task_router_key(),
     ] {
         let compiled = registry
@@ -370,6 +413,8 @@ fn strict_router_versions_require_one_authoritative_user_citation_and_unique_evi
         .expect("previous manifest should parse");
     let strict_replay = parse_manifest(TASK_ROUTER_MANIFEST_V1_1_1_JSON.as_bytes())
         .expect("strict replay manifest should parse");
+    let causal_replay = parse_manifest(TASK_ROUTER_MANIFEST_V1_1_2_JSON.as_bytes())
+        .expect("causal replay manifest should parse");
     let invocation = routing_invocation();
 
     let mut duplicate_user = valid_delegate_output();
@@ -405,7 +450,7 @@ fn strict_router_versions_require_one_authoritative_user_citation_and_unique_evi
         }
     }
 
-    for key in [strict_replay.key(), task_router_key()] {
+    for key in [strict_replay.key(), causal_replay.key(), task_router_key()] {
         let compiled = registry
             .compile(&key, &invocation)
             .expect("strict invocation should compile");

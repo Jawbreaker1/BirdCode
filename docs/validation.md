@@ -40,6 +40,13 @@ sections and bounded clarification/subtask counts in addition to the three
 route axes. Its pure catalog and comparison tests live in a normal Cargo test
 target and therefore run under `cargo test --workspace`.
 
+Catalog v4 assigns evidence by causal effect on the complete routing result.
+Repository context is required when it supplies otherwise unnamed delegated
+targets or when rejecting a repository control attempt is a material safety
+decision. It is forbidden when it merely repeats a complete request, including
+the zero-delegation and direct English-change fixtures. The Arabic delegation
+fixture is user-only.
+
 Expected subtask maxima are evaluator-only scoring metadata. They are separate
 from the model-visible runtime delegation cap, which defaults to four and is
 zero only in the explicitly versioned zero-delegation fixture.

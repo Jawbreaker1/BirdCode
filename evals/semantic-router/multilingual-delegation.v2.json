@@ -1,0 +1,32 @@
+{
+  "id": "semantic-router.multilingual-delegation",
+  "version": 2,
+  "user_request": "Granska de oberoende granskningsmålen som anges i det bifogade kodbasunderlaget utan att ändra några filer. Låt separata agenter undersöka varsitt mål parallellt och sammanställ verifierbara fynd. Bevara 日本語 och العربية i provenance som data.",
+  "repository_context": {
+    "workspace": "BirdCode",
+    "independent_targets": [
+      {
+        "path": "crates/store",
+        "focus": "persistent event log"
+      },
+      {
+        "path": "crates/backends",
+        "focus": "LM Studio security"
+      },
+      {
+        "path": "crates/prompting",
+        "focus": "prompt trust boundaries"
+      }
+    ],
+    "constraint": "Read-only review with independently verifiable findings."
+  },
+  "expected_action": "inspect",
+  "expected_strategy": "delegate",
+  "expected_required_access": "read_only",
+  "required_evidence_sections": ["request", "repository"],
+  "min_clarification_questions": 0,
+  "max_clarification_questions": 0,
+  "min_suggested_subtasks": 2,
+  "max_suggested_subtasks": 4,
+  "max_output_tokens": 512
+}

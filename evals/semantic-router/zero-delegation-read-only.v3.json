@@ -1,0 +1,19 @@
+{
+  "id": "semantic-router.zero-delegation-read-only",
+  "version": 3,
+  "user_request": "Granska den beständiga eventloggen i crates/store, LM Studio-säkerheten i crates/backends och promptarnas trust-gränser i crates/prompting utan att ändra filer. De tre oberoende granskningarna kan utföras parallellt; sammanställ verifierbara fynd.",
+  "repository_context": {
+    "review_brief": "Granska den beständiga eventloggen i crates/store, LM Studio-säkerheten i crates/backends och promptarnas trust-gränser i crates/prompting utan att ändra filer. De tre oberoende granskningarna kan utföras parallellt; sammanställ verifierbara fynd."
+  },
+  "runtime_max_suggested_subtasks": 0,
+  "expected_action": "inspect",
+  "expected_strategy": "direct",
+  "expected_required_access": "read_only",
+  "required_evidence_sections": ["request"],
+  "forbidden_evidence_sections": ["repository"],
+  "min_clarification_questions": 0,
+  "max_clarification_questions": 0,
+  "min_suggested_subtasks": 0,
+  "max_suggested_subtasks": 0,
+  "max_output_tokens": 320
+}

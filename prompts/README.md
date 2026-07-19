@@ -20,10 +20,11 @@ text.
 
 Currently implemented production prompt:
 
-- `semantic-task-router/1.1.2/manifest.json` is the current router, while
+- `semantic-task-router/1.1.3/manifest.json` is the current router, while
   `semantic-task-router/1.0.0/manifest.json`,
-  `semantic-task-router/1.1.0/manifest.json`, and
-  `semantic-task-router/1.1.1/manifest.json` remain bundled for exact replay
+  `semantic-task-router/1.1.0/manifest.json`,
+  `semantic-task-router/1.1.1/manifest.json`, and
+  `semantic-task-router/1.1.2/manifest.json` remain bundled for exact replay
   of historical sessions. The current router classifies an action
   (`clarify`, `answer`, `inspect`, or `change`), an execution strategy
   (`direct` or `delegate`), and the action-derived access requirement. It
@@ -33,9 +34,11 @@ Currently implemented production prompt:
   examined: unrelated context is omitted, while rejected embedded instructions
   remain cited when the trust-boundary decision affects routing. All causal
   facts from one cited section are consolidated into that section's single
-  evidence item. Every
-  delegated subtask has an externally checkable completion criterion instead
-  of a circular restatement of its objective. Delegation cannot broaden the
-  parent route's access.
+  evidence item. Materiality covers the complete returned routing result,
+  including questions and subtasks. Rejecting a genuine attempt to control the
+  router remains a material safety decision even when trusted input
+  independently implies the same route axes. Every delegated subtask has an
+  externally checkable completion criterion instead of a circular restatement
+  of its objective. Delegation cannot broaden the parent route's access.
   `PromptInvocation.limits.max_suggested_subtasks` defaults to four and may
   lower the accepted per-invocation delegation cap.

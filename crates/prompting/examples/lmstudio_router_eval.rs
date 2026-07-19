@@ -29,7 +29,7 @@ use url::Url;
 const DEFAULT_URL: &str = "http://127.0.0.1:1234/";
 const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 const ROUTER_MAX_CLARIFICATION_QUESTIONS: u32 = 3;
-const EVAL_CATALOG: &str = include_str!("../../../evals/semantic-router/catalog.v3.json");
+const EVAL_CATALOG: &str = include_str!("../../../evals/semantic-router/catalog.v4.json");
 
 const fn default_runtime_max_suggested_subtasks() -> u32 {
     PromptLimits::DEFAULT.max_suggested_subtasks
@@ -1010,7 +1010,7 @@ fn inference_endpoint_without_auth(base_url: &Url) -> Result<String, io::Error> 
 
 fn load_cases() -> Result<Vec<EvalCase>, Box<dyn Error>> {
     let catalog: EvalCatalog = serde_json::from_str(EVAL_CATALOG)?;
-    if catalog.catalog_version != 3 || catalog.cases.is_empty() {
+    if catalog.catalog_version != 4 || catalog.cases.is_empty() {
         return Err(io::Error::other("unsupported or empty semantic-router eval catalog").into());
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../evals/semantic-router");
@@ -1454,7 +1454,7 @@ mod tests {
             );
             if case.runtime_max_suggested_subtasks == 0 {
                 zero_limit_cases += 1;
-                assert_eq!(case.version, 2);
+                assert_eq!(case.version, 3);
                 assert_eq!(case.expected_strategy, RouteStrategy::Direct);
                 assert_eq!(case.max_suggested_subtasks, 0);
             } else {
@@ -1557,6 +1557,64 @@ mod tests {
     }
 
     #[test]
+    fn corrective_catalog_evidence_expectations_follow_causal_fixture_content() {
+        let cases = load_cases().expect("bundled eval catalog should load");
+
+        let multilingual = cases
+            .iter()
+            .find(|case| case.id == "semantic-router.multilingual-delegation")
+            .expect("multilingual delegation case should exist");
+        assert_eq!(multilingual.version, 2);
+        assert_eq!(
+            multilingual.required_evidence_sections,
+            ["request", "repository"]
+        );
+        let targets = multilingual
+            .repository_context
+            .as_ref()
+            .and_then(|context| context["independent_targets"].as_array())
+            .expect("repository should define the unnamed independent targets");
+        for target in targets {
+            let path = target["path"].as_str().expect("target path should be text");
+            assert!(!multilingual.user_request.contains(path));
+        }
+
+        let zero_limit = cases
+            .iter()
+            .find(|case| case.id == "semantic-router.zero-delegation-read-only")
+            .expect("zero-delegation case should exist");
+        assert_eq!(zero_limit.version, 3);
+        assert_eq!(zero_limit.runtime_max_suggested_subtasks, 0);
+        assert_eq!(zero_limit.required_evidence_sections, ["request"]);
+        assert_eq!(zero_limit.forbidden_evidence_sections, ["repository"]);
+        assert_eq!(
+            zero_limit
+                .repository_context
+                .as_ref()
+                .expect("repository exists")["review_brief"],
+            zero_limit.user_request
+        );
+
+        let english_change = cases
+            .iter()
+            .find(|case| case.id == "semantic-router.english-change")
+            .expect("English change case should exist");
+        assert_eq!(english_change.version, 2);
+        assert_eq!(english_change.required_evidence_sections, ["request"]);
+        assert_eq!(english_change.forbidden_evidence_sections, ["repository"]);
+        assert!(english_change.repository_context.is_some());
+
+        let arabic = cases
+            .iter()
+            .find(|case| case.id == "semantic-router.arabic-delegation")
+            .expect("Arabic delegation case should exist");
+        assert_eq!(arabic.version, 2);
+        assert_eq!(arabic.required_evidence_sections, ["request"]);
+        assert!(arabic.forbidden_evidence_sections.is_empty());
+        assert!(arabic.repository_context.is_none());
+    }
+
+    #[test]
     fn intent_bearing_japanese_and_arabic_cases_assert_semantic_payloads() {
         let cases = load_cases().expect("bundled eval catalog should load");
         let japanese = cases
@@ -1577,10 +1635,11 @@ mod tests {
             .expect("Arabic delegation case should exist");
         assert_eq!(
             arabic.user_request,
-            "افحص المستودع من دون تعديل أي ملف. وزّع مراجعة سجل الأحداث، وأمان LM Studio، وعزل الصلاحيات على وكلاء فرعيين مستقلين، ثم لخّص الأدلة."
+            "افحص المستودع من دون تعديل أي ملف. وزّع مراجعة سجل الأحداث، وأمان بيئة النماذج المحلية، وعزل الصلاحيات على وكلاء فرعيين مستقلين، ثم لخّص الأدلة."
         );
         assert!(arabic.min_suggested_subtasks >= 2);
-        assert_eq!(arabic.required_evidence_sections, ["request", "repository"]);
+        assert_eq!(arabic.required_evidence_sections, ["request"]);
+        assert!(arabic.repository_context.is_none());
         assert_eq!(arabic.max_clarification_questions, 0);
     }
 

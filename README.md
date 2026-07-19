@@ -204,13 +204,18 @@ delegation. Expectations include required and forbidden evidence sections and
 bounded clarification/subtask counts, not only route labels. A single case can
 be selected explicitly by adding:
 
-Expected subtask counts are evaluator-only scoring metadata, separate from the
-prompted runtime delegation limit. The runtime limit defaults to four; only the
-versioned zero-delegation fixture sets it to zero.
-
 ```sh
 --case semantic-router.arabic-delegation
 ```
+
+The v4 evidence rubric is causal rather than cite-all. Repository context is
+required when it supplies otherwise unnamed delegated targets or when rejecting
+a repository control attempt is itself a safety decision. Redundant repository
+context is forbidden for the zero-delegation and direct English-change cases;
+the Arabic delegation case is user-only. Expected subtask counts are
+evaluator-only scoring metadata, separate from the prompted runtime delegation
+limit. That limit defaults to four and is zero only in the versioned
+zero-delegation fixture.
 
 The runner reserves and syncs a new report path before its first HTTP request.
 It then finalizes that reservation as `passed` or `failed`, including discovery,
