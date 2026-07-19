@@ -84,6 +84,39 @@ eventual runtime must support:
 The implementable lifecycle and acceptance gates are specified in
 [orchestration.md](orchestration.md).
 
+## General Tooling Plane
+
+Subagents are useful only when they can act through a broad, permissioned
+capability layer. The Tooling Plane is therefore a core requirement in its own
+right, separate from the Execution & Validation Plane that judges evidence.
+It must cover:
+
+- repository intelligence: tree and content search, symbols/references,
+  dependencies, ownership, and change-impact analysis;
+- bounded change construction: reads, writes, patches, renames, deletes,
+  diffs, and generated assets;
+- Git and workspace isolation: snapshots, branches, worktrees/overlays, patch
+  export, integration, and conflict inspection;
+- shell and process control: typed argv, PTY, streaming logs, process trees,
+  ports, cancellation, and cleanup;
+- build and language intelligence: compilers, package managers, formatters,
+  linters, tests, and language-server evidence;
+- web, API, server, desktop, simulator, device, Windows, and Linux operation;
+- knowledge and integrations such as official documentation, search, issue/PR
+  systems, and CI;
+- logs, traces, screenshots, video, reports, manifests, and content-addressed
+  artifacts;
+- agent coordination through task graphs, mailboxes, questions, handoffs,
+  review findings, and integration; and
+- security-sensitive effects through a credential broker, network grants,
+  publication gates, and explicit user approval.
+
+Every advertised tool must have machine-readable input and output schemas,
+side-effect and idempotency classes, permission and path/network scope,
+cancellation behavior, bounded output, and reproducible provenance. Tool
+availability must never be inferred from filenames, language-specific strings,
+or unverified platform labels.
+
 ## Execution & Validation Plane
 
 A general provider-neutral Execution & Validation Plane is a core requirement.
@@ -172,18 +205,24 @@ BirdCode advances by evidence-backed vertical slices:
 
 1. **Typed plane foundation:** provider-blind plans, evidence, provenance, and
    collect-all policy validation.
-2. **Local process slice:** execute bounded argv plans, stream logs, hash
-   artifacts, cancel safely, and persist receipts.
-3. **Web slice:** Playwright build/start/journey/DOM/accessibility/trace and
-   screenshot validation against a real fixture.
-4. **Agent feedback slice:** one coding agent consumes failed validation,
-   repairs the candidate within a fixed budget, and reruns the same gate.
-5. **Subagent slice:** isolated parallel candidates, structured handoffs,
-   deterministic integration, and independent review.
-6. **Blind comparison slice:** BirdCode and Codex complete the same preregistered
-   fixtures and are scored from opaque candidate bundles.
-7. **Platform expansion:** API/server and CLI/TUI first, then verified macOS,
-   Apple simulator, Android, Windows, and Linux adapters.
+2. **Durable root-actor slice:** a real model executes through the daemon with
+   action-specific context, read-only repository tools, budgets, streaming,
+   cancellation, resume, and retained actor/tool events.
+3. **Isolated child slice:** a parent delegates one typed work order to a
+   writing child in a permission-bounded worktree/overlay; its hash-bound
+   handoff is integrated by an explicit owner and build failure blocks success.
+4. **Parallel actor-graph slice:** at least two children overlap in time with
+   atomic budget accounting, isolated contexts/workspaces, durable mailboxes,
+   subtree cancellation, candidate integration, and independent review.
+5. **Tool and validation slices:** execute bounded local processes and then a
+   Playwright build/start/journey/DOM/accessibility/trace/screenshot flow
+   against real fixtures before expanding through API/server and CLI/TUI.
+6. **Feedback and replanning slice:** retained failures drive bounded repair,
+   graph amendment, and a complete rerun of the same acceptance gate.
+7. **Blind comparison slice:** BirdCode and Codex complete the same
+   preregistered fixtures and are scored from opaque candidate bundles.
+8. **Platform expansion:** verified macOS and Apple simulator operation, then
+   Android, Windows, and Linux adapters.
 
 No later gate is advertised as implemented until its real end-to-end evidence
 is retained.

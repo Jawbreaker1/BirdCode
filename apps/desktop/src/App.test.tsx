@@ -19,6 +19,21 @@ test("reports the real disconnected state and never enables a fake run", async (
   expect(screen.getByText(/No model output is simulated/)).toBeTruthy();
 });
 
+test("does not claim task readiness or interactive setup without a backend", async () => {
+  const readyWithoutBackend: RuntimeBridge = {
+    health: async () => ({ state: "ready", transport: "stdio", protocolVersion: "2", daemonVersion: "0.1.0", message: "Ready", backends: [] }),
+    reset: async () => {},
+  };
+
+  render(<App bridge={readyWithoutBackend} />);
+  await waitFor(() => expect(screen.getByText("Runtime ready · connect a backend")).toBeTruthy());
+  expect(screen.queryByText("Ready for a task")).toBeNull();
+  expect((screen.getByRole("button", { name: "Agent ▾" }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole("button", { name: "Auto context" }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole("button", { name: "Local" }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByLabelText("Run task") as HTMLButtonElement).disabled).toBe(true);
+});
+
 test("preserves multilingual task input without parsing it", () => {
   render(<App bridge={offline} />);
   const input = screen.getByLabelText("Task prompt") as HTMLTextAreaElement;

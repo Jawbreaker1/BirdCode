@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import appIcon from "../src-tauri/icons/128x128.png";
 import { runtimeBridge, type RuntimeBridge, type RuntimeHealth } from "./runtime";
 import "./styles.css";
 
@@ -115,13 +116,19 @@ export function App({ bridge = runtimeBridge }: AppProps) {
     }
   };
 
-  const canRun = health.state === "ready" && health.backends.some((backend) => backend.state === "ready") && prompt.trim().length > 0;
+  const hasReadyBackend = health.backends.some((backend) => backend.state === "ready");
+  const canRun = health.state === "ready" && hasReadyBackend && prompt.trim().length > 0;
   const canResetRuntime = health.transport === "stdio" && health.state !== "ready" && health.state !== "checking";
+  const readinessTitle = health.state !== "ready"
+    ? "Ready when your runtime is"
+    : hasReadyBackend
+      ? "Ready for a task"
+      : "Runtime ready · connect a backend";
 
   return (
     <main className="shell">
       <nav className="rail" aria-label="Primary navigation">
-        <div className="brand-mark" aria-label="BirdCode">B</div>
+        <img className="brand-mark" src={appIcon} alt="" aria-hidden="true" />
         <button className="rail-button active" aria-label="Runs">⌁</button>
         <button className="rail-button" aria-label="Projects">◇</button>
         <div className="rail-spacer" />
@@ -167,7 +174,7 @@ export function App({ bridge = runtimeBridge }: AppProps) {
         <section className="timeline" aria-label="Run timeline">
           <div className="empty-run">
             <div className="pulse-mark"><span /></div>
-            <h2>{health.state === "ready" ? "Ready for a task" : "Ready when your runtime is"}</h2>
+            <h2>{readinessTitle}</h2>
             <p>No model output is simulated. Connect a backend and start a run to see real agent events here.</p>
             <div className="readiness-grid">
               <div><span className="step">01</span><strong>Repository</strong><small>Not selected</small></div>
@@ -180,7 +187,7 @@ export function App({ bridge = runtimeBridge }: AppProps) {
         <form className="composer" onSubmit={(event) => event.preventDefault()}>
           <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Describe a task, ask a question, or paste an error…" aria-label="Task prompt" />
           <div className="composer-footer">
-            <div className="composer-options"><button type="button">Agent ▾</button><button type="button">Auto context</button><button type="button">Local</button></div>
+            <div className="composer-options"><button type="button" disabled title="Agent selection is not wired yet">Agent ▾</button><button type="button" disabled title="Automatic context is not wired yet">Auto context</button><button type="button" disabled title="Backend selection is not wired yet">Local</button></div>
             <button className="run-button" disabled={!canRun} type="submit" aria-label="Run task">↗</button>
           </div>
         </form>
