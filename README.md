@@ -4,7 +4,7 @@
 
 <h1 align="center">BirdCode</h1>
 
-<p align="center"><strong>Own the agent. Keep the history. Choose the model.</strong></p>
+<p align="center"><strong>BirdCode - Makes your code fly.</strong></p>
 
 <p align="center">
   A local-first agentic coding harness where language models make semantic<br>
