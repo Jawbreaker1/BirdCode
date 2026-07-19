@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import appIcon from "../src-tauri/icons/128x128.png";
 import { runtimeBridge, type RuntimeBridge, type RuntimeHealth } from "./runtime";
 import "./styles.css";
 
@@ -127,7 +128,7 @@ export function App({ bridge = runtimeBridge }: AppProps) {
   return (
     <main className="shell">
       <nav className="rail" aria-label="Primary navigation">
-        <div className="brand-mark" aria-label="BirdCode">B</div>
+        <img className="brand-mark" src={appIcon} alt="" aria-hidden="true" />
         <button className="rail-button active" aria-label="Runs">⌁</button>
         <button className="rail-button" aria-label="Projects">◇</button>
         <div className="rail-spacer" />

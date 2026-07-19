@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="apps/desktop/app-icon.svg" alt="BirdCode" width="112" height="112">
+  <img src="docs/assets/brand/birdcode-logo.png" alt="BirdCode hand-drawn bird logo" width="280">
 </p>
 
 <h1 align="center">BirdCode</h1>
@@ -32,6 +32,31 @@ are real and testable. The agent execution loop is not wired yet, so BirdCode
 is not currently a usable replacement for Codex or another production coding
 agent.
 
+> **Plainly:** BirdCode has a substantial, tested systems foundation, but no
+> operational coding-agent path yet. It is a working foundation—not yet a
+> working coding agent.
+
+## Parallel agency is the execution model
+
+BirdCode is not one model in a loop with a test runner bolted on. Its defining
+execution model is a durable graph of isolated agents. A root orchestrator must
+be able to map a repository, decompose work, launch independent implementers
+and specialists concurrently, exchange evidence through structured mailboxes,
+select and integrate candidate work, commission independent review, and replan
+until the acceptance gate passes or the declared budget is exhausted.
+
+Testing is one agent role and one tool family—not the purpose of subagents.
+Parallel actors are intended for repository discovery, planning,
+implementation, competing solutions, debugging, platform operation, security,
+accessibility, UX review, integration, context distillation, documentation, and
+blind outcome review. Semantic decisions stay model-driven through versioned
+typed contracts; the local runtime enforces permissions, budgets, isolation,
+causal history, cancellation, mailbox delivery, and publication gates.
+
+**Current truth:** this execution topology is designed but not running yet. No
+child actor, scheduler dispatch, isolated worktree, mailbox, handoff, or
+integration path executes today.
+
 ## Current interface
 
 <p align="center">
@@ -42,11 +67,11 @@ agent.
 
 <table>
   <tr>
-    <td width="74%"><img src="docs/assets/screenshots/multilingual-composer.jpg" alt="Compact BirdCode browser preview preserving a multilingual task while execution remains disabled"></td>
+    <td width="74%"><img src="docs/assets/screenshots/multilingual-composer.png" alt="BirdCode browser preview preserving a multilingual task while execution remains disabled"></td>
     <td width="26%"><img src="docs/assets/screenshots/runtime-setup.png" alt="BirdCode native run setup panel showing repository, backend, permissions, and runtime protocol status"></td>
   </tr>
   <tr>
-    <td><sub>Real 1050 px compact layout in browser-preview mode. Multilingual input is preserved; execution remains disabled without the desktop bridge and a daemon-integrated backend.</sub></td>
+    <td><sub>Real 1280 × 720 browser-preview state. Multilingual input is preserved verbatim; execution remains disabled without the desktop bridge and a daemon-integrated backend.</sub></td>
     <td><sub>Native run setup with actual daemon health and protocol 2. Backend and permission policy remain explicitly unconnected.</sub></td>
   </tr>
 </table>
@@ -86,13 +111,30 @@ the OpenAI API, and a local Codex bridge are planned. The Codex bridge will use
 Codex-managed authentication from the user's installed client; it will not
 scrape credentials or copy private implementation code.
 
-### Subagents as a core primitive
+### A general Tooling Plane
 
-The target architecture treats subagents as isolated actors with causal event
-branches, explicit budgets, permissions, mailboxes, and structured handoffs.
-An LLM decides when delegation is useful; a deterministic scheduler will
-enforce concurrency, access, and resource limits. This scheduler and the actual
-subagent execution path are still roadmap work.
+Agents need far more than a test command. BirdCode's planned Tooling Plane is a
+permissioned, schema-first capability layer shared by root, specialist,
+candidate, integration, and review actors.
+
+| Tool family | Required reach |
+| --- | --- |
+| Repository intelligence | Tree/search, symbols and references, dependencies, ownership, and change impact |
+| Change construction | Bounded file reads/writes, patches, renames, deletes, diffs, and generated assets |
+| Git and isolation | Snapshots, branches, worktrees/overlays, patch export, merge, and conflict inspection |
+| Shell and processes | Typed argv, PTY, streaming logs, process trees, ports, cancellation, and cleanup |
+| Build and language intelligence | Compilers, package managers, formatters, linters, tests, and language-server evidence |
+| Web, API, and servers | Playwright, DOM/accessibility, HTTP/WebSocket, network traces, and service lifecycle |
+| Desktop and devices | macOS UI/accessibility, Apple simulators, Android, Windows, and Linux adapters |
+| Knowledge and integrations | Official documentation, search, issues, pull requests, and CI systems |
+| Artifacts and media | Logs, traces, screenshots, video, reports, manifests, and content hashes |
+| Coordination and security | Task graphs, mailboxes, handoffs, review findings, credentials, grants, and publication approval |
+
+Every tool must declare typed inputs and outputs, side-effect class, permission
+scope, idempotency, cancellation behavior, output bounds, and provenance. The
+Execution & Validation Plane consumes this infrastructure continuously, but it
+has a distinct job: define and judge evidence rather than act as the whole
+agent platform.
 
 ### Validation is part of coding
 
@@ -120,8 +162,8 @@ Apple Silicon.
 | Execution & Validation Plane | Implemented typed foundation | Composite surface/platform targets, immutable run manifests, commands, bounds, hash-linked provenance, evidence policy, and blind review packages; no process or platform adapter executes yet |
 | Agent execution loop | **Not wired** | Run specifications can be persisted, but no backend is invoked by the daemon |
 | Context compilation and compaction | Designed | Architecture and invariants are documented; runtime implementation remains |
-| Tools and permission broker | Designed | No shell or filesystem tool execution is exposed to an agent yet |
-| Dynamic subagents | Designed | Typed route proposals exist; scheduler, worktree isolation, and handoffs remain |
+| General Tooling Plane and permission broker | Designed, not implemented | No repository, shell, filesystem, Git, browser, or platform tool is exposed to a live agent yet |
+| Parallel agent runtime | **Designed, not implemented** | The semantic router can propose bounded subtasks, but no child actor, scheduler dispatch, isolated workspace, mailbox, handoff, or integration path executes today |
 | Ollama and OpenAI adapters | Planned | Provider contract exists; adapters do not |
 | Local Codex bridge | Planned | Clean-room adapter direction is documented; no product integration exists yet |
 | Windows and Linux | Planned | Core boundaries are portable, but builds and platform behavior are not yet verified |
@@ -183,15 +225,16 @@ flowchart LR
     RouterExecutor -->|"provider-neutral; fake-backend validated"| ModelBackend["Model backend contract"]
     Validation["Typed validation contracts<br/>blind evidence policy"] -->|"standalone contract tests"| Blind["Provider-blind review package"]
 
-    Runtime -.->|"next: real run execution"| AgentLoop["Agent loop"]
-    AgentLoop -.-> Prompting
-    AgentLoop -.-> LMStudio
-    AgentLoop -.-> Context["Context compiler + compaction"]
-    AgentLoop -.-> Tools["Tool + permission broker"]
-    AgentLoop -.-> Scheduler["Subagent scheduler"]
-    AgentLoop -.-> Validation
+    Runtime -.->|"next: real actor execution"| Orchestrator["Durable orchestration runtime"]
+    Orchestrator -.-> Actors["Root · specialist · candidate<br/>integration · review actors"]
+    Orchestrator -.-> Coordination["Scheduler · budgets · permissions<br/>mailboxes · worktree manager"]
+    Actors -.-> Prompting
+    Actors -.-> LMStudio
+    Actors -.-> Context["Action-specific context<br/>retrieval + compaction"]
+    Actors -.-> Tools["General Tooling Plane"]
+    Actors -.-> Validation
     Validation -.-> Adapters["Playwright · API · CLI/TUI<br/>desktop · simulator · Android · Windows · Linux"]
-    AgentLoop -.-> Providers["Ollama · OpenAI · Codex bridge"]
+    Actors -.-> Providers["Ollama · OpenAI · Codex bridge"]
 ```
 
 The canonical protocol and core runtime are independent of Tauri, operating
@@ -447,23 +490,26 @@ the application's eventual license decision.
 
 ## Roadmap
 
-1. Wire the semantic router and LM Studio adapter into the daemon for one real,
-   observable, read-only agent path.
-2. Turn the typed validation foundation into one bounded local process slice
-   with durable receipts, log/artifact capture, cancellation, and resume.
-3. Add the first real Playwright adapter and prove build/start/user-journey/DOM/
-   accessibility/trace/screenshot validation on a web fixture.
-4. Build the permission broker, repository snapshots, and isolated write
-   surfaces; feed validation failures into a bounded repair loop.
-5. Implement dynamic subagents with eval-derived model profiles, budgets,
-   causal branches, parallel candidates, mailboxes, worktree isolation,
-   integration, and independent review.
-6. Implement action-specific context compilation, semantic retrieval, and
-   versioned compaction checkpoints without destructive history loss.
+1. Execute one real durable root actor through the daemon and LM Studio, with
+   an action-specific context manifest, read-only repository tools, budgets,
+   streaming, cancellation, resume, and truthful GUI/CLI events.
+2. Execute one isolated writing child through a minimal scheduler and
+   permission broker, with a Git worktree/overlay, hash-bound handoff,
+   deterministic integration ownership, and bounded local build validation.
+3. Prove a genuinely parallel actor graph: overlapping children, atomic budget
+   reservations, durable mailboxes, candidate groups, subtree cancellation,
+   integration, and review by an actor that did not author the result.
+4. Broaden the Tooling and Execution & Validation planes, starting with local
+   process and Playwright web slices, then API/server and CLI/TUI adapters.
+5. Feed retained evidence back into bounded repair and graph replanning, then
+   prove a complete multi-agent build/start/use/repair/revalidate journey.
+6. Add semantic retrieval and versioned compaction checkpoints without
+   destructive history loss; use eval-derived model profiles to adapt context,
+   decomposition, specialists, parallel candidates, and escalation.
 7. Add Ollama, OpenAI, and the clean-room local Codex bridge, then run retained,
-   blind comparisons through the same validation harness.
-8. Complete the desktop run experience and verify explicit adapters for API/
-   server, CLI/TUI, macOS, Apple simulators, Android, Windows, and Linux.
+   blind comparisons through the same harness.
+8. Complete the desktop run experience and verify explicit adapters for macOS,
+   Apple simulators, Android, Windows, and Linux.
 
 BirdCode's ambition is high: a complete, inspectable coding-agent system that
 can improve with better models without becoming dependent on one provider. The
