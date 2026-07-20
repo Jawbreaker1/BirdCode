@@ -157,8 +157,10 @@ name = "birdcode-cli"
 version = "0.1.0"
 dependencies = [
  "birdcode-client",
+ "birdcode-prompting",
  "birdcode-protocol",
  "ctrlc",
+ "serde",
  "serde_json",
  "sha2",
 ]
@@ -184,6 +186,7 @@ dependencies = [
  "birdcode-store",
  "chrono",
  "fs2",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -213,6 +216,7 @@ version = "0.1.0"
 dependencies = [
  "birdcode-backends",
  "birdcode-prompting",
+ "birdcode-protocol",
  "futures-util",
  "serde",
  "serde_json",
@@ -268,6 +272,8 @@ dependencies = [
 name = "birdcode-store"
 version = "0.1.0"
 dependencies = [
+ "birdcode-backends",
+ "birdcode-prompting",
  "birdcode-protocol",
  "chrono",
  "rusqlite",

@@ -23,6 +23,7 @@ tokio-util = "0.7.17"
 url = "2.5.7"
 
 [dev-dependencies]
+rusqlite = { version = "0.37.0", features = ["bundled"] }
 tempfile = "3.27.0"
 
 [lints]

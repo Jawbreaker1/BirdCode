@@ -3,8 +3,8 @@ use birdcode_protocol::{
     CancellationRequestId, CancellationRequested, CreateRunRequest, CreateSessionRequest,
     ErrorCode, EventEnvelope, EventPage as ProtocolEventPage, EventPayload, GetArtifactRequest,
     Health, HealthStatus, InitializeRequest, InitializeResult, InputItem, NewEvent,
-    PROTOCOL_VERSION, ProtocolError, Provenance, Run, RunId, RunPurpose, RunState,
-    RuntimeCapabilities, RuntimeCapability, ServerIdentity, Session, SessionId,
+    PROTOCOL_VERSION, PlanAcceptanceContract, ProtocolError, Provenance, Run, RunId, RunPurpose,
+    RunState, RuntimeCapabilities, RuntimeCapability, ServerIdentity, Session, SessionId,
 };
 use birdcode_store::{Store, StoreError};
 use std::fmt;
@@ -421,6 +421,17 @@ where
     /// Returns [`RuntimeError::SessionNotFound`] when the parent does not
     /// exist, or a repository error when local persistence fails.
     pub fn create_run(&mut self, request: CreateRunRequest) -> Result<Run, RuntimeError> {
+        if !matches!(
+            (request.spec.purpose, request.spec.plan_acceptance),
+            (
+                RunPurpose::PlanOnly,
+                PlanAcceptanceContract::IndependentSemanticReviewV1
+            ) | (RunPurpose::Execute, PlanAcceptanceContract::NotApplicable)
+        ) {
+            return Err(RuntimeError::InvalidRunSpec(
+                "run purpose and plan_acceptance contract are inconsistent",
+            ));
+        }
         if request.spec.purpose != RunPurpose::PlanOnly {
             return Err(RuntimeError::UnsupportedRunPurpose(request.spec.purpose));
         }
@@ -664,6 +675,11 @@ where
 }
 
 fn validate_plan_only_spec(request: &CreateRunRequest) -> Result<(), RuntimeError> {
+    if request.spec.plan_acceptance != PlanAcceptanceContract::IndependentSemanticReviewV1 {
+        return Err(RuntimeError::InvalidRunSpec(
+            "new plan-only runs require independent semantic review",
+        ));
+    }
     if request.spec.backend.kind != BackendKind::Model {
         return Err(RuntimeError::InvalidRunSpec(
             "plan-only runs require a model backend",
@@ -764,8 +780,9 @@ mod tests {
     use birdcode_protocol::{
         BackendKind, BackendSelection, CancellationDisposition, ClientIdentity, CreateRunRequest,
         CreateSessionRequest, EventEnvelope, EventPage as ProtocolEventPage, EventPayload,
-        GetArtifactRequest, InitializeRequest, InputItem, NewEvent, PROTOCOL_VERSION, Run, RunId,
-        RunLimits, RunPurpose, RunSpec, RunState, Session, SessionId,
+        GetArtifactRequest, InitializeRequest, InputItem, NewEvent, PROTOCOL_VERSION,
+        PlanAcceptanceContract, Run, RunId, RunLimits, RunPurpose, RunSpec, RunState, Session,
+        SessionId,
     };
     use birdcode_store::{Store, StoreError};
     use std::collections::HashMap;
@@ -883,17 +900,25 @@ mod tests {
     #[test]
     fn rejects_incompatible_protocol_versions() {
         let runtime = LocalRuntime::new(MemoryRepository::default());
-        let error = runtime
-            .initialize(&InitializeRequest {
-                protocol_version: PROTOCOL_VERSION + 1,
-                client: ClientIdentity {
-                    name: "test".to_owned(),
-                    version: "0".to_owned(),
-                },
-            })
-            .expect_err("incompatible versions should fail");
+        for requested in [4, PROTOCOL_VERSION + 1] {
+            let error = runtime
+                .initialize(&InitializeRequest {
+                    protocol_version: requested,
+                    client: ClientIdentity {
+                        name: "test".to_owned(),
+                        version: "0".to_owned(),
+                    },
+                })
+                .expect_err("incompatible versions should fail");
 
-        assert!(matches!(error, RuntimeError::IncompatibleProtocol { .. }));
+            assert!(matches!(
+                error,
+                RuntimeError::IncompatibleProtocol {
+                    requested: actual,
+                    supported: PROTOCOL_VERSION,
+                } if actual == requested
+            ));
+        }
     }
 
     #[test]
@@ -946,6 +971,7 @@ mod tests {
                 spec: RunSpec {
                     session_id: session.id,
                     purpose: RunPurpose::PlanOnly,
+                    plan_acceptance: PlanAcceptanceContract::IndependentSemanticReviewV1,
                     backend: BackendSelection {
                         backend_id: "not-connected".to_owned(),
                         kind: BackendKind::Model,
@@ -980,6 +1006,7 @@ mod tests {
             spec: RunSpec {
                 session_id: session.id,
                 purpose: RunPurpose::PlanOnly,
+                plan_acceptance: PlanAcceptanceContract::IndependentSemanticReviewV1,
                 backend: BackendSelection {
                     backend_id: "lmstudio".to_owned(),
                     kind: BackendKind::Model,
@@ -1021,6 +1048,7 @@ mod tests {
                 spec: RunSpec {
                     session_id: missing,
                     purpose: RunPurpose::PlanOnly,
+                    plan_acceptance: PlanAcceptanceContract::IndependentSemanticReviewV1,
                     backend: BackendSelection {
                         backend_id: "not-connected".to_owned(),
                         kind: BackendKind::Agent,
@@ -1053,6 +1081,7 @@ mod tests {
                 spec: RunSpec {
                     session_id: session.id,
                     purpose: RunPurpose::Execute,
+                    plan_acceptance: PlanAcceptanceContract::NotApplicable,
                     backend: BackendSelection {
                         backend_id: "lmstudio".to_owned(),
                         kind: BackendKind::Model,
@@ -1075,6 +1104,41 @@ mod tests {
     }
 
     #[test]
+    fn rejects_legacy_plan_acceptance_before_persisting_a_new_run() {
+        let mut runtime = LocalRuntime::new(MemoryRepository::default());
+        let session = runtime
+            .create_session(CreateSessionRequest {
+                workspace_root: PathBuf::from("/tmp/legacy-plan-contract").into(),
+                title: None,
+            })
+            .expect("session should be created");
+        let run_id = RunId::new();
+        let error = runtime
+            .create_run(CreateRunRequest {
+                run_id,
+                spec: RunSpec {
+                    session_id: session.id,
+                    purpose: RunPurpose::PlanOnly,
+                    plan_acceptance: PlanAcceptanceContract::LegacyMechanicalOnlyV4,
+                    backend: BackendSelection {
+                        backend_id: "lmstudio".to_owned(),
+                        kind: BackendKind::Model,
+                        model: Some("local-model".to_owned()),
+                        reasoning_effort: None,
+                    },
+                    input: vec![InputItem::Text {
+                        text: "Plan this with the mandatory semantic contract.".to_owned(),
+                    }],
+                    limits: plan_limits(),
+                },
+            })
+            .expect_err("legacy acceptance is migration-only");
+
+        assert!(matches!(error, RuntimeError::InvalidRunSpec(_)));
+        assert!(runtime.get_run(run_id).is_err());
+    }
+
+    #[test]
     fn plan_only_run_cannot_smuggle_subagent_authority() {
         let mut runtime = LocalRuntime::new(MemoryRepository::default());
         let session = runtime
@@ -1091,6 +1155,7 @@ mod tests {
                 spec: RunSpec {
                     session_id: session.id,
                     purpose: RunPurpose::PlanOnly,
+                    plan_acceptance: PlanAcceptanceContract::IndependentSemanticReviewV1,
                     backend: BackendSelection {
                         backend_id: "lmstudio".to_owned(),
                         kind: BackendKind::Model,
@@ -1129,6 +1194,7 @@ mod tests {
                 spec: RunSpec {
                     session_id: session.id,
                     purpose: RunPurpose::PlanOnly,
+                    plan_acceptance: PlanAcceptanceContract::IndependentSemanticReviewV1,
                     backend: BackendSelection {
                         backend_id: "lmstudio".to_owned(),
                         kind: BackendKind::Model,
@@ -1254,6 +1320,7 @@ mod tests {
                     spec: RunSpec {
                         session_id: session.id,
                         purpose: RunPurpose::PlanOnly,
+                        plan_acceptance: PlanAcceptanceContract::IndependentSemanticReviewV1,
                         backend: BackendSelection {
                             backend_id: "local-test-backend".to_owned(),
                             kind: BackendKind::Model,
@@ -1311,6 +1378,7 @@ mod tests {
                 spec: RunSpec {
                     session_id: session.id,
                     purpose: RunPurpose::PlanOnly,
+                    plan_acceptance: PlanAcceptanceContract::IndependentSemanticReviewV1,
                     backend: BackendSelection {
                         backend_id: "lmstudio".to_owned(),
                         kind: BackendKind::Model,
@@ -1399,6 +1467,7 @@ mod tests {
                 spec: RunSpec {
                     session_id: session.id,
                     purpose: RunPurpose::PlanOnly,
+                    plan_acceptance: PlanAcceptanceContract::IndependentSemanticReviewV1,
                     backend: BackendSelection {
                         backend_id: "lmstudio".to_owned(),
                         kind: BackendKind::Model,

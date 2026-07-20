@@ -4,8 +4,8 @@ use birdcode_prompting::{
     root_planner_key,
 };
 use birdcode_protocol::{
-    ArtifactRef, BackendKind, BackendSelection, CreateSessionRequest, InputItem, Run, RunId,
-    RunLimits, RunPurpose, RunSpec, Session, WorkspacePath,
+    ArtifactRef, BackendKind, BackendSelection, CreateSessionRequest, InputItem,
+    PlanAcceptanceContract, Run, RunId, RunLimits, RunPurpose, RunSpec, Session, WorkspacePath,
 };
 use birdcode_runtime::{
     MAX_ROOT_PLANNER_OUTPUT_TOKENS, PlanRequestCompileError, compile_root_plan_request,
@@ -27,6 +27,7 @@ fn run(session: &Session, input: Vec<InputItem>) -> Run {
         RunSpec {
             session_id: session.id,
             purpose: RunPurpose::PlanOnly,
+            plan_acceptance: PlanAcceptanceContract::IndependentSemanticReviewV1,
             backend: BackendSelection {
                 backend_id: "lmstudio".to_owned(),
                 kind: BackendKind::Model,

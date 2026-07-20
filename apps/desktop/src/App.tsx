@@ -19,6 +19,7 @@ const checking: RuntimeHealth = {
   protocolVersion: null,
   daemonVersion: null,
   message: "Checking local runtime…",
+  semanticPolicyConfigured: false,
   backends: [],
 };
 
@@ -62,7 +63,7 @@ export function App({ bridge = runtimeBridge }: AppProps) {
   const [models, setModels] = useState<PlannerModel[]>([]);
   const [selectedModelId, setSelectedModelId] = useState("");
   const [modelStatus, setModelStatus] = useState("Waiting for runtime");
-  const [maxOutputTokens, setMaxOutputTokens] = useState(4096);
+  const [maxOutputTokens, setMaxOutputTokens] = useState(MAX_ROOT_PLANNER_OUTPUT_TOKENS);
   const [maxWallTimeSeconds, setMaxWallTimeSeconds] = useState(180);
   const [reasoningEffort, setReasoningEffort] = useState<PlannerReasoningEffort | null>(null);
   const [activeRun, setActiveRun] = useState<StartedPlan | null>(null);
@@ -266,6 +267,7 @@ export function App({ bridge = runtimeBridge }: AppProps) {
     && maxWallTimeSeconds > 0
     && maxWallTimeSeconds <= 3_600;
   const canRun = health.state === "ready"
+    && health.semanticPolicyConfigured
     && selectedModel !== undefined
     && goal.trim().length > 0
     && workspaceRoot.trim().length > 0
@@ -277,10 +279,12 @@ export function App({ bridge = runtimeBridge }: AppProps) {
   const canResetRuntime = health.transport === "stdio" && health.state !== "ready" && health.state !== "checking";
   const readinessTitle = health.state !== "ready"
     ? "Ready when your runtime is"
+    : !health.semanticPolicyConfigured
+      ? "Configure policy-separated review"
     : pendingReconciliation
       ? "Run reconciliation required"
     : selectedModel
-      ? "Ready for a root plan"
+      ? "Policy/model match will be checked at preflight"
       : "Runtime ready · connect a backend";
 
   const startPlan = async (event: FormEvent) => {
@@ -471,7 +475,7 @@ export function App({ bridge = runtimeBridge }: AppProps) {
               <div className="readiness-grid">
                 <div><span className="step">01</span><strong>Repository</strong><small>{workspaceRoot || "Not selected"}</small></div>
                 <div><span className="step">02</span><strong>Backend</strong><small>{modelStatus}</small></div>
-                <div><span className="step">03</span><strong>Authority</strong><small>Plan only · no writes</small></div>
+                <div><span className="step">03</span><strong>Review</strong><small>{health.semanticPolicyConfigured ? "Policy configured · model match pending" : "Explicit policy required"}</small></div>
               </div>
             </div>
           ) : (
@@ -531,11 +535,12 @@ export function App({ bridge = runtimeBridge }: AppProps) {
         <section className="limits">
           <label>Limits</label>
           <div className="limit-grid">
-            <label htmlFor="max-output">Output tokens<input id="max-output" type="number" min="1" max={MAX_ROOT_PLANNER_OUTPUT_TOKENS} value={maxOutputTokens} disabled={runLocked} onChange={(event) => setMaxOutputTokens(Number(event.target.value))} /></label>
+            <label htmlFor="max-output">Aggregate output ceiling<input id="max-output" type="number" min="1" max={MAX_ROOT_PLANNER_OUTPUT_TOKENS} value={maxOutputTokens} disabled={runLocked} onChange={(event) => setMaxOutputTokens(Number(event.target.value))} /></label>
             <label htmlFor="wall-time">Wall time (s)<input id="wall-time" type="number" min="1" max="3600" value={maxWallTimeSeconds} disabled={runLocked} onChange={(event) => setMaxWallTimeSeconds(Number(event.target.value))} /></label>
             <label htmlFor="reasoning">Reasoning<select id="reasoning" value={reasoningEffort ?? "auto"} disabled={runLocked} onChange={(event) => setReasoningEffort(event.target.value === "off" ? "off" : null)}><option value="auto">Auto</option><option value="off">Off</option></select></label>
           </div>
         </section>
+        <section><label>Policy-separated review</label><div className="setup-row"><span className="setup-icon">◎</span><div><strong>{health.semanticPolicyConfigured ? "Policy configured" : "Policy required"}</strong><small>{health.semanticPolicyConfigured ? "The selected planner model must exactly match the policy producer. Daemon preflight enforces producer/critic lineages and stage budgets and may reject the run; this desktop protocol does not expose the pinned values yet" : "Set BIRDCODE_MODEL_POLICY to a strict JSON role-policy file before starting BirdCode"}</small></div></div></section>
         <section><label>Authority</label><div className="setup-row"><span className="setup-icon">⌾</span><div><strong>Read-only planning</strong><small>Execution is rejected in this slice</small></div></div></section>
         <section className="health-detail"><label>RUNTIME</label><dl><div><dt>Status</dt><dd>{statusLabel[health.state]}</dd></div><div><dt>Transport</dt><dd>{health.transport}</dd></div><div><dt>Protocol</dt><dd>{health.protocolVersion ?? "—"}</dd></div></dl><p>{health.message}</p></section>
       </aside>

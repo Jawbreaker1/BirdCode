@@ -10,10 +10,31 @@ use uuid::Uuid;
 
 /// Canonical request/response protocol version.
 ///
-/// Version 4 adds closed, content-addressed provenance for durable failures
-/// before a root-planner inference is prepared. It retains version 3's
-/// client-assigned run identities and provider-neutral planning events.
-pub const PROTOCOL_VERSION: u32 = 4;
+/// Version 5 makes the root-planning acceptance contract explicit and
+/// mandatory on every run. New plan-only runs require independent semantic
+/// review; the legacy mechanical-only mode is reserved for migrated history.
+pub const PROTOCOL_VERSION: u32 = 5;
+
+/// Canonical media type for the trusted semantic root-planning execution
+/// policy retained by every enhanced planning stage.
+pub const ROOT_PLANNING_EXECUTION_POLICY_MEDIA_TYPE: &str =
+    "application/vnd.birdcode.root-planning-execution-policy+json";
+
+/// Closed mechanical limits for the first semantic root-planning policy.
+///
+/// These constants are the single authority shared by policy compilation,
+/// stage request compilers, and durable replay validation. They deliberately
+/// describe mechanics only; no natural-language meaning is classified here.
+pub const ROOT_PLANNING_POLICY_V1_SCHEMA_VERSION: u32 = 1;
+pub const ROOT_PLANNING_POLICY_V1_MAX_MODEL_CALLS: u32 = 4;
+pub const ROOT_PLANNING_POLICY_V1_MAX_REPAIRS: u32 = 1;
+pub const ROOT_PLANNING_POLICY_V1_MAX_REVIEW_ROUNDS: u32 = 2;
+pub const ROOT_PLANNING_POLICY_V1_INITIAL_PLAN_MAX_OUTPUT_TOKENS: u32 = 16_384;
+pub const ROOT_PLANNING_POLICY_V1_INITIAL_REVIEW_MAX_OUTPUT_TOKENS: u32 = 4_096;
+pub const ROOT_PLANNING_POLICY_V1_REPAIR_MAX_OUTPUT_TOKENS: u32 =
+    ROOT_PLANNING_POLICY_V1_INITIAL_PLAN_MAX_OUTPUT_TOKENS;
+pub const ROOT_PLANNING_POLICY_V1_FINAL_REVIEW_MAX_OUTPUT_TOKENS: u32 =
+    ROOT_PLANNING_POLICY_V1_INITIAL_REVIEW_MAX_OUTPUT_TOKENS;
 
 /// Version of the path representation nested inside protocol messages.
 pub const WORKSPACE_PATH_WIRE_VERSION: u32 = 1;
@@ -253,6 +274,8 @@ uuid_id!(CancellationRequestId);
 uuid_id!(EventId);
 uuid_id!(InferenceAttemptId);
 uuid_id!(PlanProposalId);
+uuid_id!(PlanSemanticReviewId);
+uuid_id!(RootPlanningStageFailureId);
 uuid_id!(ReadOperationId);
 uuid_id!(RequestId);
 uuid_id!(RunClaimId);
@@ -479,9 +502,27 @@ pub struct CreateRunRequest {
 pub struct RunSpec {
     pub session_id: SessionId,
     pub purpose: RunPurpose,
+    pub plan_acceptance: PlanAcceptanceContract,
     pub backend: BackendSelection,
     pub input: Vec<InputItem>,
     pub limits: RunLimits,
+}
+
+/// Durable contract governing when a run's root plan may be accepted.
+///
+/// `LegacyMechanicalOnlyV4` exists only so schema-v7 history can be represented
+/// without pretending that it received an independent semantic review. It is
+/// never a valid choice for a newly created run.
+///
+/// The stable v5 `IndependentSemanticReviewV1` wire name denotes eligibility
+/// under the configured distinct producer/critic policy. It does not claim
+/// provider attestation of deployment identity, model weights, or independence.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanAcceptanceContract {
+    IndependentSemanticReviewV1,
+    LegacyMechanicalOnlyV4,
+    NotApplicable,
 }
 
 /// The authority boundary for a run.
@@ -522,6 +563,55 @@ pub struct BackendModelIdentity {
     pub backend_id: String,
     pub kind: BackendKind,
     pub model_id: String,
+}
+
+/// Trusted identity of one exact model deployment and its review-independence
+/// domain. These values come from runtime configuration or attestation; they
+/// are never inferred from a model name or authored by a model response.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelLineage {
+    pub backend_id: String,
+    pub model_id: String,
+    pub deployment_id: String,
+    pub independence_domain_id: String,
+}
+
+/// Fixed output-token allocation for the only allowed semantic planning path.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootPlanningStageBudgets {
+    pub initial_plan_output_tokens: u64,
+    pub initial_review_output_tokens: u64,
+    pub repair_output_tokens: u64,
+    pub final_review_output_tokens: u64,
+}
+
+/// Exact bundled prompt contracts selected before the first inference call.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootPlanningPromptContracts {
+    pub initial_plan_manifest_sha256: Sha256Digest,
+    pub critic_manifest_sha256: Sha256Digest,
+    pub repair_manifest_sha256: Sha256Digest,
+}
+
+/// Trusted, immutable execution policy for one enhanced root-planning run.
+///
+/// This is serialized into the content-addressed artifact referenced by every
+/// stage. The model never authors it. Store validation requires the closed
+/// four-call/two-review/one-repair shape and exact configured lineages.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootPlanningExecutionPolicy {
+    pub schema_version: u32,
+    pub producer: ModelLineage,
+    pub critic: ModelLineage,
+    pub max_model_calls: u32,
+    pub max_repairs: u32,
+    pub max_review_rounds: u32,
+    pub stage_budgets: RootPlanningStageBudgets,
+    pub prompt_contracts: RootPlanningPromptContracts,
 }
 
 /// Provider-neutral result of model discovery.
@@ -766,6 +856,11 @@ pub struct RootPlanningFailed {
     pub cancellation_generation: u64,
     pub phase: RootPlanningFailurePhase,
     pub reason: RootPlanningFailureReason,
+    /// Exact semantic model dependency involved in the failure, when the
+    /// failure is attributable to one configured lineage. This is explicit so
+    /// replay never guesses producer versus reviewer from the current stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_subject: Option<RootPlanningModelSubject>,
     pub evidence_artifact: ArtifactRef,
 }
 
@@ -788,6 +883,63 @@ pub enum RootPlanningFailureReason {
     SelectedModelUnavailable,
     WallDeadlineExceeded,
     PromptCompilationFailed,
+    ArtifactPersistenceFailed,
+    DurableStateConflict,
+}
+
+/// Closed role of a model lineage in policy-separated root-plan review.
+/// `IndependentCritic` is a stable v5 wire name for the policy-eligible critic,
+/// not a provider-attestation claim.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RootPlanningModelRole {
+    Producer,
+    IndependentCritic,
+}
+
+/// Exact role and trusted lineage implicated by a planning failure.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootPlanningModelSubject {
+    pub role: RootPlanningModelRole,
+    pub lineage: ModelLineage,
+}
+
+/// Durable failure either before an enhanced stage reaches Prepared or while
+/// deterministically replaying a committed successful observation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootPlanningStageFailed {
+    pub failure_id: RootPlanningStageFailureId,
+    pub failed_stage: RootPlanningStage,
+    pub predecessor_event_id: EventId,
+    pub execution_policy_artifact: ArtifactRef,
+    pub cancellation_generation: u64,
+    pub reason: RootPlanningStageFailureReason,
+    pub model_subject: RootPlanningModelSubject,
+    pub evidence_artifact: ArtifactRef,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RootPlanningStage {
+    InitialPlan,
+    InitialReview,
+    Repair,
+    FinalReview,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RootPlanningStageFailureReason {
+    WallDeadlineExceeded,
+    IndependentReviewerUnavailable,
+    SelectedModelUnavailable,
+    AggregateBudgetExhausted,
+    PromptCompilationFailed,
+    ArtifactPersistenceFailed,
+    InvalidCommittedArtifact,
+    ConfigurationDrift,
     DurableStateConflict,
 }
 
@@ -811,6 +963,65 @@ pub struct PlannerInferencePrepared {
     pub context_manifest_digest: Sha256Digest,
     pub planner_policy_digest: Sha256Digest,
     pub cancellation_generation: u64,
+    /// Absent only for protocol-v4 mechanical-only root-planning history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_context: Option<PlannerStageContext>,
+}
+
+/// Exact immutable candidate bound into review and repair stages.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanCandidateBinding {
+    pub proposal_event_id: EventId,
+    pub plan_revision: u64,
+    pub plan_digest: Sha256Digest,
+    pub plan_artifact: ArtifactRef,
+}
+
+/// Trusted stage-specific authority attached to an inference preparation.
+///
+/// The model never supplies this value. Its closed variants make stage order,
+/// review round, repair ordinal, subject, lineage, and execution policy
+/// explicit instead of inferring them from prompt text.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, tag = "stage", rename_all = "snake_case")]
+pub enum PlannerStageContext {
+    InitialPlan {
+        model_actor_id: ActorId,
+        model_lineage: ModelLineage,
+        /// Durable reviewer identity snapshot authenticated against the
+        /// execution policy while the initial Prepared event is appended.
+        /// Later recovery can therefore attribute a pre-Prepared review-stage
+        /// failure even if the content-addressed policy file is unavailable.
+        critic_lineage: ModelLineage,
+        execution_policy_artifact: ArtifactRef,
+    },
+    InitialReview {
+        model_actor_id: ActorId,
+        model_lineage: ModelLineage,
+        execution_policy_artifact: ArtifactRef,
+        critic_policy_artifact: ArtifactRef,
+        review_round: u32,
+        candidate: PlanCandidateBinding,
+    },
+    Repair {
+        model_actor_id: ActorId,
+        model_lineage: ModelLineage,
+        execution_policy_artifact: ArtifactRef,
+        repair_ordinal: u32,
+        candidate: PlanCandidateBinding,
+        triggering_review_event_id: EventId,
+        required_finding_ids: Vec<String>,
+    },
+    FinalReview {
+        model_actor_id: ActorId,
+        model_lineage: ModelLineage,
+        execution_policy_artifact: ArtifactRef,
+        critic_policy_artifact: ArtifactRef,
+        review_round: u32,
+        repair_ordinal: u32,
+        candidate: PlanCandidateBinding,
+    },
 }
 
 /// Durable post-call record bound to one prepared attempt and reservation.
@@ -881,6 +1092,21 @@ pub enum UnknownInferenceOutcomeReason {
     RuntimeRestartedBeforeObservation,
     ClaimExpiredBeforeObservation,
     EvidenceCommitIndeterminate,
+}
+
+/// Closed mechanical boundary retained as content-addressed evidence for an
+/// inference whose post-call outcome cannot be established.
+///
+/// This is deliberately typed rather than inferred from diagnostic text. The
+/// coarser [`UnknownInferenceOutcomeReason`] remains the replay projection.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnknownInferenceBoundary {
+    Restart,
+    Shutdown,
+    ClaimRenewalFailed,
+    Deadline,
+    Cancelled,
 }
 
 /// Read-only operation requested by the planner. This type describes an
@@ -982,6 +1208,74 @@ pub struct PlanProposalAccepted {
     pub validation_evidence_artifact: ArtifactRef,
 }
 
+/// Durable schema-valid semantic acceptance of one exact candidate.
+/// Completion additionally requires store-verified reviewer independence.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanSemanticReviewAccepted {
+    pub review_id: PlanSemanticReviewId,
+    pub inference_attempt_id: InferenceAttemptId,
+    pub observed_event_id: EventId,
+    pub candidate: PlanCandidateBinding,
+    pub critique_artifact: ArtifactRef,
+    pub validation_evidence_artifact: ArtifactRef,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanSemanticReviewRejectionDisposition {
+    RepairOnceAuthorized,
+    TerminalReject,
+    ReviewContractInvalid,
+}
+
+/// Closed projection of the schema-validated critic result. Natural-language
+/// findings remain in the content-addressed critique artifact.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanSemanticReviewValidatedVerdict {
+    Accept,
+    Revise,
+    Clarify,
+    Escalate,
+    ContractInvalid,
+}
+
+/// Deterministic validation receipt binding one semantic decision to the
+/// exact Prepared request, Observed evidence, critic policy, candidate, and
+/// normalized critique bytes.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanSemanticReviewValidationReceipt {
+    pub schema_version: u32,
+    pub inference_attempt_id: InferenceAttemptId,
+    pub observed_event_id: EventId,
+    pub candidate: PlanCandidateBinding,
+    pub prompt_manifest_sha256: Sha256Digest,
+    pub prompt_artifact_sha256: Sha256Digest,
+    pub request_artifact_sha256: Sha256Digest,
+    pub normalized_evidence_sha256: Sha256Digest,
+    pub critic_policy_sha256: Sha256Digest,
+    pub critique_sha256: Sha256Digest,
+    pub verdict: PlanSemanticReviewValidatedVerdict,
+    pub finding_ids: Vec<String>,
+}
+
+/// Durable non-accepting semantic review. Only an initial policy-separated review
+/// may authorize the single bounded repair.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanSemanticReviewRejected {
+    pub review_id: PlanSemanticReviewId,
+    pub inference_attempt_id: InferenceAttemptId,
+    pub observed_event_id: EventId,
+    pub candidate: PlanCandidateBinding,
+    pub critique_artifact: ArtifactRef,
+    pub validation_evidence_artifact: ArtifactRef,
+    pub disposition: PlanSemanticReviewRejectionDisposition,
+    pub required_finding_ids: Vec<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EventEnvelope {
@@ -1027,6 +1321,14 @@ pub struct Provenance {
     pub raw_artifact: Option<ArtifactRef>,
 }
 
+// Boxing an existing variant would change this protocol's externally visible
+// Rust shape and require call-site migration despite leaving JSON unchanged.
+// Keep the stable typed API and wire representation until a versioned protocol
+// change can introduce indirection deliberately.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "boxing PlannerInferencePrepared would be a versioned public protocol API change"
+)]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(
     deny_unknown_fields,
@@ -1051,6 +1353,7 @@ pub enum EventPayload {
     RunClaimed(RunClaimed),
     CancellationRequested(CancellationRequested),
     RootPlanningFailed(RootPlanningFailed),
+    RootPlanningStageFailed(RootPlanningStageFailed),
     PlannerInferencePrepared(PlannerInferencePrepared),
     PlannerInferenceObserved(PlannerInferenceObserved),
     PlannerInferenceOutcomeUnknown(PlannerInferenceOutcomeUnknown),
@@ -1058,6 +1361,8 @@ pub enum EventPayload {
     ReadOperationObserved(ReadOperationObserved),
     PlanProposalRejected(PlanProposalRejected),
     PlanProposalAccepted(PlanProposalAccepted),
+    PlanSemanticReviewAccepted(PlanSemanticReviewAccepted),
+    PlanSemanticReviewRejected(PlanSemanticReviewRejected),
     /// Legacy extension envelope for non-core backend telemetry only.
     ///
     /// Durable root planning MUST NOT encode inference, reads, proposals,
@@ -1424,6 +1729,7 @@ mod tests {
             spec: RunSpec {
                 session_id: SessionId::new(),
                 purpose: RunPurpose::PlanOnly,
+                plan_acceptance: PlanAcceptanceContract::IndependentSemanticReviewV1,
                 backend: BackendSelection {
                     backend_id: "ollama-local".to_owned(),
                     kind: BackendKind::Model,
@@ -1445,6 +1751,43 @@ mod tests {
     }
 
     #[test]
+    fn protocol_v5_requires_an_explicit_plan_acceptance_contract() {
+        assert_eq!(PROTOCOL_VERSION, 5);
+        let spec = RunSpec {
+            session_id: SessionId::new(),
+            purpose: RunPurpose::PlanOnly,
+            plan_acceptance: PlanAcceptanceContract::IndependentSemanticReviewV1,
+            backend: BackendSelection {
+                backend_id: "lmstudio-local".to_owned(),
+                kind: BackendKind::Model,
+                model: Some("reviewed-model".to_owned()),
+                reasoning_effort: None,
+            },
+            input: vec![InputItem::Text {
+                text: "Produce a semantically reviewed plan".to_owned(),
+            }],
+            limits: RunLimits::default(),
+        };
+        let encoded = serde_json::to_value(&spec).expect("v5 run spec should serialize");
+        let decoded: RunSpec =
+            serde_json::from_value(encoded.clone()).expect("v5 run spec should round trip");
+        assert_eq!(decoded, spec);
+
+        let mut missing = encoded.clone();
+        missing
+            .as_object_mut()
+            .expect("run spec should be an object")
+            .remove("plan_acceptance");
+        serde_json::from_value::<RunSpec>(missing)
+            .expect_err("v5 must reject a missing plan acceptance contract");
+
+        let mut unknown = encoded;
+        unknown["plan_acceptance"] = serde_json::json!("model_says_it_is_good");
+        serde_json::from_value::<RunSpec>(unknown)
+            .expect_err("v5 must reject an unknown plan acceptance contract");
+    }
+
+    #[test]
     fn default_run_limits_grant_no_delegation_authority() {
         assert_eq!(RunLimits::default().max_subagents, 0);
     }
@@ -1455,6 +1798,7 @@ mod tests {
         let spec = RunSpec {
             session_id: SessionId::new(),
             purpose: RunPurpose::PlanOnly,
+            plan_acceptance: PlanAcceptanceContract::IndependentSemanticReviewV1,
             backend: BackendSelection {
                 backend_id: "lmstudio-local".to_owned(),
                 kind: BackendKind::Model,
@@ -1516,6 +1860,7 @@ mod tests {
                 context_manifest_digest: digest('3'),
                 planner_policy_digest: digest('4'),
                 cancellation_generation: 2,
+                stage_context: None,
             }),
         };
         let observed = EventEnvelope {
@@ -1579,6 +1924,105 @@ mod tests {
     }
 
     #[test]
+    fn semantic_review_and_repair_protocol_shapes_are_explicit_and_closed() {
+        let candidate = PlanCandidateBinding {
+            proposal_event_id: EventId::new(),
+            plan_revision: 1,
+            plan_digest: digest('a'),
+            plan_artifact: artifact('a', "application/vnd.birdcode.accepted-plan+json"),
+        };
+        let producer_attempt_id = InferenceAttemptId::new();
+        let critic_attempt_id = InferenceAttemptId::new();
+        let reviewer_actor_id = ActorId::new();
+        let critic_lineage = ModelLineage {
+            backend_id: "lmstudio-local".to_owned(),
+            model_id: "reviewer/model-q6".to_owned(),
+            deployment_id: "local-reviewer-instance-1".to_owned(),
+            independence_domain_id: "reviewer-weights-family".to_owned(),
+        };
+        let execution_policy = artifact('e', ROOT_PLANNING_EXECUTION_POLICY_MEDIA_TYPE);
+        let prepared = PlannerInferencePrepared {
+            attempt_id: critic_attempt_id,
+            parent_attempt_id: Some(producer_attempt_id),
+            backend_model: BackendModelIdentity {
+                backend_id: critic_lineage.backend_id.clone(),
+                kind: BackendKind::Model,
+                model_id: critic_lineage.model_id.clone(),
+            },
+            prompt_artifact: artifact('b', "application/vnd.birdcode.root-prompt+json"),
+            prompt_manifest_digest: digest('b'),
+            request_artifact: artifact('c', "application/vnd.birdcode.inference-request+json"),
+            token_reservation: TokenReservation {
+                id: TokenReservationId::new(),
+                reserved_tokens: 16_384,
+                max_output_tokens: 2_048,
+            },
+            plan_revision: candidate.plan_revision,
+            plan_digest: candidate.plan_digest.clone(),
+            obligation_snapshot_digest: digest('1'),
+            acceptance_policy_digest: digest('2'),
+            context_manifest_digest: digest('3'),
+            planner_policy_digest: digest('4'),
+            cancellation_generation: 0,
+            stage_context: Some(PlannerStageContext::InitialReview {
+                model_actor_id: reviewer_actor_id,
+                model_lineage: critic_lineage,
+                execution_policy_artifact: execution_policy,
+                critic_policy_artifact: artifact(
+                    '9',
+                    "application/vnd.birdcode.plan-critic-policy+json",
+                ),
+                review_round: 1,
+                candidate: candidate.clone(),
+            }),
+        };
+        let accepted = EventPayload::PlanSemanticReviewAccepted(PlanSemanticReviewAccepted {
+            review_id: PlanSemanticReviewId::new(),
+            inference_attempt_id: critic_attempt_id,
+            observed_event_id: EventId::new(),
+            candidate: candidate.clone(),
+            critique_artifact: artifact('d', "application/vnd.birdcode.plan-critique+json"),
+            validation_evidence_artifact: artifact(
+                'f',
+                "application/vnd.birdcode.plan-critique-validation+json",
+            ),
+        });
+        let rejected = EventPayload::PlanSemanticReviewRejected(PlanSemanticReviewRejected {
+            review_id: PlanSemanticReviewId::new(),
+            inference_attempt_id: critic_attempt_id,
+            observed_event_id: EventId::new(),
+            candidate,
+            critique_artifact: artifact('7', "application/vnd.birdcode.plan-critique+json"),
+            validation_evidence_artifact: artifact(
+                '8',
+                "application/vnd.birdcode.plan-critique-validation+json",
+            ),
+            disposition: PlanSemanticReviewRejectionDisposition::RepairOnceAuthorized,
+            required_finding_ids: vec!["finding-a7".to_owned(), "finding-z9".to_owned()],
+        });
+
+        let values = [
+            serde_json::to_value(EventPayload::PlannerInferencePrepared(prepared))
+                .expect("prepared review serializes"),
+            serde_json::to_value(&accepted).expect("accepted review serializes"),
+            serde_json::to_value(&rejected).expect("rejected review serializes"),
+        ];
+        for value in values {
+            let decoded = serde_json::from_value::<EventPayload>(value.clone())
+                .expect("semantic stage event round trips");
+            assert_eq!(
+                serde_json::to_value(decoded).expect("decoded serializes"),
+                value
+            );
+        }
+
+        let mut forged = serde_json::to_value(rejected).expect("rejected review serializes");
+        forged["data"]["candidate"]["heuristic_quality"] = serde_json::json!("accept");
+        serde_json::from_value::<EventPayload>(forged)
+            .expect_err("semantic stage bindings reject unknown control fields");
+    }
+
+    #[test]
     fn root_planning_failure_round_trips_as_a_closed_typed_event() {
         let claim_event_id = EventId::new();
         let evidence = artifact('e', "application/vnd.birdcode.root-planning-failure+json");
@@ -1588,6 +2032,7 @@ mod tests {
             cancellation_generation: 0,
             phase: RootPlanningFailurePhase::ModelDiscovery,
             reason: RootPlanningFailureReason::BackendDiscoveryFailed,
+            model_subject: None,
             evidence_artifact: evidence,
         });
 
@@ -1623,6 +2068,7 @@ mod tests {
             spec: RunSpec {
                 session_id,
                 purpose: RunPurpose::PlanOnly,
+                plan_acceptance: PlanAcceptanceContract::IndependentSemanticReviewV1,
                 backend: BackendSelection {
                     backend_id: "ollama-local".to_owned(),
                     kind: BackendKind::Model,
@@ -1661,6 +2107,7 @@ mod tests {
             context_manifest_digest: digest('3'),
             planner_policy_digest: digest('4'),
             cancellation_generation: 0,
+            stage_context: None,
         });
         let mut prepared_json =
             serde_json::to_value(prepared).expect("prepared event should serialize");

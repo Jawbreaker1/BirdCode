@@ -1,4 +1,5 @@
 use crate::compiler::{PromptInvocation, TrustLevel};
+use crate::manifest::PromptError;
 use crate::{PromptId, PromptKey};
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -474,6 +475,72 @@ pub enum RootPlannerInvariantViolation {
         target_index: u32,
         verification_kind: VerificationKind,
     },
+}
+
+/// Stable mechanical class for one rejected root-planner output.
+///
+/// The class is derived only from typed parser/schema/invariant failures. It
+/// never inspects words or phrases from the model response or an error string.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RootPlannerRejectionClass {
+    InvalidSchema,
+    ProtectedAuthorityMutation,
+    ObligationCoverageIncomplete,
+    DependencyCycle,
+    PolicyLimitExceeded,
+}
+
+/// Classifies a root-planner contract error using typed invariant variants.
+///
+/// The ordering is intentional and stable when one response violates several
+/// invariants: protected authority, mandatory coverage, graph validity,
+/// bounded policy limits, then the generic schema/shape class.
+#[must_use]
+pub fn classify_root_planner_rejection(error: &PromptError) -> RootPlannerRejectionClass {
+    let PromptError::RootPlannerOutputInvariant(violations) = error else {
+        return RootPlannerRejectionClass::InvalidSchema;
+    };
+    if violations.iter().any(|violation| {
+        matches!(
+            violation,
+            RootPlannerInvariantViolation::DigestMismatch { .. }
+                | RootPlannerInvariantViolation::UnknownObligationReference { .. }
+                | RootPlannerInvariantViolation::ObligationDigestMismatch { .. }
+                | RootPlannerInvariantViolation::PlannerPolicyIntegrity { .. }
+        )
+    }) {
+        return RootPlannerRejectionClass::ProtectedAuthorityMutation;
+    }
+    if violations.iter().any(|violation| {
+        matches!(
+            violation,
+            RootPlannerInvariantViolation::MandatoryObligationUncovered { .. }
+        )
+    }) {
+        return RootPlannerRejectionClass::ObligationCoverageIncomplete;
+    }
+    if violations.iter().any(|violation| {
+        matches!(
+            violation,
+            RootPlannerInvariantViolation::DependencyCycle
+                | RootPlannerInvariantViolation::SelfDependency { .. }
+                | RootPlannerInvariantViolation::UnknownDependency { .. }
+        )
+    }) {
+        return RootPlannerRejectionClass::DependencyCycle;
+    }
+    if violations.iter().any(|violation| {
+        matches!(
+            violation,
+            RootPlannerInvariantViolation::TooManyWorkOrders { .. }
+                | RootPlannerInvariantViolation::TooManyDependencyReferences { .. }
+                | RootPlannerInvariantViolation::TooManyVerificationTargets { .. }
+                | RootPlannerInvariantViolation::VerificationKindNotAllowed { .. }
+        )
+    }) {
+        return RootPlannerRejectionClass::PolicyLimitExceeded;
+    }
+    RootPlannerRejectionClass::InvalidSchema
 }
 
 /// Returns the stable key of the bundled root planning turn.
@@ -1225,4 +1292,79 @@ fn wire_u32(value: usize) -> u32 {
 
 fn wire_u32_from_u64(value: u64) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejection_classification_is_typed_and_has_stable_precedence() {
+        let schema_error = PromptError::SchemaValidation {
+            target: "root planner output".to_owned(),
+            errors: vec!["typed schema failure".to_owned()],
+        };
+        assert_eq!(
+            classify_root_planner_rejection(&schema_error),
+            RootPlannerRejectionClass::InvalidSchema
+        );
+
+        for (violation, expected) in [
+            (
+                RootPlannerInvariantViolation::MandatoryObligationUncovered {
+                    obligation_id: "root_user_goal".to_owned(),
+                    obligation_sha256: "0".repeat(64),
+                },
+                RootPlannerRejectionClass::ObligationCoverageIncomplete,
+            ),
+            (
+                RootPlannerInvariantViolation::DependencyCycle,
+                RootPlannerRejectionClass::DependencyCycle,
+            ),
+            (
+                RootPlannerInvariantViolation::TooManyWorkOrders {
+                    maximum: 16,
+                    actual: 17,
+                },
+                RootPlannerRejectionClass::PolicyLimitExceeded,
+            ),
+            (
+                RootPlannerInvariantViolation::DirectiveShape {
+                    directive: RootPlannerDirective::Plan,
+                    work_orders: 0,
+                    clarification_questions: 0,
+                    escalation_requests: 0,
+                },
+                RootPlannerRejectionClass::InvalidSchema,
+            ),
+        ] {
+            assert_eq!(
+                classify_root_planner_rejection(&PromptError::RootPlannerOutputInvariant(vec![
+                    violation,
+                ])),
+                expected
+            );
+        }
+
+        let mixed = PromptError::RootPlannerOutputInvariant(vec![
+            RootPlannerInvariantViolation::TooManyWorkOrders {
+                maximum: 16,
+                actual: 17,
+            },
+            RootPlannerInvariantViolation::DependencyCycle,
+            RootPlannerInvariantViolation::MandatoryObligationUncovered {
+                obligation_id: "root_user_goal".to_owned(),
+                obligation_sha256: "0".repeat(64),
+            },
+            RootPlannerInvariantViolation::DigestMismatch {
+                field: PlannerDigestField::RootSnapshotSha256,
+                expected: "0".repeat(64),
+                actual: "1".repeat(64),
+            },
+        ]);
+        assert_eq!(
+            classify_root_planner_rejection(&mixed),
+            RootPlannerRejectionClass::ProtectedAuthorityMutation
+        );
+    }
 }

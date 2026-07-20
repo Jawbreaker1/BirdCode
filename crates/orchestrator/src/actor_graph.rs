@@ -7,6 +7,7 @@
 //! retries, reviewer independence, concurrency, and journal-acknowledged
 //! handoffs.
 
+pub use birdcode_protocol::ModelLineage;
 use futures_util::stream::{FuturesUnordered, StreamExt as _};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -140,17 +141,6 @@ opaque_id!(RoleId, "role_id");
 opaque_id!(CandidateGroupId, "candidate_group_id");
 opaque_id!(WorkspaceLeaseId, "workspace_lease_id");
 opaque_id!(ModelProfileId, "model_profile_id");
-
-/// An attested backend/model/deployment lineage and review-independence domain.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ModelLineage {
-    pub backend_id: String,
-    pub model_id: String,
-    pub deployment_id: String,
-    /// Stable correlation boundary, normally a model-weights or provider domain.
-    pub independence_domain_id: String,
-}
 
 /// The planner's concrete, profile-bound worker assignment.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

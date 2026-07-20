@@ -254,8 +254,8 @@ mod tests {
         BackendKind, BackendSelection, CancellationDisposition, ClientCommand, ClientIdentity,
         ClientRequest, CreateRunRequest, CreateSessionRequest, ErrorCode, EventEnvelope, EventPage,
         EventPayload, GetArtifactRequest, InitializeRequest, InputItem, NewEvent, PROTOCOL_VERSION,
-        RequestId, ResponseOutcome, Run, RunId, RunLimits, RunPurpose, RunSpec, RunState,
-        ServerResponse, ServerResult, Session, SessionId,
+        PlanAcceptanceContract, RequestId, ResponseOutcome, Run, RunId, RunLimits, RunPurpose,
+        RunSpec, RunState, ServerResponse, ServerResult, Session, SessionId,
     };
     use birdcode_runtime::{LocalRuntime, Repository, RepositoryError};
     use birdcode_store::Store;
@@ -343,7 +343,7 @@ mod tests {
         }
     }
 
-    fn protocol_v4_requests(session_id: SessionId, run_id: RunId) -> [ClientRequest; 6] {
+    fn protocol_v5_requests(session_id: SessionId, run_id: RunId) -> [ClientRequest; 6] {
         [
             ClientRequest::new(ClientCommand::Initialize(InitializeRequest {
                 protocol_version: PROTOCOL_VERSION,
@@ -357,6 +357,7 @@ mod tests {
                 spec: RunSpec {
                     session_id,
                     purpose: RunPurpose::PlanOnly,
+                    plan_acceptance: PlanAcceptanceContract::IndependentSemanticReviewV1,
                     backend: BackendSelection {
                         backend_id: "lmstudio".to_owned(),
                         kind: BackendKind::Model,
@@ -405,6 +406,7 @@ mod tests {
             spec: RunSpec {
                 session_id: session.id,
                 purpose: RunPurpose::PlanOnly,
+                plan_acceptance: PlanAcceptanceContract::IndependentSemanticReviewV1,
                 backend: BackendSelection {
                     backend_id: "lmstudio".to_owned(),
                     kind: BackendKind::Model,
@@ -480,6 +482,47 @@ mod tests {
     }
 
     #[test]
+    fn protocol_v5_rejects_a_new_legacy_acceptance_contract() {
+        let mut runtime = LocalRuntime::new(MemoryRepository::default());
+        let session = runtime
+            .create_session(CreateSessionRequest {
+                workspace_root: PathBuf::from("/tmp/daemon-legacy-contract").into(),
+                title: None,
+            })
+            .expect("session should persist");
+        let run_id = RunId::new();
+        let response = create_run_response_with_submit(
+            &mut runtime,
+            RequestId::new(),
+            CreateRunRequest {
+                run_id,
+                spec: RunSpec {
+                    session_id: session.id,
+                    purpose: RunPurpose::PlanOnly,
+                    plan_acceptance: PlanAcceptanceContract::LegacyMechanicalOnlyV4,
+                    backend: BackendSelection {
+                        backend_id: "lmstudio".to_owned(),
+                        kind: BackendKind::Model,
+                        model: Some("local-model".to_owned()),
+                        reasoning_effort: None,
+                    },
+                    input: vec![InputItem::Text {
+                        text: "Do not downgrade semantic acceptance.".to_owned(),
+                    }],
+                    limits: RunLimits::default(),
+                },
+            },
+            |_| panic!("an invalid run must not reach supervisor submission"),
+        );
+        assert!(matches!(
+            response.outcome,
+            ResponseOutcome::Error { error }
+                if error.code == ErrorCode::InvalidRequest && !error.retryable
+        ));
+        assert!(runtime.get_run(run_id).is_err());
+    }
+
+    #[test]
     fn requires_initialize_then_reports_typed_health() {
         let health_before = ClientRequest::new(ClientCommand::Health);
         let initialize = ClientRequest::new(ClientCommand::Initialize(InitializeRequest {
@@ -531,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn protocol_v4_replays_events_and_records_cancellation_before_terminal_state() {
+    fn protocol_v5_replays_events_and_records_cancellation_before_terminal_state() {
         let directory = TempDir::new().expect("temporary state should be created");
         let store = Store::open(
             directory.path().join("state.sqlite3"),
@@ -546,7 +589,7 @@ mod tests {
             })
             .expect("session should persist");
         let run_id = RunId::new();
-        let requests = protocol_v4_requests(session.id, run_id);
+        let requests = protocol_v5_requests(session.id, run_id);
         let input = requests
             .iter()
             .map(|request| serde_json::to_string(request).expect("request should encode"))

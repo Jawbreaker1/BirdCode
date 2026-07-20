@@ -350,6 +350,15 @@ impl Default for ClientTimeouts {
     }
 }
 
+/// Explicit process-level configuration passed to the local daemon.
+///
+/// Reviewer lineage is never inferred by the client. A planning policy is
+/// enabled only when its exact file path is supplied by the caller.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DaemonLaunchOptions {
+    pub model_policy: Option<PathBuf>,
+}
+
 #[derive(Clone, Copy)]
 enum RequestPhase {
     Startup,
@@ -405,7 +414,21 @@ pub struct DaemonClient {
     startup_timeout: Duration,
     executable: PathBuf,
     data_dir: PathBuf,
+    launch_options: DaemonLaunchOptions,
     initialized_client: Option<ClientIdentity>,
+}
+
+fn daemon_command(
+    executable: &Path,
+    data_dir: &Path,
+    launch_options: &DaemonLaunchOptions,
+) -> Command {
+    let mut command = Command::new(executable);
+    command.arg("--data-dir").arg(data_dir);
+    if let Some(model_policy) = &launch_options.model_policy {
+        command.arg("--model-policy").arg(model_policy);
+    }
+    command
 }
 
 impl DaemonClient {
@@ -417,6 +440,25 @@ impl DaemonClient {
     /// cannot be acquired.
     pub fn spawn(executable: &Path, data_dir: &Path) -> Result<Self, ClientError> {
         Self::spawn_with_timeouts(executable, data_dir, ClientTimeouts::default())
+    }
+
+    /// Starts one daemon with explicit process-level launch configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the daemon cannot be started or its stdio pipes
+    /// cannot be acquired.
+    pub fn spawn_with_launch_options(
+        executable: &Path,
+        data_dir: &Path,
+        launch_options: DaemonLaunchOptions,
+    ) -> Result<Self, ClientError> {
+        Self::spawn_with_launch_options_and_timeouts(
+            executable,
+            data_dir,
+            launch_options,
+            ClientTimeouts::default(),
+        )
     }
 
     /// Starts a daemon with an explicit deadline for each complete request,
@@ -450,9 +492,28 @@ impl DaemonClient {
         data_dir: &Path,
         timeouts: ClientTimeouts,
     ) -> Result<Self, ClientError> {
-        let mut child = Command::new(executable)
-            .arg("--data-dir")
-            .arg(data_dir)
+        Self::spawn_with_launch_options_and_timeouts(
+            executable,
+            data_dir,
+            DaemonLaunchOptions::default(),
+            timeouts,
+        )
+    }
+
+    /// Starts a daemon with explicit launch configuration and independent
+    /// initialization and steady-state RPC deadlines.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the daemon or its transport threads cannot be
+    /// started, or if the daemon's stdio pipes cannot be acquired.
+    pub fn spawn_with_launch_options_and_timeouts(
+        executable: &Path,
+        data_dir: &Path,
+        launch_options: DaemonLaunchOptions,
+        timeouts: ClientTimeouts,
+    ) -> Result<Self, ClientError> {
+        let mut child = daemon_command(executable, data_dir, &launch_options)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -498,6 +559,7 @@ impl DaemonClient {
             startup_timeout: timeouts.startup,
             executable: executable.to_owned(),
             data_dir: data_dir.to_owned(),
+            launch_options,
             initialized_client: None,
         })
     }
@@ -988,9 +1050,10 @@ impl DaemonClient {
             .initialized_client
             .clone()
             .ok_or(ClientError::ReconnectBeforeInitialize)?;
-        let mut replacement = Self::spawn_with_timeouts(
+        let mut replacement = Self::spawn_with_launch_options_and_timeouts(
             &self.executable,
             &self.data_dir,
+            self.launch_options.clone(),
             ClientTimeouts::new(self.request_timeout, self.startup_timeout),
         )?;
         let initialized = replacement.initialize(identity.name, identity.version)?;
@@ -1293,13 +1356,14 @@ mod tests {
     use super::{
         ClientError, ClientTimeouts, CreateRunFailure, DAEMON_BINARY_NAME,
         DAEMON_REQUEST_FRAME_BYTES, DEFAULT_REQUEST_TIMEOUT, DEFAULT_STARTUP_TIMEOUT, DaemonClient,
-        MAX_RESPONSE_FRAME_BYTES, ResponseReadError, encode_request, ensure_protocol_version,
-        read_response_frame, result_name, sibling_daemon_path, validate_artifact_response,
+        DaemonLaunchOptions, MAX_RESPONSE_FRAME_BYTES, ResponseReadError, daemon_command,
+        encode_request, ensure_protocol_version, read_response_frame, result_name,
+        sibling_daemon_path, validate_artifact_response,
     };
     use birdcode_protocol::{
         ArtifactChunk, ArtifactRef, BackendKind, BackendSelection, ClientCommand, CreateRunRequest,
-        CreateSessionRequest, ErrorCode, GetArtifactRequest, InputItem, RunId, RunLimits,
-        RunPurpose, RunSpec, ServerResult, SessionId, Sha256Digest,
+        CreateSessionRequest, ErrorCode, GetArtifactRequest, InputItem, PlanAcceptanceContract,
+        RunId, RunLimits, RunPurpose, RunSpec, ServerResult, SessionId, Sha256Digest,
     };
     use serde::ser::SerializeSeq;
     use serde::{Serialize, Serializer};
@@ -1487,6 +1551,7 @@ for line in sys.stdin:
             spec: RunSpec {
                 session_id: SessionId::new(),
                 purpose: RunPurpose::PlanOnly,
+                plan_acceptance: PlanAcceptanceContract::IndependentSemanticReviewV1,
                 backend: BackendSelection {
                     backend_id: "lmstudio".to_owned(),
                     kind: BackendKind::Model,
@@ -1528,6 +1593,39 @@ for line in sys.stdin:
 
         assert_eq!(sibling_daemon_path(client), expected);
         assert_eq!(DAEMON_BINARY_NAME, "birdcode-daemon");
+    }
+
+    #[test]
+    fn launch_arguments_forward_only_an_explicit_model_policy_path() {
+        let default = daemon_command(
+            Path::new("/Applications/BirdCode/birdcode-daemon"),
+            Path::new("/tmp/BirdCode data"),
+            &DaemonLaunchOptions::default(),
+        );
+        assert_eq!(
+            default.get_args().collect::<Vec<_>>(),
+            [
+                std::ffi::OsStr::new("--data-dir"),
+                std::ffi::OsStr::new("/tmp/BirdCode data")
+            ]
+        );
+
+        let explicit = daemon_command(
+            Path::new("/Applications/BirdCode/birdcode-daemon"),
+            Path::new("/tmp/BirdCode data"),
+            &DaemonLaunchOptions {
+                model_policy: Some(PathBuf::from("/tmp/policies/critic policy.json")),
+            },
+        );
+        assert_eq!(
+            explicit.get_args().collect::<Vec<_>>(),
+            [
+                std::ffi::OsStr::new("--data-dir"),
+                std::ffi::OsStr::new("/tmp/BirdCode data"),
+                std::ffi::OsStr::new("--model-policy"),
+                std::ffi::OsStr::new("/tmp/policies/critic policy.json"),
+            ]
+        );
     }
 
     #[test]

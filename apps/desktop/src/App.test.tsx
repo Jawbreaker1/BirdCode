@@ -28,7 +28,7 @@ test("reports the real disconnected state and never enables a fake run", async (
 
 test("does not claim task readiness or interactive setup without a backend", async () => {
   const readyWithoutBackend: RuntimeBridge = {
-    health: async () => ({ state: "ready", transport: "stdio", protocolVersion: "2", daemonVersion: "0.1.0", message: "Ready", backends: [] }),
+    health: async () => ({ state: "ready", transport: "stdio", protocolVersion: "2", daemonVersion: "0.1.0", message: "Ready", semanticPolicyConfigured: true, backends: [] }),
     reset: async () => {},
   };
 
@@ -39,6 +39,45 @@ test("does not claim task readiness or interactive setup without a backend", asy
   expect((screen.getByRole("button", { name: "Auto context" }) as HTMLButtonElement).disabled).toBe(true);
   expect((screen.getByRole("button", { name: "Local" }) as HTMLButtonElement).disabled).toBe(true);
   expect((screen.getByLabelText("Run task") as HTMLButtonElement).disabled).toBe(true);
+});
+
+test("fails closed when the runtime is ready but no producer/critic policy is loaded", async () => {
+  const startPlan = vi.fn<NonNullable<RuntimeBridge["startPlan"]>>();
+  const bridge: RuntimeBridge = {
+    health: async () => ({
+      state: "ready",
+      transport: "stdio",
+      protocolVersion: "5",
+      daemonVersion: "0.1.0",
+      message: "Runtime and model discovery are ready; review policy is required.",
+      semanticPolicyConfigured: false,
+      backends: [],
+    }),
+    reset: async () => {},
+    discoverModels: async () => [{
+      backendId: "lmstudio",
+      modelId: "exact-model",
+      displayName: "Exact model",
+      contextWindowTokens: null,
+      maxOutputTokens: null,
+    }],
+    startPlan,
+  };
+
+  render(<App bridge={bridge} />);
+  await waitFor(() => expect(
+    (screen.getByLabelText("Exact LM Studio model") as HTMLSelectElement).value,
+  ).toBe("exact-model"));
+  fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "/tmp/birdcode-project" } });
+  fireEvent.change(screen.getByLabelText("Task prompt"), { target: { value: "Planera detta" } });
+
+  expect(screen.getByText("Configure policy-separated review")).toBeTruthy();
+  expect(screen.getByText("Policy required")).toBeTruthy();
+  expect(screen.getByText(/Set BIRDCODE_MODEL_POLICY/)).toBeTruthy();
+  const run = screen.getByLabelText("Run task") as HTMLButtonElement;
+  expect(run.disabled).toBe(true);
+  fireEvent.click(run);
+  expect(startPlan).not.toHaveBeenCalled();
 });
 
 test("preserves multilingual task input without parsing it", () => {
@@ -236,9 +275,9 @@ test("submits an exact discovered model and renders the verified accepted plan",
     events: [{
       sequence: 8,
       occurredAt: "2026-07-19T16:00:00Z",
-      kind: "plan_proposal_accepted",
+      kind: "plan_semantic_review_accepted",
       tone: "success",
-      title: "Plan accepted",
+      title: "Independent semantic review passed",
       detail: "Revision 1",
     }],
     acceptedPlan: {
@@ -259,7 +298,7 @@ test("submits an exact discovered model and renders the verified accepted plan",
     },
   });
   const bridge: RuntimeBridge = {
-    health: async () => ({ state: "ready", transport: "stdio", protocolVersion: "3", daemonVersion: "0.1.0", message: "Ready", backends: [] }),
+    health: async () => ({ state: "ready", transport: "stdio", protocolVersion: "3", daemonVersion: "0.1.0", message: "Ready", semanticPolicyConfigured: true, backends: [] }),
     reset: async () => {},
     discoverModels: async () => [{
       backendId: "lmstudio",
@@ -282,6 +321,12 @@ test("submits an exact discovered model and renders the verified accepted plan",
   await waitFor(() => expect(
     (screen.getByLabelText("Exact LM Studio model") as HTMLSelectElement).value,
   ).toBe("google/gemma-4-26b-a4b"));
+  expect(screen.getByText("Policy/model match will be checked at preflight")).toBeTruthy();
+  expect(screen.getByText("Policy configured · model match pending")).toBeTruthy();
+  expect(screen.getByText("Policy configured")).toBeTruthy();
+  expect(screen.getByText(/selected planner model must exactly match the policy producer/i)).toBeTruthy();
+  expect(screen.getByText(/may reject the run/i)).toBeTruthy();
+  expect(screen.queryByText(/review ready/i)).toBeNull();
   fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "/tmp/birdcode-project" } });
   fireEvent.change(screen.getByLabelText("Task prompt"), { target: { value: "Bygg planen — 説明も含めて" } });
   fireEvent.click(screen.getByLabelText("Run task"));
@@ -292,7 +337,7 @@ test("submits an exact discovered model and renders the verified accepted plan",
     goal: "Bygg planen — 説明も含めて",
     backendId: "lmstudio",
     modelId: "google/gemma-4-26b-a4b",
-    maxOutputTokens: 4096,
+    maxOutputTokens: 16_384,
     maxWallTimeSeconds: 180,
     reasoningEffort: null,
   });
@@ -349,7 +394,7 @@ test("retains one ambiguous run identity until exact reconciliation starts it", 
     acceptedPlan: null,
   });
   const bridge: RuntimeBridge = {
-    health: async () => ({ state: "ready", transport: "stdio", protocolVersion: "4", daemonVersion: "0.1.0", message: "Ready", backends: [] }),
+    health: async () => ({ state: "ready", transport: "stdio", protocolVersion: "4", daemonVersion: "0.1.0", message: "Ready", semanticPolicyConfigured: true, backends: [] }),
     reset: async () => {},
     discoverModels: async () => [{ backendId: "lmstudio", modelId: "exact-model", displayName: "Exact model", contextWindowTokens: null, maxOutputTokens: null }],
     startPlan,
@@ -413,7 +458,7 @@ test("rejects a reconciliation response that changes any retained plan identity"
     },
   });
   const bridge: RuntimeBridge = {
-    health: async () => ({ state: "ready", transport: "stdio", protocolVersion: "4", daemonVersion: "0.1.0", message: "Ready", backends: [] }),
+    health: async () => ({ state: "ready", transport: "stdio", protocolVersion: "4", daemonVersion: "0.1.0", message: "Ready", semanticPolicyConfigured: true, backends: [] }),
     reset: async () => {},
     discoverModels: async () => [{ backendId: "lmstudio", modelId: "exact-model", displayName: "Exact model", contextWindowTokens: null, maxOutputTokens: null }],
     startPlan,
@@ -447,7 +492,7 @@ test("offers only truthful LM Studio reasoning choices and enforces the planner 
     },
   });
   const bridge: RuntimeBridge = {
-    health: async () => ({ state: "ready", transport: "stdio", protocolVersion: "3", daemonVersion: "0.1.0", message: "Ready", backends: [] }),
+    health: async () => ({ state: "ready", transport: "stdio", protocolVersion: "3", daemonVersion: "0.1.0", message: "Ready", semanticPolicyConfigured: true, backends: [] }),
     reset: async () => {},
     discoverModels: async () => [{ backendId: "lmstudio", modelId: "exact-model", displayName: "Exact model", contextWindowTokens: null, maxOutputTokens: null }],
     startPlan,
@@ -465,7 +510,7 @@ test("offers only truthful LM Studio reasoning choices and enforces the planner 
   ]);
   expect(reasoning.value).toBe("auto");
 
-  const outputTokens = screen.getByLabelText("Output tokens") as HTMLInputElement;
+  const outputTokens = screen.getByLabelText("Aggregate output ceiling") as HTMLInputElement;
   expect(outputTokens.max).toBe("16384");
   fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "/tmp/birdcode-project" } });
   fireEvent.change(screen.getByLabelText("Task prompt"), { target: { value: "Plan this" } });
@@ -494,7 +539,7 @@ test("records cancellation at most once from repeated UI clicks", async () => {
     });
   }));
   const bridge: RuntimeBridge = {
-    health: async () => ({ state: "ready", transport: "stdio", protocolVersion: "3", daemonVersion: "0.1.0", message: "Ready", backends: [] }),
+    health: async () => ({ state: "ready", transport: "stdio", protocolVersion: "3", daemonVersion: "0.1.0", message: "Ready", semanticPolicyConfigured: true, backends: [] }),
     reset: async () => {},
     discoverModels: async () => [{ backendId: "lmstudio", modelId: "exact-model", displayName: "Exact model", contextWindowTokens: null, maxOutputTokens: null }],
     startPlan: async () => ({
@@ -544,7 +589,7 @@ test("reports an already-terminal receipt without claiming cancellation was reco
     disposition: "run_already_terminal",
   });
   const bridge: RuntimeBridge = {
-    health: async () => ({ state: "ready", transport: "stdio", protocolVersion: "4", daemonVersion: "0.1.0", message: "Ready", backends: [] }),
+    health: async () => ({ state: "ready", transport: "stdio", protocolVersion: "4", daemonVersion: "0.1.0", message: "Ready", semanticPolicyConfigured: true, backends: [] }),
     reset: async () => {},
     discoverModels: async () => [{ backendId: "lmstudio", modelId: "exact-model", displayName: "Exact model", contextWindowTokens: null, maxOutputTokens: null }],
     startPlan: async () => ({
@@ -590,7 +635,7 @@ test("re-enables cancellation after a transient rejection while coalescing the r
       });
     }));
   const bridge: RuntimeBridge = {
-    health: async () => ({ state: "ready", transport: "stdio", protocolVersion: "3", daemonVersion: "0.1.0", message: "Ready", backends: [] }),
+    health: async () => ({ state: "ready", transport: "stdio", protocolVersion: "3", daemonVersion: "0.1.0", message: "Ready", semanticPolicyConfigured: true, backends: [] }),
     reset: async () => {},
     discoverModels: async () => [{ backendId: "lmstudio", modelId: "exact-model", displayName: "Exact model", contextWindowTokens: null, maxOutputTokens: null }],
     startPlan: async () => ({

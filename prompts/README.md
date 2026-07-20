@@ -20,6 +20,26 @@ text.
 
 Currently implemented production prompts:
 
+- `root-planner-turn/1.0.0/manifest.json` produces the initial read-only
+  `Plan`/`Clarify`/`Escalate` proposal. It binds protected obligations,
+  authority, budgets, root snapshot, context manifest, and exact verification
+  kinds without granting tools or creating child actors.
+
+- `plan-semantic-critic/1.0.0/manifest.json` performs model-identity-blinded
+  semantic review of one exact candidate: the candidate is intentionally
+  visible, while producer and reviewer model IDs are omitted from the compiled
+  review request. Its policy asks the model to assess obligation coverage,
+  decomposition, useful concurrency, dependency ordering, synthesis,
+  independent review, verifiability, feasibility, ambiguity, conflicts, and
+  authority boundaries. Its typed verdict is `accept`, `revise`, `clarify`, or
+  `escalate`; candidate prose cannot authorize runtime effects.
+
+- `root-plan-repair/1.0.0/manifest.json` permits one complete replacement plan
+  after an exact committed `revise` critique. It is hash-bound to the candidate,
+  critic policy, critique, review event, and complete required finding-ID set.
+  It cannot return a textual patch or decide whether its own replacement is
+  accepted.
+
 - `semantic-task-router/1.1.3/manifest.json` is the current router, while
   `semantic-task-router/1.0.0/manifest.json`,
   `semantic-task-router/1.1.0/manifest.json`,
@@ -34,12 +54,17 @@ Currently implemented production prompts:
   examined: unrelated context is omitted, while rejected embedded instructions
   remain cited when the trust-boundary decision affects routing. All causal
   facts from one cited section are consolidated into that section's single
-  evidence item. Materiality covers the complete returned routing result,
-  including questions and subtasks. Rejecting a genuine attempt to control the
-  router remains a material safety decision even when trusted input
-  independently implies the same route axes. Every delegated subtask has an
-  externally checkable completion criterion instead of a circular restatement
-  of its objective. Delegation cannot broaden the parent route's access.
+  evidence item. The prompt defines materiality over the complete returned
+  routing result, including questions and subtasks, and asks that rejecting a
+  genuine attempt to control the router remain a material safety decision even
+  when trusted input independently implies the same route axes. It also asks
+  for externally checkable completion criteria rather than circular
+  restatements. These are semantic model obligations, not facts inferred by
+  string rules: deterministic validation enforces schema shape, section
+  membership, uniqueness, bounds, route/access consistency, and required array
+  cardinality, while evaluation probes assess—but cannot prove—the truth,
+  materiality, completeness, or quality of prose. Delegation cannot broaden
+  the parent route's access.
   `PromptInvocation.limits.max_suggested_subtasks` defaults to four and may
   lower the accepted per-invocation delegation cap.
 

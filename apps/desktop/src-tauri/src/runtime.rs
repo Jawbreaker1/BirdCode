@@ -1,15 +1,21 @@
 use birdcode_client::{
     ClientError, ClientTimeouts, CreateRunFailure, DAEMON_REQUEST_FRAME_BYTES, DaemonClient,
-    PendingCreateRun, resolve_daemon_path,
+    DaemonLaunchOptions, PendingCreateRun, resolve_daemon_path,
 };
-use birdcode_prompting::{RootPlannerDirective, RootPlannerOutput, VerificationKind};
+use birdcode_prompting::{
+    PlanCriticOutput, PlanCriticVerdict, RootPlannerDirective, RootPlannerOutput, VerificationKind,
+};
 use birdcode_protocol::{
     ArtifactChunk, ArtifactRef, BackendCatalog, BackendKind, BackendSelection, CancellationReceipt,
     ClientCommand, CreateRunRequest, CreateSessionRequest, EventEnvelope, EventPayload, Health,
-    HealthStatus, InitializeResult, InputItem, MAX_ARTIFACT_CHUNK_BYTES, PlanProposalAccepted,
-    PlannerInferenceObservation, RunId, RunLimits, RunPurpose, RunSpec, RunState,
-    RuntimeCapability, ServerResult, SessionId,
+    HealthStatus, InitializeResult, InputItem, MAX_ARTIFACT_CHUNK_BYTES, PlanAcceptanceContract,
+    PlanCandidateBinding, PlanSemanticReviewAccepted, PlanSemanticReviewRejected,
+    PlanSemanticReviewRejectionDisposition, PlanSemanticReviewValidatedVerdict,
+    PlanSemanticReviewValidationReceipt, PlannerInferenceObservation,
+    ROOT_PLANNING_POLICY_V1_INITIAL_PLAN_MAX_OUTPUT_TOKENS as MAX_ROOT_PLANNER_OUTPUT_TOKENS,
+    RunId, RunLimits, RunPurpose, RunSpec, RunState, RuntimeCapability, ServerResult, SessionId,
 };
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeSet;
@@ -25,9 +31,11 @@ const INITIAL_RETRY_BACKOFF: Duration = Duration::from_millis(250);
 const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(8);
 const LM_STUDIO_BACKEND_ID: &str = "lmstudio";
 const ACCEPTED_PLAN_MEDIA_TYPE: &str = "application/vnd.birdcode.accepted-plan+json";
+const PLAN_CRITIQUE_MEDIA_TYPE: &str = "application/vnd.birdcode.plan-critique+json";
+const SEMANTIC_REVIEW_RECEIPT_MEDIA_TYPE: &str =
+    "application/vnd.birdcode.plan-semantic-review-receipt+json";
 const MAX_DESKTOP_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_EVENT_PAGES_PER_POLL: usize = 32;
-const MAX_ROOT_PLANNER_OUTPUT_TOKENS: u64 = 16_384;
 // Leave substantial room in the daemon's one-MiB request frame for the
 // protocol envelope, run metadata, and future additive fields.
 const MAX_DESKTOP_GOAL_BYTES: usize = DAEMON_REQUEST_FRAME_BYTES / 2;
@@ -43,6 +51,7 @@ pub struct RuntimeHealth {
     protocol_version: Option<String>,
     daemon_version: Option<String>,
     message: String,
+    semantic_policy_configured: bool,
     backends: Vec<BackendHealth>,
 }
 
@@ -528,8 +537,14 @@ impl ConnectionManager<DaemonClient> {
             return Err(blocked.health.message.clone());
         }
         if state.connection.is_none() {
+            let launch_options = key.launch_options();
             let connected = connect(key, &|daemon, data_dir| {
-                DaemonClient::spawn_with_timeouts(daemon, data_dir, ClientTimeouts::default())
+                DaemonClient::spawn_with_launch_options_and_timeouts(
+                    daemon,
+                    data_dir,
+                    launch_options.clone(),
+                    ClientTimeouts::default(),
+                )
             })
             .map_err(|error| match error {
                 ConnectError::Spawn(error) | ConnectError::Initialize(error) => error.to_string(),
@@ -571,6 +586,15 @@ impl std::error::Error for RuntimeResetError {}
 struct ConnectionKey {
     daemon: PathBuf,
     data_dir: PathBuf,
+    model_policy: Option<PathBuf>,
+}
+
+impl ConnectionKey {
+    fn launch_options(&self) -> DaemonLaunchOptions {
+        DaemonLaunchOptions {
+            model_policy: self.model_policy.clone(),
+        }
+    }
 }
 
 struct ManagedConnection<C> {
@@ -733,33 +757,33 @@ pub async fn runtime_health(
     app: tauri::AppHandle,
     manager: tauri::State<'_, RuntimeManager>,
 ) -> Result<RuntimeHealth, String> {
-    let daemon = match resolve_daemon_path(None) {
-        Ok(path) => path,
-        Err(error) => return Ok(client_failure(&error)),
-    };
-    let data_dir = match resolve_data_dir(std::env::var_os("BIRDCODE_DATA_DIR"), || {
-        app.path().app_local_data_dir()
-    }) {
-        Ok(path) => path,
+    let key = match resolve_connection_key(&app) {
+        Ok(key) => key,
         Err(error) => {
             return Ok(failure(
                 RuntimeState::Error,
-                format!("Could not resolve BirdCode's local data directory: {error}"),
+                format!("Could not resolve BirdCode's runtime configuration: {error}"),
             ));
         }
     };
     let manager = Arc::clone(&manager.inner);
-    let key = ConnectionKey { daemon, data_dir };
+    let launch_options = key.launch_options();
+    let semantic_policy_configured = key.model_policy.is_some();
 
     Ok(
         match tauri::async_runtime::spawn_blocking(move || {
             manager.health(&key, &|daemon, data_dir| {
-                DaemonClient::spawn_with_timeouts(daemon, data_dir, ClientTimeouts::default())
+                DaemonClient::spawn_with_launch_options_and_timeouts(
+                    daemon,
+                    data_dir,
+                    launch_options.clone(),
+                    ClientTimeouts::default(),
+                )
             })
         })
         .await
         {
-            Ok(health) => health,
+            Ok(health) => project_semantic_policy_configuration(health, semantic_policy_configured),
             Err(error) => failure(
                 RuntimeState::Error,
                 format!("Runtime health task failed: {error}"),
@@ -817,6 +841,7 @@ fn create_plan_start_attempt(
     let spec = RunSpec {
         session_id: session.id,
         purpose: RunPurpose::PlanOnly,
+        plan_acceptance: PlanAcceptanceContract::IndependentSemanticReviewV1,
         backend: BackendSelection {
             backend_id: model.backend_id,
             kind: model.kind,
@@ -885,6 +910,12 @@ pub async fn runtime_start_plan(
     request: StartPlanRequest,
 ) -> Result<StartPlanOutcome, String> {
     let key = resolve_connection_key(&app)?;
+    if key.model_policy.is_none() {
+        return Err(
+            "Independent semantic planning requires BIRDCODE_MODEL_POLICY to name an explicit strict policy file"
+                .to_owned(),
+        );
+    }
     let manager = manager.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         with_validated_start_request(&request, |workspace| {
@@ -1078,7 +1109,12 @@ fn resolve_connection_key(app: &tauri::AppHandle) -> Result<ConnectionKey, Strin
         app.path().app_local_data_dir()
     })
     .map_err(|error| error.to_string())?;
-    Ok(ConnectionKey { daemon, data_dir })
+    let model_policy = std::env::var_os("BIRDCODE_MODEL_POLICY").map(PathBuf::from);
+    Ok(ConnectionKey {
+        daemon,
+        data_dir,
+        model_policy,
+    })
 }
 
 fn require_planning_capability(
@@ -1126,7 +1162,7 @@ fn validate_start_request(request: &StartPlanRequest) -> Result<PathBuf, String>
     if request.max_output_tokens == 0 {
         return Err("Maximum output tokens must be greater than zero".to_owned());
     }
-    if request.max_output_tokens > MAX_ROOT_PLANNER_OUTPUT_TOKENS {
+    if request.max_output_tokens > u64::from(MAX_ROOT_PLANNER_OUTPUT_TOKENS) {
         return Err(format!(
             "Maximum output tokens must not exceed {MAX_ROOT_PLANNER_OUTPUT_TOKENS}"
         ));
@@ -1216,13 +1252,33 @@ fn resolve_exact_model(
     Ok(selected.identity.clone())
 }
 
+// This is one closed replay verifier: splitting event accounting from terminal
+// projection would make it easier for a newly added protocol variant to bypass
+// the exact candidate/review chain.
+#[allow(clippy::too_many_lines)]
 fn poll_plan(
     client: &mut DaemonClient,
     request: &PollPlanRequest,
 ) -> Result<PlanPoll, DesktopOperationError> {
-    let mut cursor = request.after_sequence;
+    let run = client.get_run(request.run_id)?;
+    if run.id != request.run_id || run.spec.session_id != request.session_id {
+        return Err(DesktopOperationError::Contract(
+            "Daemon returned a run outside the requested plan identity".to_owned(),
+        ));
+    }
+
+    // Always validate the complete bounded PlanOnly history. Only the renderer
+    // projection is filtered by `after_sequence`; trust decisions never depend
+    // on which UI poll happened to observe an earlier review stage.
+    let mut cursor = 0_u64;
     let mut event_views = Vec::new();
-    let mut accepted: Option<PlanProposalAccepted> = None;
+    let mut validated_candidates = Vec::<PlanCandidateBinding>::new();
+    let mut legacy_acceptance = None;
+    let mut semantically_accepted: Option<PlanSemanticReviewAccepted> = None;
+    let mut semantic_rejections = Vec::<PlanSemanticReviewRejected>::new();
+    let mut repair_authorizations = 0_u32;
+    let mut terminal_rejections = 0_u32;
+    let mut typed_failures = 0_u32;
     let mut exhausted = false;
 
     for _ in 0..MAX_EVENT_PAGES_PER_POLL {
@@ -1246,14 +1302,151 @@ fn poll_plan(
             }
             previous = event.sequence;
             if event.run_id == Some(request.run_id) {
-                if let EventPayload::PlanProposalAccepted(decision) = &event.payload
-                    && accepted.replace(decision.clone()).is_some()
-                {
-                    return Err(DesktopOperationError::Contract(
-                        "Run contains more than one accepted plan decision".to_owned(),
-                    ));
+                match &event.payload {
+                    EventPayload::PlanProposalAccepted(decision) => {
+                        if decision.accepted_plan_digest.as_str().as_bytes()
+                            != decision.accepted_plan_artifact.sha256.as_bytes()
+                            || decision.accepted_plan_artifact.media_type
+                                != ACCEPTED_PLAN_MEDIA_TYPE
+                        {
+                            return Err(DesktopOperationError::Contract(
+                                "Validated candidate digest or media type contradicts its plan artifact"
+                                    .to_owned(),
+                            ));
+                        }
+                        match run.spec.plan_acceptance {
+                            PlanAcceptanceContract::IndependentSemanticReviewV1 => {
+                                if validated_candidates.len() == 1 && repair_authorizations != 1 {
+                                    return Err(DesktopOperationError::Contract(
+                                        "Second validated candidate lacks the single repair authorization"
+                                            .to_owned(),
+                                    ));
+                                }
+                                if validated_candidates.len() >= 2 {
+                                    return Err(DesktopOperationError::Contract(
+                                        "Semantic run contains more than two validated candidates"
+                                            .to_owned(),
+                                    ));
+                                }
+                                if let Some(previous) = validated_candidates.last()
+                                    && (decision.previous_plan_revision != previous.plan_revision
+                                        || decision.previous_plan_digest != previous.plan_digest)
+                                {
+                                    return Err(DesktopOperationError::Contract(
+                                        "Repaired candidate is not based on the previous validated candidate"
+                                            .to_owned(),
+                                    ));
+                                }
+                                validated_candidates.push(PlanCandidateBinding {
+                                    proposal_event_id: event.id,
+                                    plan_revision: decision.accepted_plan_revision,
+                                    plan_digest: decision.accepted_plan_digest.clone(),
+                                    plan_artifact: decision.accepted_plan_artifact.clone(),
+                                });
+                            }
+                            PlanAcceptanceContract::LegacyMechanicalOnlyV4 => {
+                                if legacy_acceptance.replace(decision.clone()).is_some() {
+                                    return Err(DesktopOperationError::Contract(
+                                        "Legacy run contains more than one mechanical acceptance"
+                                            .to_owned(),
+                                    ));
+                                }
+                            }
+                            PlanAcceptanceContract::NotApplicable => {
+                                return Err(DesktopOperationError::Contract(
+                                    "Plan run has a not-applicable acceptance contract".to_owned(),
+                                ));
+                            }
+                        }
+                    }
+                    EventPayload::PlanSemanticReviewAccepted(decision) => {
+                        if run.spec.plan_acceptance
+                            != PlanAcceptanceContract::IndependentSemanticReviewV1
+                        {
+                            return Err(DesktopOperationError::Contract(
+                                "Semantic acceptance contradicts the run acceptance contract"
+                                    .to_owned(),
+                            ));
+                        }
+                        require_current_desktop_candidate(
+                            &validated_candidates,
+                            &decision.candidate,
+                        )?;
+                        require_terminal_desktop_review_position(
+                            validated_candidates.len(),
+                            repair_authorizations,
+                        )?;
+                        if semantically_accepted.replace(decision.clone()).is_some() {
+                            return Err(DesktopOperationError::Contract(
+                                "Run contains more than one semantic acceptance".to_owned(),
+                            ));
+                        }
+                    }
+                    EventPayload::PlanSemanticReviewRejected(decision) => {
+                        if run.spec.plan_acceptance
+                            != PlanAcceptanceContract::IndependentSemanticReviewV1
+                        {
+                            return Err(DesktopOperationError::Contract(
+                                "Semantic rejection contradicts the run acceptance contract"
+                                    .to_owned(),
+                            ));
+                        }
+                        require_current_desktop_candidate(
+                            &validated_candidates,
+                            &decision.candidate,
+                        )?;
+                        if decision.disposition
+                            == PlanSemanticReviewRejectionDisposition::RepairOnceAuthorized
+                        {
+                            if validated_candidates.len() != 1 || repair_authorizations != 0 {
+                                return Err(DesktopOperationError::Contract(
+                                    "Repair authorization does not follow exactly one validated candidate"
+                                        .to_owned(),
+                                ));
+                            }
+                            repair_authorizations = 1;
+                        } else {
+                            require_terminal_desktop_review_position(
+                                validated_candidates.len(),
+                                repair_authorizations,
+                            )?;
+                            terminal_rejections = terminal_rejections.saturating_add(1);
+                        }
+                        semantic_rejections.push(decision.clone());
+                    }
+                    EventPayload::PlanProposalRejected(_) => {
+                        if run.spec.plan_acceptance
+                            == PlanAcceptanceContract::IndependentSemanticReviewV1
+                            && !matches!(
+                                (validated_candidates.len(), repair_authorizations),
+                                (0, 0) | (1, 1)
+                            )
+                        {
+                            return Err(DesktopOperationError::Contract(
+                                "Mechanical rejection appears at an invalid semantic planning stage"
+                                    .to_owned(),
+                            ));
+                        }
+                        terminal_rejections = terminal_rejections.saturating_add(1);
+                    }
+                    EventPayload::RootPlanningFailed(_)
+                    | EventPayload::RootPlanningStageFailed(_)
+                    | EventPayload::PlannerInferenceOutcomeUnknown(_) => {
+                        typed_failures = typed_failures.saturating_add(1);
+                    }
+                    EventPayload::PlannerInferenceObserved(observed)
+                        if matches!(
+                            observed.outcome,
+                            PlannerInferenceObservation::Failed { .. }
+                        ) =>
+                    {
+                        typed_failures = typed_failures.saturating_add(1);
+                    }
+                    _ => {}
                 }
-                event_views.push(project_event(event));
+                if event.sequence > request.after_sequence {
+                    event_views.push(project_event(event));
+                }
             }
         }
         if page.next_sequence != previous {
@@ -1277,26 +1470,73 @@ fn poll_plan(
             "Event replay exceeded the desktop limit of {MAX_EVENT_PAGES_PER_POLL} pages"
         )));
     }
+    if request.after_sequence > cursor {
+        return Err(DesktopOperationError::Contract(
+            "Requested event cursor is ahead of the durable session history".to_owned(),
+        ));
+    }
 
-    let run = client.get_run(request.run_id)?;
-    if run.id != request.run_id || run.spec.session_id != request.session_id {
-        return Err(DesktopOperationError::Contract(
-            "Daemon returned a run outside the requested plan identity".to_owned(),
-        ));
+    for rejected in &semantic_rejections {
+        fetch_and_validate_semantic_rejection(client, rejected)?;
     }
-    let accepted_plan = if accepted_plan_is_visible(run.state) {
-        accepted
-            .as_ref()
-            .map(|decision| fetch_accepted_plan(client, decision))
-            .transpose()?
-    } else {
-        None
+    let semantically_accepted_plan = semantically_accepted
+        .as_ref()
+        .map(|decision| fetch_and_validate_semantic_acceptance(client, decision))
+        .transpose()?;
+
+    let accepted_plan = match (run.spec.plan_acceptance, run.state) {
+        (PlanAcceptanceContract::IndependentSemanticReviewV1, RunState::Completed) => {
+            if terminal_rejections != 0 || typed_failures != 0 {
+                return Err(DesktopOperationError::Contract(
+                    "Completed semantic plan conflicts with typed terminal failure evidence"
+                        .to_owned(),
+                ));
+            }
+            Some(semantically_accepted_plan.ok_or_else(|| {
+                DesktopOperationError::Contract(
+                    "Completed semantic plan has no independently reviewed acceptance".to_owned(),
+                )
+            })?)
+        }
+        (PlanAcceptanceContract::IndependentSemanticReviewV1, RunState::Failed) => {
+            if semantically_accepted.is_some()
+                || terminal_rejections.saturating_add(typed_failures) != 1
+            {
+                return Err(DesktopOperationError::Contract(
+                    "Failed semantic plan lacks exactly one typed terminal cause".to_owned(),
+                ));
+            }
+            None
+        }
+        (PlanAcceptanceContract::IndependentSemanticReviewV1, RunState::Cancelled) => None,
+        (PlanAcceptanceContract::IndependentSemanticReviewV1, _) => {
+            if semantically_accepted.is_some() || terminal_rejections != 0 || typed_failures != 0 {
+                return Err(DesktopOperationError::Contract(
+                    "Non-terminal semantic plan contains terminal evidence".to_owned(),
+                ));
+            }
+            None
+        }
+        (PlanAcceptanceContract::LegacyMechanicalOnlyV4, RunState::Completed) => {
+            let accepted = legacy_acceptance.as_ref().ok_or_else(|| {
+                DesktopOperationError::Contract(
+                    "Completed legacy plan has no mechanical acceptance".to_owned(),
+                )
+            })?;
+            Some(fetch_accepted_plan(
+                client,
+                accepted.accepted_plan_revision,
+                &accepted.accepted_plan_digest,
+                &accepted.accepted_plan_artifact,
+            )?)
+        }
+        (PlanAcceptanceContract::LegacyMechanicalOnlyV4, _) => None,
+        (PlanAcceptanceContract::NotApplicable, _) => {
+            return Err(DesktopOperationError::Contract(
+                "Plan run has a not-applicable acceptance contract".to_owned(),
+            ));
+        }
     };
-    if request.after_sequence == 0 && run.state == RunState::Completed && accepted_plan.is_none() {
-        return Err(DesktopOperationError::Contract(
-            "Completed plan run has no accepted plan event in full replay".to_owned(),
-        ));
-    }
     Ok(PlanPoll {
         run_id: request.run_id,
         state: run.state,
@@ -1306,6 +1546,33 @@ fn poll_plan(
     })
 }
 
+fn require_current_desktop_candidate(
+    candidates: &[PlanCandidateBinding],
+    reviewed: &PlanCandidateBinding,
+) -> Result<(), DesktopOperationError> {
+    if candidates.last() == Some(reviewed) {
+        Ok(())
+    } else {
+        Err(DesktopOperationError::Contract(
+            "Semantic review is not bound to the latest validated candidate event".to_owned(),
+        ))
+    }
+}
+
+fn require_terminal_desktop_review_position(
+    candidate_count: usize,
+    repair_authorizations: u32,
+) -> Result<(), DesktopOperationError> {
+    if matches!((candidate_count, repair_authorizations), (1, 0) | (2, 1)) {
+        Ok(())
+    } else {
+        Err(DesktopOperationError::Contract(
+            "Terminal semantic review appears at an invalid planning stage".to_owned(),
+        ))
+    }
+}
+
+#[cfg(test)]
 const fn accepted_plan_is_visible(state: RunState) -> bool {
     matches!(state, RunState::Completed)
 }
@@ -1367,6 +1634,15 @@ fn project_event(event: &EventEnvelope) -> PlanEventView {
                 failure.phase, failure.reason
             ),
         ),
+        EventPayload::RootPlanningStageFailed(failure) => (
+            "root_planning_stage_failed",
+            "danger",
+            "Planning stage failed",
+            format!(
+                "Typed durable stage {:?} · reason {:?}",
+                failure.failed_stage, failure.reason
+            ),
+        ),
         EventPayload::PlannerInferencePrepared(prepared) => (
             "planner_inference_prepared",
             "active",
@@ -1422,11 +1698,31 @@ fn project_event(event: &EventEnvelope) -> PlanEventView {
         EventPayload::PlanProposalAccepted(accepted) => (
             "plan_proposal_accepted",
             "success",
-            "Plan accepted",
+            "Plan candidate validated",
             format!(
                 "Revision {} · {}",
                 accepted.accepted_plan_revision,
                 accepted.accepted_plan_digest.as_str()
+            ),
+        ),
+        EventPayload::PlanSemanticReviewAccepted(review) => (
+            "plan_semantic_review_accepted",
+            "success",
+            "Independent semantic review passed",
+            format!(
+                "Candidate revision {} · {}",
+                review.candidate.plan_revision,
+                review.candidate.plan_digest.as_str()
+            ),
+        ),
+        EventPayload::PlanSemanticReviewRejected(review) => (
+            "plan_semantic_review_rejected",
+            "danger",
+            "Semantic review did not pass",
+            format!(
+                "Disposition {:?} · {} required finding(s)",
+                review.disposition,
+                review.required_finding_ids.len()
             ),
         ),
         EventPayload::BackendEvent { event_type, .. } => (
@@ -1473,18 +1769,244 @@ const fn state_tone(state: RunState) -> &'static str {
     }
 }
 
+fn fetch_and_validate_semantic_acceptance(
+    client: &mut DaemonClient,
+    review: &PlanSemanticReviewAccepted,
+) -> Result<AcceptedPlanView, DesktopOperationError> {
+    let critique = fetch_typed_review_artifact::<PlanCriticOutput>(
+        client,
+        &review.critique_artifact,
+        PLAN_CRITIQUE_MEDIA_TYPE,
+        "Semantic critique",
+    )?;
+    let receipt = fetch_typed_review_artifact::<PlanSemanticReviewValidationReceipt>(
+        client,
+        &review.validation_evidence_artifact,
+        SEMANTIC_REVIEW_RECEIPT_MEDIA_TYPE,
+        "Semantic-review receipt",
+    )?;
+    validate_review_receipt_binding(
+        review.inference_attempt_id,
+        review.observed_event_id,
+        &review.candidate,
+        &review.critique_artifact,
+        &receipt,
+    )?;
+    validate_typed_critique_binding(&critique, &review.candidate, &receipt)?;
+    if critique.verdict != PlanCriticVerdict::Accept
+        || receipt.verdict != PlanSemanticReviewValidatedVerdict::Accept
+    {
+        return Err(DesktopOperationError::Contract(
+            "Semantic acceptance evidence does not contain an accepting typed verdict".to_owned(),
+        ));
+    }
+    let finding_ids = critique
+        .findings
+        .iter()
+        .map(|finding| finding.finding_id.clone())
+        .collect::<Vec<_>>();
+    if receipt.finding_ids != finding_ids {
+        return Err(DesktopOperationError::Contract(
+            "Semantic acceptance receipt differs from the exact critique findings".to_owned(),
+        ));
+    }
+    fetch_accepted_plan(
+        client,
+        review.candidate.plan_revision,
+        &review.candidate.plan_digest,
+        &review.candidate.plan_artifact,
+    )
+}
+
+fn fetch_and_validate_semantic_rejection(
+    client: &mut DaemonClient,
+    review: &PlanSemanticReviewRejected,
+) -> Result<(), DesktopOperationError> {
+    let critique_bytes = fetch_review_artifact(
+        client,
+        &review.critique_artifact,
+        PLAN_CRITIQUE_MEDIA_TYPE,
+        "Semantic rejection critique",
+    )?;
+    let receipt = fetch_typed_review_artifact::<PlanSemanticReviewValidationReceipt>(
+        client,
+        &review.validation_evidence_artifact,
+        SEMANTIC_REVIEW_RECEIPT_MEDIA_TYPE,
+        "Semantic-rejection receipt",
+    )?;
+    validate_semantic_rejection_evidence(review, &critique_bytes, &receipt)
+}
+
+fn validate_semantic_rejection_evidence(
+    review: &PlanSemanticReviewRejected,
+    critique_bytes: &[u8],
+    receipt: &PlanSemanticReviewValidationReceipt,
+) -> Result<(), DesktopOperationError> {
+    validate_review_receipt_binding(
+        review.inference_attempt_id,
+        review.observed_event_id,
+        &review.candidate,
+        &review.critique_artifact,
+        receipt,
+    )?;
+
+    match review.disposition {
+        PlanSemanticReviewRejectionDisposition::ReviewContractInvalid => {
+            if !review.required_finding_ids.is_empty()
+                || !receipt.finding_ids.is_empty()
+                || receipt.verdict != PlanSemanticReviewValidatedVerdict::ContractInvalid
+            {
+                return Err(DesktopOperationError::Contract(
+                    "Review-contract rejection requires empty findings and a contract-invalid receipt"
+                        .to_owned(),
+                ));
+            }
+        }
+        PlanSemanticReviewRejectionDisposition::RepairOnceAuthorized
+        | PlanSemanticReviewRejectionDisposition::TerminalReject => {
+            let event_findings_match = match review.disposition {
+                PlanSemanticReviewRejectionDisposition::RepairOnceAuthorized => {
+                    !review.required_finding_ids.is_empty()
+                        && receipt.finding_ids == review.required_finding_ids
+                }
+                PlanSemanticReviewRejectionDisposition::TerminalReject => {
+                    review.required_finding_ids.is_empty()
+                }
+                PlanSemanticReviewRejectionDisposition::ReviewContractInvalid => {
+                    unreachable!("contract-invalid disposition is handled above")
+                }
+            };
+            if !event_findings_match {
+                return Err(DesktopOperationError::Contract(
+                    "Semantic rejection event findings contradict its disposition or receipt"
+                        .to_owned(),
+                ));
+            }
+            let critique =
+                serde_json::from_slice::<PlanCriticOutput>(critique_bytes).map_err(|error| {
+                    DesktopOperationError::Contract(format!(
+                        "Semantic rejection critique is not typed critic JSON: {error}"
+                    ))
+                })?;
+            validate_typed_critique_binding(&critique, &review.candidate, receipt)?;
+            let expected_verdict = validated_critic_verdict(critique.verdict);
+            if receipt.verdict != expected_verdict
+                || receipt.verdict == PlanSemanticReviewValidatedVerdict::Accept
+                || (review.disposition
+                    == PlanSemanticReviewRejectionDisposition::RepairOnceAuthorized
+                    && receipt.verdict != PlanSemanticReviewValidatedVerdict::Revise)
+            {
+                return Err(DesktopOperationError::Contract(
+                    "Semantic rejection disposition contradicts its typed verdict".to_owned(),
+                ));
+            }
+            let finding_ids = critique
+                .findings
+                .iter()
+                .map(|finding| finding.finding_id.clone())
+                .collect::<Vec<_>>();
+            if receipt.finding_ids != finding_ids {
+                return Err(DesktopOperationError::Contract(
+                    "Semantic rejection receipt differs from the exact critique findings"
+                        .to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn fetch_typed_review_artifact<T: DeserializeOwned>(
+    client: &mut DaemonClient,
+    artifact: &ArtifactRef,
+    expected_media_type: &str,
+    label: &str,
+) -> Result<T, DesktopOperationError> {
+    let bytes = fetch_review_artifact(client, artifact, expected_media_type, label)?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        DesktopOperationError::Contract(format!("{label} is not valid typed JSON: {error}"))
+    })
+}
+
+fn fetch_review_artifact(
+    client: &mut DaemonClient,
+    artifact: &ArtifactRef,
+    expected_media_type: &str,
+    label: &str,
+) -> Result<Vec<u8>, DesktopOperationError> {
+    if artifact.media_type != expected_media_type {
+        return Err(DesktopOperationError::Contract(format!(
+            "{label} has media type {:?}; expected {expected_media_type:?}",
+            artifact.media_type
+        )));
+    }
+    fetch_verified_artifact(client, artifact)
+}
+
+fn validate_review_receipt_binding(
+    inference_attempt_id: birdcode_protocol::InferenceAttemptId,
+    observed_event_id: birdcode_protocol::EventId,
+    candidate: &PlanCandidateBinding,
+    critique_artifact: &ArtifactRef,
+    receipt: &PlanSemanticReviewValidationReceipt,
+) -> Result<(), DesktopOperationError> {
+    if receipt.schema_version != 1
+        || receipt.inference_attempt_id != inference_attempt_id
+        || receipt.observed_event_id != observed_event_id
+        || &receipt.candidate != candidate
+        || receipt.critique_sha256.as_str().as_bytes() != critique_artifact.sha256.as_bytes()
+    {
+        return Err(DesktopOperationError::Contract(
+            "Semantic-review receipt is not bound to the exact event, candidate, and critique"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_typed_critique_binding(
+    critique: &PlanCriticOutput,
+    candidate: &PlanCandidateBinding,
+    receipt: &PlanSemanticReviewValidationReceipt,
+) -> Result<(), DesktopOperationError> {
+    if critique.schema_version != 1
+        || critique.bindings.candidate_plan_sha256.as_bytes()
+            != candidate.plan_digest.as_str().as_bytes()
+        || critique.bindings.critic_policy_sha256.as_bytes()
+            != receipt.critic_policy_sha256.as_str().as_bytes()
+    {
+        return Err(DesktopOperationError::Contract(
+            "Typed semantic critique is not bound to the exact candidate and critic policy"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+const fn validated_critic_verdict(
+    verdict: PlanCriticVerdict,
+) -> PlanSemanticReviewValidatedVerdict {
+    match verdict {
+        PlanCriticVerdict::Accept => PlanSemanticReviewValidatedVerdict::Accept,
+        PlanCriticVerdict::Revise => PlanSemanticReviewValidatedVerdict::Revise,
+        PlanCriticVerdict::Clarify => PlanSemanticReviewValidatedVerdict::Clarify,
+        PlanCriticVerdict::Escalate => PlanSemanticReviewValidatedVerdict::Escalate,
+    }
+}
+
 fn fetch_accepted_plan(
     client: &mut DaemonClient,
-    accepted: &PlanProposalAccepted,
+    revision: u64,
+    digest: &birdcode_protocol::Sha256Digest,
+    artifact: &ArtifactRef,
 ) -> Result<AcceptedPlanView, DesktopOperationError> {
-    let artifact = &accepted.accepted_plan_artifact;
     if artifact.media_type != ACCEPTED_PLAN_MEDIA_TYPE {
         return Err(DesktopOperationError::Contract(format!(
             "Accepted plan has media type {:?}; expected {ACCEPTED_PLAN_MEDIA_TYPE:?}",
             artifact.media_type
         )));
     }
-    if accepted.accepted_plan_digest.as_str().as_bytes() != artifact.sha256.as_bytes() {
+    if digest.as_str().as_bytes() != artifact.sha256.as_bytes() {
         return Err(DesktopOperationError::Contract(
             "Accepted plan event digest differs from its artifact reference".to_owned(),
         ));
@@ -1495,7 +2017,7 @@ fn fetch_accepted_plan(
             "Accepted plan artifact is not valid typed planner JSON: {error}"
         ))
     })?;
-    Ok(project_accepted_plan(accepted, output))
+    Ok(project_accepted_plan(revision, digest, output))
 }
 
 fn fetch_verified_artifact(
@@ -1574,12 +2096,13 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn project_accepted_plan(
-    accepted: &PlanProposalAccepted,
+    revision: u64,
+    digest: &birdcode_protocol::Sha256Digest,
     output: RootPlannerOutput,
 ) -> AcceptedPlanView {
     AcceptedPlanView {
-        revision: accepted.accepted_plan_revision,
-        digest: accepted.accepted_plan_digest.as_str().to_owned(),
+        revision,
+        digest: digest.as_str().to_owned(),
         directive: directive_name(output.directive),
         rationale: output.rationale,
         decision_evidence: output
@@ -1696,6 +2219,7 @@ fn project_health(initialized: &InitializeResult, health: &Health) -> RuntimeHea
             protocol_version,
             daemon_version,
             message: "The daemon reports degraded local storage.".to_owned(),
+            semantic_policy_configured: false,
             backends: Vec::new(),
         };
     }
@@ -1709,8 +2233,26 @@ fn project_health(initialized: &InitializeResult, health: &Health) -> RuntimeHea
             "Local runtime is ready on {}/{}.",
             health.platform, health.architecture
         ),
+        semantic_policy_configured: false,
         backends: Vec::new(),
     }
+}
+
+fn project_semantic_policy_configuration(
+    mut health: RuntimeHealth,
+    semantic_policy_configured: bool,
+) -> RuntimeHealth {
+    health.semantic_policy_configured = semantic_policy_configured;
+    if health.state == RuntimeState::Ready {
+        if semantic_policy_configured {
+            "Runtime and model discovery are ready. A review-policy path is configured; daemon preflight validates its exact producer, critic, and stage budgets and rejects a selected planner model that does not exactly match the policy producer."
+                .clone_into(&mut health.message);
+        } else {
+            "Runtime and model discovery are ready. Set BIRDCODE_MODEL_POLICY to an explicit strict policy file before starting independently reviewed planning."
+                .clone_into(&mut health.message);
+        }
+    }
+    health
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1833,6 +2375,7 @@ fn failure(state: RuntimeState, message: String) -> RuntimeHealth {
         protocol_version: None,
         daemon_version: None,
         message,
+        semantic_policy_configured: false,
         backends: Vec::new(),
     }
 }
@@ -1846,15 +2389,20 @@ mod tests {
         PlanStartLifecycle, PlanStartOperation, ReconciliationRequiredPlan, RuntimeConnection,
         RuntimeManager, RuntimeState, StartPlanOutcome, StartPlanRequest, accepted_plan_is_visible,
         client_failure, failure_policy, project_cancellation_receipt, project_planner_models,
-        resolve_data_dir, retry_backoff, sha256_hex, validate_artifact_chunk,
-        with_validated_start_request,
+        project_semantic_policy_configuration, require_current_desktop_candidate,
+        require_terminal_desktop_review_position, resolve_data_dir, retry_backoff, sha256_hex,
+        validate_artifact_chunk, validate_review_receipt_binding,
+        validate_semantic_rejection_evidence, with_validated_start_request,
     };
     use birdcode_client::{ClientError, DaemonClient};
     use birdcode_protocol::{
         ArtifactChunk, ArtifactRef, BackendCatalog, BackendKind, BackendSelection,
-        CancellationReceipt, CreateRunRequest, ErrorCode, Health, HealthStatus, InitializeResult,
-        InputItem, PROTOCOL_VERSION, RunId, RunLimits, RunPurpose, RunSpec, RuntimeCapabilities,
-        ServerIdentity, SessionId,
+        CancellationReceipt, CreateRunRequest, ErrorCode, EventId, Health, HealthStatus,
+        InferenceAttemptId, InitializeResult, InputItem, PROTOCOL_VERSION, PlanAcceptanceContract,
+        PlanCandidateBinding, PlanSemanticReviewId, PlanSemanticReviewRejected,
+        PlanSemanticReviewRejectionDisposition, PlanSemanticReviewValidatedVerdict,
+        PlanSemanticReviewValidationReceipt, RunId, RunLimits, RunPurpose, RunSpec,
+        RuntimeCapabilities, ServerIdentity, SessionId, Sha256Digest,
     };
     use std::io;
     use std::path::{Path, PathBuf};
@@ -1869,6 +2417,30 @@ mod tests {
         IncompatibleProtocol,
         InternalRejection { retryable: bool },
         Ended,
+    }
+
+    #[test]
+    fn configured_policy_path_is_not_projected_as_review_readiness() {
+        let configured = project_semantic_policy_configuration(
+            super::failure(RuntimeState::Ready, "placeholder".to_owned()),
+            true,
+        );
+        let wire = serde_json::to_value(configured).expect("runtime health should serialize");
+
+        assert_eq!(wire["semanticPolicyConfigured"], true);
+        assert!(wire.get("semanticPlanningReady").is_none());
+        assert!(
+            wire["message"]
+                .as_str()
+                .expect("message should be text")
+                .contains("daemon preflight validates")
+        );
+        assert!(
+            !wire["message"]
+                .as_str()
+                .expect("message should be text")
+                .contains("review ready")
+        );
     }
 
     #[test]
@@ -1895,7 +2467,7 @@ mod tests {
         let request = start_plan_request(
             "Plan the requested outcome".to_owned(),
             "exact-model".to_owned(),
-            MAX_ROOT_PLANNER_OUTPUT_TOKENS + 1,
+            u64::from(MAX_ROOT_PLANNER_OUTPUT_TOKENS) + 1,
         );
 
         let result = with_validated_start_request(&request, |_| {
@@ -2238,6 +2810,7 @@ mod tests {
         let alternate_key = ConnectionKey {
             daemon: PathBuf::from("/birdcode-test/alternate/birdcode-daemon"),
             data_dir: PathBuf::from("/birdcode-test/alternate/data"),
+            model_policy: None,
         };
 
         assert_eq!(
@@ -2442,6 +3015,7 @@ mod tests {
         ConnectionKey {
             daemon: PathBuf::from("/birdcode-test/nonexistent/birdcode-daemon"),
             data_dir: PathBuf::from("/birdcode-test/nonexistent/data"),
+            model_policy: None,
         }
     }
 
@@ -2490,6 +3064,7 @@ mod tests {
                 spec: RunSpec {
                     session_id,
                     purpose: RunPurpose::PlanOnly,
+                    plan_acceptance: PlanAcceptanceContract::IndependentSemanticReviewV1,
                     backend: BackendSelection {
                         backend_id: "lmstudio".to_owned(),
                         kind: BackendKind::Model,
@@ -2602,6 +3177,179 @@ mod tests {
         assert!(wire.get("cancellationRequestId").is_some());
         assert!(wire.get("cancellationGeneration").is_some());
         assert!(wire.get("run_id").is_none());
+    }
+
+    #[test]
+    fn semantic_review_projection_requires_the_exact_latest_candidate_and_stage() {
+        let digest = Sha256Digest::parse("a".repeat(64)).expect("digest fixture should be valid");
+        let candidate = PlanCandidateBinding {
+            proposal_event_id: EventId::new(),
+            plan_revision: 1,
+            plan_digest: digest.clone(),
+            plan_artifact: ArtifactRef {
+                sha256: digest.as_str().to_owned(),
+                size_bytes: 2,
+                media_type: super::ACCEPTED_PLAN_MEDIA_TYPE.to_owned(),
+            },
+        };
+
+        require_current_desktop_candidate(std::slice::from_ref(&candidate), &candidate)
+            .expect("exact latest candidate should be reviewable");
+        let mut forged = candidate.clone();
+        forged.proposal_event_id = EventId::new();
+        assert!(
+            require_current_desktop_candidate(std::slice::from_ref(&candidate), &forged).is_err()
+        );
+        assert!(require_terminal_desktop_review_position(1, 0).is_ok());
+        assert!(require_terminal_desktop_review_position(2, 1).is_ok());
+        assert!(require_terminal_desktop_review_position(2, 0).is_err());
+        assert!(require_terminal_desktop_review_position(1, 1).is_err());
+    }
+
+    #[test]
+    fn semantic_receipt_projection_rejects_a_forged_candidate_binding() {
+        let digest = Sha256Digest::parse("b".repeat(64)).expect("digest fixture should be valid");
+        let critique_digest =
+            Sha256Digest::parse("c".repeat(64)).expect("critique digest should be valid");
+        let candidate = PlanCandidateBinding {
+            proposal_event_id: EventId::new(),
+            plan_revision: 2,
+            plan_digest: digest.clone(),
+            plan_artifact: ArtifactRef {
+                sha256: digest.as_str().to_owned(),
+                size_bytes: 2,
+                media_type: super::ACCEPTED_PLAN_MEDIA_TYPE.to_owned(),
+            },
+        };
+        let critique = ArtifactRef {
+            sha256: critique_digest.as_str().to_owned(),
+            size_bytes: 2,
+            media_type: super::PLAN_CRITIQUE_MEDIA_TYPE.to_owned(),
+        };
+        let inference_attempt_id = InferenceAttemptId::new();
+        let observed_event_id = EventId::new();
+        let bound_digest =
+            || Sha256Digest::parse("d".repeat(64)).expect("receipt digest should be valid");
+        let mut receipt = PlanSemanticReviewValidationReceipt {
+            schema_version: 1,
+            inference_attempt_id,
+            observed_event_id,
+            candidate: candidate.clone(),
+            prompt_manifest_sha256: bound_digest(),
+            prompt_artifact_sha256: bound_digest(),
+            request_artifact_sha256: bound_digest(),
+            normalized_evidence_sha256: bound_digest(),
+            critic_policy_sha256: bound_digest(),
+            critique_sha256: critique_digest,
+            verdict: PlanSemanticReviewValidatedVerdict::Accept,
+            finding_ids: Vec::new(),
+        };
+
+        validate_review_receipt_binding(
+            inference_attempt_id,
+            observed_event_id,
+            &candidate,
+            &critique,
+            &receipt,
+        )
+        .expect("exact receipt should validate");
+        receipt.candidate.proposal_event_id = EventId::new();
+        assert!(
+            validate_review_receipt_binding(
+                inference_attempt_id,
+                observed_event_id,
+                &candidate,
+                &critique,
+                &receipt,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn terminal_revise_keeps_critique_findings_out_of_the_event_requirement_list() {
+        let plan_digest = Sha256Digest::parse("b".repeat(64)).expect("plan digest should be valid");
+        let candidate = PlanCandidateBinding {
+            proposal_event_id: EventId::new(),
+            plan_revision: 2,
+            plan_digest: plan_digest.clone(),
+            plan_artifact: ArtifactRef {
+                sha256: plan_digest.as_str().to_owned(),
+                size_bytes: 2,
+                media_type: super::ACCEPTED_PLAN_MEDIA_TYPE.to_owned(),
+            },
+        };
+        let critique_bytes = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "bindings": {
+                "root_snapshot_sha256": "a".repeat(64),
+                "planner_policy_sha256": "a".repeat(64),
+                "context_manifest_sha256": "a".repeat(64),
+                "candidate_plan_sha256": plan_digest.as_str(),
+                "critic_policy_sha256": "d".repeat(64)
+            },
+            "verdict": "revise",
+            "summary": "Final review still finds a blocker",
+            "obligation_assessments": [],
+            "findings": [{
+                "finding_id": "finding-final-1",
+                "severity": "major",
+                "category": "verification",
+                "statement": "The final verification is incomplete",
+                "source_sections": [],
+                "affected_work_order_ids": [],
+                "required_change": "Add executable final verification"
+            }],
+            "clarification_questions": [],
+            "escalation_requests": [],
+            "decision_evidence": []
+        }))
+        .expect("critique fixture should encode");
+        let critique_digest = Sha256Digest::parse(sha256_hex(&critique_bytes))
+            .expect("critique digest should be valid");
+        let inference_attempt_id = InferenceAttemptId::new();
+        let observed_event_id = EventId::new();
+        let review = PlanSemanticReviewRejected {
+            review_id: PlanSemanticReviewId::new(),
+            inference_attempt_id,
+            observed_event_id,
+            candidate: candidate.clone(),
+            critique_artifact: ArtifactRef {
+                sha256: critique_digest.as_str().to_owned(),
+                size_bytes: u64::try_from(critique_bytes.len())
+                    .expect("fixture length should fit u64"),
+                media_type: super::PLAN_CRITIQUE_MEDIA_TYPE.to_owned(),
+            },
+            validation_evidence_artifact: ArtifactRef {
+                sha256: "e".repeat(64),
+                size_bytes: 2,
+                media_type: super::SEMANTIC_REVIEW_RECEIPT_MEDIA_TYPE.to_owned(),
+            },
+            disposition: PlanSemanticReviewRejectionDisposition::TerminalReject,
+            required_finding_ids: Vec::new(),
+        };
+        let policy_digest =
+            Sha256Digest::parse("d".repeat(64)).expect("policy digest should be valid");
+        let receipt = PlanSemanticReviewValidationReceipt {
+            schema_version: 1,
+            inference_attempt_id,
+            observed_event_id,
+            candidate,
+            prompt_manifest_sha256: policy_digest.clone(),
+            prompt_artifact_sha256: policy_digest.clone(),
+            request_artifact_sha256: policy_digest.clone(),
+            normalized_evidence_sha256: policy_digest.clone(),
+            critic_policy_sha256: policy_digest,
+            critique_sha256: critique_digest,
+            verdict: PlanSemanticReviewValidatedVerdict::Revise,
+            finding_ids: vec!["finding-final-1".to_owned()],
+        };
+
+        validate_semantic_rejection_evidence(&review, &critique_bytes, &receipt)
+            .expect("valid terminal revise evidence should project");
+        let mut forged = review;
+        forged.required_finding_ids = vec!["finding-final-1".to_owned()];
+        assert!(validate_semantic_rejection_evidence(&forged, &critique_bytes, &receipt).is_err());
     }
 
     #[test]

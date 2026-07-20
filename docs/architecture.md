@@ -2,7 +2,9 @@
 
 This document describes the intended system, not a claim that every component
 already exists. The current executable slice is listed in the repository
-README and advertised mechanically through negotiated runtime capabilities.
+README. Negotiated runtime capabilities advertise the coarse durable planning,
+replay, streaming, and cancellation surface; semantic-review policy readiness
+is reported separately through runtime health and is not a capability bit.
 
 ## Product shape
 
@@ -27,21 +29,33 @@ behavior belongs behind platform adapters in the runtime.
 
 ### Current product-wired slice
 
-Protocol v4 currently connects both desktop and CLI to a durable daemon-owned
-`PlanOnly` supervisor. It discovers an exact already-loaded LM Studio model,
-compiles one versioned root-planner turn, persists the prompt and request before
-inference, records provider evidence and token use, validates the returned
-`Plan`/`Clarify`/`Escalate` proposal against independently compiled obligations
-and authority, and exposes verified replay/artifacts to the caller. Claims,
-deadlines, cancellation, bounded durable dispatch, and restart recovery are
-mechanical runtime concerns rather than model decisions.
+Protocol v5 currently connects both desktop and CLI to a durable daemon-owned
+`PlanOnly` supervisor. An explicit trusted policy pins exact producer and
+critic lineages plus the bundled planner, critic, and repair contracts before
+inference. The backend reports the exact discovered model IDs; deployment and
+independence-domain separation are currently trusted operator declarations,
+not backend attestations, and both roles use one configured backend instance.
+The supervisor executes `InitialPlan → InitialReview → optional
+Repair → FinalReview`, with exactly two calls for direct acceptance and at most
+four calls when one complete replacement plan is authorized. It persists each
+prompt and canonical provider-neutral request before inference, records the
+exact assistant text, parsed provider response JSON, SHA-256 of the exact HTTP
+response bytes, and token use, and exposes typed replay plus individually
+content-addressed, hash-verified artifacts to the caller. It does not retain or
+claim exact provider-specific HTTP request bytes or raw HTTP response bytes.
+Initial `Prepared` state also retains the policy-validated producer and critic lineage
+snapshot. Recovery can therefore attribute and terminalize a later-stage
+missing or corrupt policy artifact without redispatching inference or trusting
+that damaged file. Claims, deadlines, cancellation, bounded durable dispatch,
+semantic-stage legality, and restart recovery are mechanical runtime concerns
+rather than model decisions.
 
 This is intentionally narrower than the durable root-actor capability gate in
 the product requirements. The context contains repository identity and user
 input but no repository observations; there are no live tools, work-order
-execution, child actors, replanning from evidence, or independent semantic
-critic. A structurally valid but semantically poor plan can therefore pass the
-current mechanical gate.
+execution, child actors, or replanning from tool evidence. The policy-separated
+critic can reject or authorize one repair of the root plan, but it is a fixed
+supervisor role rather than a general child-agent runtime.
 
 ## Backend taxonomy
 
@@ -101,9 +115,10 @@ controlled unblinding are controller work that is not implemented yet. See
 
 ## Durable state
 
-The append-only event log is authoritative. Large prompts, outputs, terminal
-logs, patches, and other artifacts are content-addressed and referenced from
-events. Materialized session state and memories are rebuildable projections.
+The application-enforced append-only event log is authoritative. Large prompts,
+outputs, terminal logs, patches, and other artifacts are content-addressed and
+referenced from events. Materialized session state and memories are rebuildable
+projections.
 Sequential event reads are bounded pages; callers resume from the last sequence
 instead of materializing an arbitrarily long session in memory.
 
@@ -115,7 +130,11 @@ bounded closed-world schema/database/artifact canary, not an O(N) forensic data
 audit; affected reads still fail closed if stored state is inconsistent.
 
 The runtime can replay recorded state exactly. Re-running a nondeterministic
-model is not expected to reproduce identical tokens.
+model is not expected to reproduce identical tokens. Append-only enforcement
+is a trusted runtime/SQLite-schema property, not a signed or externally
+anchored hash chain. Individual content-addressed artifacts are hash-verified,
+but a privileged storage owner able to rewrite the database and artifact state
+is outside the current threat boundary.
 
 ## Context and compaction
 
@@ -137,9 +156,10 @@ schema for provider grammar engines and the full authoritative output schema.
 Provider-constrained JSON is accepted only after the full local schema and
 cross-field invariants validate it against the original runtime invocation.
 
-The implemented portable router executor permits at most two structured model
-calls: one normal route and, only when the collect-all invariant report contains
-nothing except duplicate evidence sections, one evidence-consolidation repair.
+The standalone `crates/orchestrator` router executor permits at most two
+structured model calls: one normal route and, only when the collect-all
+invariant report contains nothing except duplicate evidence sections, one
+evidence-consolidation repair.
 The repair input is an untrusted projection of duplicate section names and
 bases; it contains no original request/repository payloads or semantic route
 fields. The repair output is a patch rather than another route, so action,
@@ -155,9 +175,10 @@ text. Before inference, the executor requires the selected router to match an
 exact key, typed manifest, and content digest in its internal bundled registry;
 caller-added versions and same-key policy mutations fail setup without a model
 call or journal entry. Historical bundled versions remain available for replay.
-`crates/orchestrator` exposes an injectable journal boundary that fails closed;
-its bundled journal is intentionally in-memory. Wiring that boundary to the
-durable event/artifact store remains daemon integration work.
+Responses and errors are submitted to an acknowledged injectable journal
+boundary that fails closed; the bundled implementation is intentionally
+in-memory. Wiring that boundary to the durable event/artifact store remains
+daemon integration work.
 
 ## Subagents
 
@@ -184,7 +205,8 @@ The transport must support ordered streaming, cancellation, reconnection, and
 protocol-version negotiation. Its public types live in `crates/protocol`.
 Transport-specific code must not leak into runtime domain types.
 
-Protocol v4 encodes workspace paths with a separately versioned wire value:
+Protocol v5 retains the separately versioned lossless workspace-path wire
+value introduced in v4:
 Unix paths carry their exact bytes and Windows paths carry exact UTF-16 code
 units. This avoids forcing either representation through Unicode text, so
 non-UTF-8 POSIX names and unpaired Windows surrogates survive canonical JSON
@@ -192,7 +214,7 @@ round trips. A foreign-family path remains valid protocol data but must not be
 converted to a native `PathBuf` on an incompatible host.
 
 Mutating requests require a client-stable identity whose result is recorded
-atomically with its state change. `CreateRun` in protocol v4 uses a
+atomically with its state change. `CreateRun` uses a
 client-allocated run ID and accepts replay of the same decoded typed `RunSpec`
 while rejecting reuse with a different spec. Cancellation records one stable
 server-generated cancellation identity for the run. The client classifies

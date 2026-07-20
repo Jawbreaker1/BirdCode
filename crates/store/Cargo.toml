@@ -11,6 +11,8 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+birdcode-backends = { path = "../backends" }
+birdcode-prompting = { path = "../prompting" }
 birdcode-protocol = { path = "../protocol" }
 chrono = "0.4.42"
 rusqlite = { version = "0.37.0", features = ["bundled"] }

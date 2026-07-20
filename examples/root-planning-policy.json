@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "producer": {
+    "backend_id": "lmstudio",
+    "model_id": "REPLACE_WITH_EXACT_PRODUCER_MODEL_ID",
+    "deployment_id": "REPLACE_WITH_TRUSTED_PRODUCER_DEPLOYMENT_ID",
+    "independence_domain_id": "REPLACE_WITH_TRUSTED_PRODUCER_DOMAIN_ID"
+  },
+  "critic": {
+    "backend_id": "lmstudio",
+    "model_id": "REPLACE_WITH_EXACT_CRITIC_MODEL_ID",
+    "deployment_id": "REPLACE_WITH_TRUSTED_CRITIC_DEPLOYMENT_ID",
+    "independence_domain_id": "REPLACE_WITH_TRUSTED_CRITIC_DOMAIN_ID"
+  },
+  "max_model_calls": 4,
+  "max_repairs": 1,
+  "max_review_rounds": 2,
+  "stage_budgets": {
+    "initial_plan_output_tokens": 4096,
+    "initial_review_output_tokens": 2048,
+    "repair_output_tokens": 4096,
+    "final_review_output_tokens": 2048
+  }
+}

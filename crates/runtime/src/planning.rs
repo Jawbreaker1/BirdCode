@@ -9,6 +9,7 @@ use birdcode_prompting::{
     RootPlannerPolicyViolation, RuntimeConstraint, SourceKind, TrustLevel, VerificationKind,
     builtin_registry, root_planner_key,
 };
+pub use birdcode_protocol::ROOT_PLANNING_POLICY_V1_INITIAL_PLAN_MAX_OUTPUT_TOKENS as MAX_ROOT_PLANNER_OUTPUT_TOKENS;
 use birdcode_protocol::{
     BackendKind, InputItem, Run, RunPurpose, Session, Sha256Digest, Sha256DigestError,
     WorkspacePath,
@@ -22,8 +23,6 @@ use std::fmt;
 ///
 /// A run may impose a lower ceiling. Backend-specific context limits remain a
 /// separate validation step after model discovery.
-pub const MAX_ROOT_PLANNER_OUTPUT_TOKENS: u32 = 16_384;
-
 const ROOT_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 const CONTEXT_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const ROOT_OBLIGATION_ID: &str = "root_user_goal";

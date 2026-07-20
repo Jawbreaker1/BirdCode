@@ -2,7 +2,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::path::PathBuf;
 
-const MAX_PLAN_OUTPUT_TOKENS: u64 = 16_384;
+use birdcode_protocol::ROOT_PLANNING_POLICY_V1_INITIAL_PLAN_MAX_OUTPUT_TOKENS as MAX_PLAN_OUTPUT_TOKENS;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Command {
@@ -48,6 +48,7 @@ pub struct Options {
     pub command: Command,
     pub daemon: Option<PathBuf>,
     pub data_dir: Option<PathBuf>,
+    pub model_policy: Option<PathBuf>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -66,6 +67,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, ArgsEr
     let mut command = parse_command(args.next())?;
     let mut daemon = None;
     let mut data_dir = None;
+    let mut model_policy = None;
     let mut model_seen = false;
     let mut goal_seen = false;
     while let Some(flag) = args.next() {
@@ -82,6 +84,13 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, ArgsEr
                     &mut data_dir,
                     PathBuf::from(required_value(&mut args, "--data-dir")?),
                     "--data-dir",
+                )?;
+            }
+            Some("--model-policy") => {
+                set_once(
+                    &mut model_policy,
+                    PathBuf::from(required_value(&mut args, "--model-policy")?),
+                    "--model-policy",
                 )?;
             }
             Some("--model") => set_plan_string(
@@ -131,11 +140,18 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, ArgsEr
     }
 
     validate_command(&command)?;
+    if matches!(command, Command::Plan(_)) && model_policy.is_none() {
+        return Err(ArgsError(
+            "plan requires an explicit --model-policy PATH for policy-separated semantic review"
+                .to_owned(),
+        ));
+    }
 
     Ok(Options {
         command,
         daemon,
         data_dir,
+        model_policy,
     })
 }
 
@@ -179,7 +195,7 @@ fn validate_command(command: &Command) -> Result<(), ArgsError> {
     }
     if plan
         .max_output_tokens
-        .is_some_and(|limit| limit > MAX_PLAN_OUTPUT_TOKENS)
+        .is_some_and(|limit| limit > u64::from(MAX_PLAN_OUTPUT_TOKENS))
     {
         return Err(ArgsError(format!(
             "--max-output-tokens may not exceed {MAX_PLAN_OUTPUT_TOKENS} for PlanOnly"
@@ -298,6 +314,7 @@ mod tests {
                 command: Command::SessionSmoke,
                 daemon: Some(PathBuf::from("/opt/birdcode-daemon")),
                 data_dir: Some(PathBuf::from("/tmp/birdcode-state")),
+                model_policy: None,
             }
         );
     }
@@ -329,6 +346,8 @@ mod tests {
                 "high",
                 "--data-dir",
                 "/tmp/bird-state",
+                "--model-policy",
+                "/tmp/BirdCode policy.json",
             ]
             .map(OsString::from),
         )
@@ -347,24 +366,43 @@ mod tests {
                 }),
                 daemon: None,
                 data_dir: Some(PathBuf::from("/tmp/bird-state")),
+                model_policy: Some(PathBuf::from("/tmp/BirdCode policy.json")),
             }
         );
     }
 
     #[test]
     fn plan_requires_explicit_model_and_goal() {
-        let missing_model = parse(["plan", "--goal", "build it"].map(OsString::from))
-            .expect_err("model must be explicit");
+        let missing_model = parse(
+            [
+                "plan",
+                "--goal",
+                "build it",
+                "--model-policy",
+                "/tmp/policy.json",
+            ]
+            .map(OsString::from),
+        )
+        .expect_err("model must be explicit");
         assert_eq!(
             missing_model.to_string(),
             "plan requires an explicit non-empty --model ID"
         );
 
-        let missing_goal =
-            parse(["plan", "--model", "m"].map(OsString::from)).expect_err("goal must be explicit");
+        let missing_goal = parse(
+            ["plan", "--model", "m", "--model-policy", "/tmp/policy.json"].map(OsString::from),
+        )
+        .expect_err("goal must be explicit");
         assert_eq!(
             missing_goal.to_string(),
             "plan requires an explicit non-empty --goal TEXT"
+        );
+
+        let missing_policy = parse(["plan", "--model", "m", "--goal", "goal"].map(OsString::from))
+            .expect_err("policy-separated review policy must be explicit");
+        assert_eq!(
+            missing_policy.to_string(),
+            "plan requires an explicit --model-policy PATH for policy-separated semantic review"
         );
     }
 

@@ -23,6 +23,10 @@ pub const TASK_ROUTER_MANIFEST_JSON: &str =
     include_str!("../../../prompts/semantic-task-router/1.1.3/manifest.json");
 pub const ROOT_PLANNER_MANIFEST_JSON: &str =
     include_str!("../../../prompts/root-planner-turn/1.0.0/manifest.json");
+pub const PLAN_CRITIC_MANIFEST_JSON: &str =
+    include_str!("../../../prompts/plan-semantic-critic/1.0.0/manifest.json");
+pub const PLAN_REPAIR_MANIFEST_JSON: &str =
+    include_str!("../../../prompts/root-plan-repair/1.0.0/manifest.json");
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
 #[derive(Debug, Error)]
@@ -55,6 +59,8 @@ pub enum PromptError {
     OutputInvariant(Vec<crate::router::RouterInvariantViolation>),
     #[error("model output violates root-planner invariants: {0:?}")]
     RootPlannerOutputInvariant(Vec<crate::root_planner::RootPlannerInvariantViolation>),
+    #[error("model output violates semantic plan-critic invariants: {0:?}")]
+    PlanCriticOutputInvariant(Vec<crate::plan_critic::PlanCriticInvariantViolation>),
     #[error("generation schema contains an invalid dynamic directive: {0}")]
     GenerationSchemaDirective(String),
 }
@@ -330,6 +336,8 @@ pub fn builtin_registry() -> Result<PromptRegistry, PromptError> {
         parse_manifest(TASK_ROUTER_MANIFEST_V1_1_2_JSON.as_bytes())?,
         parse_manifest(TASK_ROUTER_MANIFEST_JSON.as_bytes())?,
         parse_manifest(ROOT_PLANNER_MANIFEST_JSON.as_bytes())?,
+        parse_manifest(PLAN_CRITIC_MANIFEST_JSON.as_bytes())?,
+        parse_manifest(PLAN_REPAIR_MANIFEST_JSON.as_bytes())?,
     ])
 }
 
@@ -413,6 +421,14 @@ impl PromptRegistry {
         if crate::root_planner::is_root_planner_key(key) {
             crate::root_planner::validate_root_planner_output(value, invocation)
                 .map_err(PromptError::RootPlannerOutputInvariant)?;
+        }
+        if crate::plan_repair::is_plan_repair_key(key) {
+            crate::plan_repair::validate_plan_repair_output(value, invocation)
+                .map_err(PromptError::RootPlannerOutputInvariant)?;
+        }
+        if crate::plan_critic::is_plan_critic_key(key) {
+            crate::plan_critic::validate_plan_critic_output(value, invocation)
+                .map_err(PromptError::PlanCriticOutputInvariant)?;
         }
         Ok(())
     }

@@ -15,6 +15,7 @@ export interface RuntimeHealth {
   protocolVersion: string | null;
   daemonVersion: string | null;
   message: string;
+  semanticPolicyConfigured?: boolean;
   backends: BackendHealth[];
 }
 
@@ -145,6 +146,7 @@ export const runtimeBridge: RuntimeBridge = {
         protocolVersion: null,
         daemonVersion: null,
         message: "Desktop runtime bridge is unavailable in browser preview.",
+        semanticPolicyConfigured: false,
         backends: [],
       };
     }
