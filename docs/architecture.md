@@ -167,18 +167,18 @@ strategy, access, confidence, questions, subtasks, and unique evidence remain
 mechanically locked. The complete original route contract is validated again
 after patch application, with no further retry.
 
-Every backend response or error is retained with globally unique UUID v7
+Every backend response or error is submitted to the configured acknowledged
+journal before orchestration can continue, with globally unique UUID v7
 execution/attempt IDs, its compiled prompt, requested model, reasoning setting,
-token ceiling, and phase before orchestration can continue. A repair carries
+token ceiling, and phase. A repair carries
 the exact parent attempt ID and remains SHA-256-bound to the initial assistant
 text. Before inference, the executor requires the selected router to match an
 exact key, typed manifest, and content digest in its internal bundled registry;
 caller-added versions and same-key policy mutations fail setup without a model
 call or journal entry. Historical bundled versions remain available for replay.
-Responses and errors are submitted to an acknowledged injectable journal
-boundary that fails closed; the bundled implementation is intentionally
-in-memory. Wiring that boundary to the durable event/artifact store remains
-daemon integration work.
+The journal boundary fails closed. Its bundled implementation records entries
+only for the current process lifetime; wiring it to the durable event/artifact
+store remains daemon integration work.
 
 ## Subagents
 

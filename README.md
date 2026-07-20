@@ -203,8 +203,10 @@ never turn a mechanically failing result into a pass.
 
 ## Status
 
-BirdCode is pre-alpha and currently optimized and verified first on macOS with
-Apple Silicon.
+BirdCode is pre-alpha and targets macOS on Apple Silicon first. The current
+Protocol-v5 milestone is verified at source commit
+`78a77b40483b3a6949bab8301a62483168e13d5a`; its exact scope and host evidence
+are recorded in the [commit-pinned release gate](docs/reviews/2026-07-20-semantic-root-review.md).
 
 | Area | Status | What works now |
 | --- | --- | --- |
@@ -246,6 +248,16 @@ reproducible. There is not yet a retained live protocol-v5 run with two
 eligible models; current v5 evidence consists of deterministic/adversarial
 tests plus the explicitly insufficient one-model inventory shown above:
 
+- **The Protocol-v5 policy-separated semantic review gate is green.** Source
+  commit `78a77b40483b3a6949bab8301a62483168e13d5a` passed 455 Rust test
+  executions, 23/23 GUI tests, strict formatting/linting, type checking,
+  workspace and production builds, CLI persistence/model-discovery smokes, and
+  native ARM64 app/DMG verification. Focused provenance suites contributed 175
+  passing executions. This proves the deterministic/adversarial two-call direct
+  acceptance and four-call repair lifecycle—not a live two-model Protocol-v5
+  run, code execution, a parallel agent runtime, or Codex parity. [Read the
+  release gate](docs/reviews/2026-07-20-semantic-root-review.md) and [desktop
+  capture provenance](docs/evidence/2026-07-20-desktop-captures/README.md).
 - **A real durable root-planning turn completed through the product path—and
   exposed the next missing layer.** From source
   `006786caec7f484a07a3d8fb1851e0246e56e154`, the CLI selected exact loaded
@@ -287,10 +299,11 @@ tests plus the explicitly insufficient one-model inventory shown above:
   four earlier router snapshots, while the root-planner review preserves two
   schema failures and the final semantically insufficient plan instead of
   cherry-picking only green-looking output.
-- **Scope matters.** This proves the standalone router against its nine-case
-  catalog and the initial daemon-owned planning turn against one retained live
-  request. It does not validate work-order execution, live-model repair,
-  repository tools, child agents, compaction, or product security.
+- **Scope matters.** The live evidence remains the earlier Protocol-v4 planning
+  request and standalone router catalog. Current Protocol-v5 evidence is
+  deterministic/adversarial plus one insufficient model inventory. None of it
+  validates work-order execution, live-model repair/review, repository tools,
+  child agents, compaction, Codex parity, or product security.
 
 ## Architecture
 
@@ -623,13 +636,13 @@ the application's eventual license decision.
 
 ## Roadmap
 
-1. Wire two real read-only child actors through the standalone scheduler with
-   model-authored work orders and child-owned bounded plans, then give them
-   isolated model contexts, broker-attested immutable snapshot leases, durable
-   handoffs, cancellation, event replay, and truthful GUI/CLI timelines.
-2. Connect accepted child handoffs to the richer planner/replanner so the root
-   can issue `Execute`, `Delegate`, `Clarify`, `Escalate`, and `Finish`
-   directives and replan only from retained tool/model evidence.
+1. Wire accepted root plans through typed `Delegate` decisions to two real
+   read-only model explorers with separate contexts, brokered tree/list,
+   bounded file-read and literal-search tools, durable handoffs, truthful
+   overlap evidence, cancellation, replay, and GUI/CLI timelines.
+2. Feed those retained handoffs immediately into a second planner turn that
+   cites actual child/tool evidence and ends honestly in `Waiting`; add
+   list/inspect/follow-up/interrupt/wait controls and child crash recovery.
 3. Execute one isolated writing child with a Git worktree/overlay, hash-bound
    patch handoff, deterministic integration ownership, and bounded local build
    validation.

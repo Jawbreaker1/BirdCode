@@ -1,10 +1,12 @@
 # Clean-room Codex capability ledger
 
-Ledger version: `0.1.0`
+Ledger version: `0.2.0`
 
-Observation date: `2026-07-19`
+Latest observation date: `2026-07-20`
 
-BirdCode baseline: `2bee9944678dfc4f3e08aa6319e5baba3a6c9112`
+Historical BirdCode baseline: `2bee9944678dfc4f3e08aa6319e5baba3a6c9112`
+
+Current Protocol-v5 snapshot: `78a77b40483b3a6949bab8301a62483168e13d5a`
 
 Scope: multi-agent behavior, roles, permissions, context, coordination, and
 tooling relevant to measurable BirdCode parity
@@ -30,8 +32,8 @@ fifth evidence class:
 - **Officially documented (`DOC`)**: stated in public OpenAI documentation.
 - **Observed in this development session (`OBS`)**: a callable surface,
   session contract, or result directly visible in the session dated above.
-- **BirdCode current status (`BC`)**: implemented behavior supported by the
-  repository at the pinned baseline commit.
+- **BirdCode status (`BC`)**: implemented behavior supported by the repository
+  at the explicitly named pinned snapshot.
 - **Acceptance gap (`GAP`)**: behavior BirdCode must still prove. A gap is not
   evidence about how Codex is implemented internally.
 
@@ -154,6 +156,38 @@ profile rather than undocumented Codex behavior.
   used repository search, numbered source reads, and local image inspection;
   it made no writes or network requests, and its effective model identity was
   not exposed by result metadata.
+- `/root/provenance_chain_audit` implemented the Protocol-v5 provenance chain
+  across protocol, Store, and supervisor code, using targeted source inspection,
+  patching, Rust tests, formatting, and strict Clippy. It delegated a bounded
+  read-only test map to
+  `/root/provenance_chain_audit/provenance_test_map` while continuing its own
+  implementation.
+- `/root/sol_ultra_agent_parity_audit` mapped Codex-class agent roles, lifecycle
+  behavior, and tooling against BirdCode's actual product wiring. Its task
+  requested `gpt-5.6-sol` with `ultra` reasoning; effective runtime identity was
+  not attested by the returned metadata.
+- `/root/sol_ultra_release_truth_audit` independently compared README, policy,
+  architecture, assets, and code through a read-only release-truth audit under
+  the same requested-but-unattested profile.
+- `/root/frontend_capture_verifier` validated the production React renderer,
+  development-only fixture boundary, GUI tests, TypeScript, production build,
+  image hashes, and absence of fixture identifiers from the bundled output.
+- `/root/semantic_heuristic_audit` used repository search and targeted
+  control-flow inspection to test the no-heuristic semantic-routing invariant.
+  It found no P0–P2 violation and identified one typed P3 provenance-granularity
+  improvement.
+- `/root/cli_release_smoke` owned only the CLI release surface, corrected
+  policy-separation terminology, ran focused Cargo gates, and exercised the
+  built daemon through `doctor`, persistence smoke, and read-only LM Studio
+  discovery.
+- `/root/evidence_ledger_mapper` performed a read-only claim and evidence map
+  for the commit-pinned Protocol-v5 release documents. It used targeted source
+  reads and existing gate/hash evidence without mutating product code.
+- `/root/next_runtime_parity_slice` mapped the smallest next product-wired
+  Codex-parity slice. It used read-only source/contract inspection to separate
+  reusable planner, actor-graph, backend, protocol, Store, and validation types
+  from the missing broker, durable journal, child worker, context resolver, and
+  product-surface wiring.
 
 ## BirdCode status at baseline `2bee9944678dfc4f3e08aa6319e5baba3a6c9112`
 
@@ -177,6 +211,20 @@ The strongest relevant existing proof is narrower than Codex parity: a single
 live root-planning turn, standalone semantic-router evaluations, and a
 standalone generic scheduler tested with non-production workers. BirdCode must
 not advertise these pieces as a functioning multi-agent coding runtime.
+
+## Protocol-v5 delta at `78a77b40483b3a6949bab8301a62483168e13d5a`
+
+This delta supersedes only the BirdCode-status claims above. It does not rewrite
+the historical baseline or convert any standalone kernel into a product-path
+capability.
+
+| Capability | Current delta (`BC`) | Honest limit |
+| --- | --- | --- |
+| Root semantic review | Product-wired `InitialPlan → InitialReview → optional Repair → FinalReview`; accepted paths use exactly two or four calls. | No tools, repository inspection, work execution, child agents, or evidence-driven replanning. |
+| Role separation | Producer and critic require distinct discovered model IDs plus distinct policy-declared deployment and domain IDs. | LM Studio reports model IDs only; deployment/domain are operator declarations and both roles use one backend instance. |
+| Provenance | Protocol v5 and Store schema v8 re-derive stage, backend, model, reasoning, normalized evidence, outcome, token use, and exact candidate/critique bindings from durable typed state. | Application-enforced integrity only; no signature, hash chain, or external anchor against a privileged storage owner. |
+| Product surfaces | CLI and desktop carry the explicit policy path and replay typed review/repair state. | No retained live v5 run exists because the observed LM Studio inventory contains only one model and cannot satisfy the distinct-model policy. |
+| Codex parity | The semantic critic closes one planning-quality precursor. | None of `GAP-MA-001`–`GAP-MA-016` is passed as a complete product-path multi-agent capability. |
 
 ## Acceptance gap
 
@@ -243,6 +291,16 @@ add observations and update affected gap states before a parity statement.
 | `O-2026-07-19-010` | 2026-07-19 | Evidence-bearing steering | CLI `E0282` bin-test result followed by a live message to `/root/product_surface_validation` | Confirmed a running child can receive a concrete new finding within its existing scope. Delivery was observed at the interface; exactly-once processing and durable mailbox semantics were not measured. |
 | `O-2026-07-19-011` | 2026-07-19 | Sol/Ultra comparison-agent request | Three explicit spawn invocations requesting `gpt-5.6-sol` with `ultra` reasoning | Confirmed the orchestration surface accepted the requested specialist profiles. Effective runtime identity was not exposed by list/result metadata, so no model-attestation claim is made. |
 | `O-2026-07-19-012` | 2026-07-19 | Documentation truth audit | Read-only `/root/docs_truth_audit` result | Compared active README, architecture, policy, prompt, ledger, and screenshot claims with protocol-v5 code and assets; identified stale screenshots and overstrong live-review/attestation wording. The root corrected the text; image replacement remains a pre-merge gate. |
+| `O-2026-07-20-013` | 2026-07-20 | Provenance implementation specialist | `/root/provenance_chain_audit` source changes and terminal gate report | Implemented typed Protocol-v5/Store-v8 provenance across protocol, Store, and supervisor and reported 175 focused passing executions plus strict linting. This is BirdCode source evidence only after the separately pinned workspace gate. |
+| `O-2026-07-20-014` | 2026-07-20 | Nested provenance test mapping | `/root/provenance_chain_audit/provenance_test_map` read-only result | Confirmed a child decomposed its own task and delegated a bounded test-map specialist. This observes Codex-session behavior, not BirdCode child orchestration. |
+| `O-2026-07-20-015` | 2026-07-20 | Coding-agent parity audit | `/root/sol_ultra_agent_parity_audit` read-only result | Mapped the missing plan→tools→evidence→replan and child-agent product wiring. The task requested `gpt-5.6-sol`/`ultra`; effective identity was not attested. |
+| `O-2026-07-20-016` | 2026-07-20 | Release-truth audit | `/root/sol_ultra_release_truth_audit` read-only result | Compared claims with code, assets, and retained evidence; drove corrections to role-separation, retention, screenshot, router-scope, capability, and storage-threat wording. The requested Sol/Ultra profile was not runtime-attested. |
+| `O-2026-07-20-017` | 2026-07-20 | Frontend capture verification | `/root/frontend_capture_verifier` test/build/image report | Verified 23/23 GUI tests, type checking, production build, fixture exclusion, image dimensions/hashes, and the renderer-versus-native boundary. It did not claim an OS-level screenshot. |
+| `O-2026-07-20-018` | 2026-07-20 | Semantic-heuristic audit | `/root/semantic_heuristic_audit` read-only source audit | Found no P0–P2 keyword, regexp, filename, extension, language, or error-string control-flow classifier in the audited runtime paths. A typed `Cancelled` reason can be split later for finer P3 provenance precision. |
+| `O-2026-07-20-019` | 2026-07-20 | Screenshot replacement; supersedes `O-2026-07-19-012` | Commit-pinned renderer captures and `/root/frontend_capture_verifier` | Replaced the stale images and retained their exact hashes. They remain production-React captures driven by a development-only non-executing bridge, not native Tauri-window screenshots or live model evidence. |
+| `O-2026-07-20-020` | 2026-07-20 | CLI product smoke | `/root/cli_release_smoke` built-product report | Verified 18/18 focused CLI tests, strict Cargo gates, protocol-v5 health, durable multilingual session reload, and exact LM Studio discovery. The one-model inventory cannot satisfy a live two-role v5 policy. |
+| `O-2026-07-20-021` | 2026-07-20 | Commit-pinned evidence mapping | `/root/evidence_ledger_mapper` read-only result | Mapped remaining overclaims and the exact release/capture evidence required at source `78a77b4…`; used source, gate, hash, and asset inspection without product writes or network access. |
+| `O-2026-07-20-022` | 2026-07-20 | Next parity-bearing vertical | `/root/next_runtime_parity_slice` read-only architecture map | Selected durable parallel read-only repository reconnaissance: accepted root plan → typed delegation → two overlapping model explorers with brokered tree/read/literal-search tools → bounded durable handoffs → evidence-citing replan ending honestly in `Waiting`. This would close no writing, integration, executing-validation, or superiority gate by itself. |
 
 ## Update checklist
 

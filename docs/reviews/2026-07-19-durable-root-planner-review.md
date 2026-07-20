@@ -74,7 +74,7 @@ was needed after the clean snapshot's `npm ci` and cached Rust dependencies.
 
 The final run used the implementation commit above and the same CLI → client →
 daemon → supervisor → LM Studio → store path exposed by the product. The exact
-invocation and immutable artifact payloads are retained in
+invocation and commit-pinned, hash-addressed artifact payloads are retained in
 [`docs/evidence/2026-07-19-root-planner-live`](../evidence/2026-07-19-root-planner-live/).
 
 | Field | Retained value |
