@@ -1,10 +1,11 @@
 use crate::contract::{
-    BackendError, BackendErrorEvidence, BackendErrorKind, BackendFuture, BackendId,
-    BackendOperation, CapabilityState, DiscoveryEvidence, HttpEvidence, InferenceEvidence,
-    LoadedInstance, Message, MessageRole, ModelBackend, ModelCapabilities, ModelCatalog,
-    ModelDescriptor, ModelId, ModelKind, ModelLoadState, NativeDiscoveryEvidence, NativeMatch,
-    NativeMatchKey, Quantization, ReasoningCapabilities, ReasoningOption, ReasoningSetting,
-    StructuredInferenceRequest, StructuredInferenceResponse, TokenUsage,
+    BackendDeploymentId, BackendEndpointOrigin, BackendError, BackendErrorEvidence,
+    BackendErrorKind, BackendFuture, BackendId, BackendInstanceIdentity, BackendOperation,
+    CapabilityState, DiscoveryEvidence, HttpEvidence, InferenceEvidence, LoadedInstance, Message,
+    MessageRole, ModelBackend, ModelCapabilities, ModelCatalog, ModelDescriptor, ModelId,
+    ModelKind, ModelLoadState, NativeDiscoveryEvidence, NativeMatch, NativeMatchKey, Quantization,
+    ReasoningCapabilities, ReasoningOption, ReasoningSetting, StructuredInferenceRequest,
+    StructuredInferenceResponse, TokenUsage,
 };
 use futures_util::StreamExt as _;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
@@ -82,6 +83,10 @@ impl Default for HttpLimits {
 #[derive(Clone, Debug)]
 pub struct LmStudioConfig {
     pub base_url: Url,
+    /// Optional operator-configured service-instance label. When absent, the
+    /// adapter derives a stable label from the canonical configured origin.
+    /// This label is routing provenance, not model-weight attestation.
+    pub deployment_id: Option<BackendDeploymentId>,
     pub api_token: Option<SecretToken>,
     pub limits: HttpLimits,
 }
@@ -91,6 +96,7 @@ impl LmStudioConfig {
     pub fn new(base_url: Url) -> Self {
         Self {
             base_url,
+            deployment_id: None,
             api_token: None,
             limits: HttpLimits::default(),
         }
@@ -100,6 +106,7 @@ impl LmStudioConfig {
 #[derive(Clone)]
 pub struct LmStudioBackend {
     backend_id: BackendId,
+    instance_identity: BackendInstanceIdentity,
     base_url: Url,
     limits: HttpLimits,
     client: Client,
@@ -110,6 +117,7 @@ impl fmt::Debug for LmStudioBackend {
         formatter
             .debug_struct("LmStudioBackend")
             .field("backend_id", &self.backend_id)
+            .field("instance_identity", &self.instance_identity)
             .field("base_url", &self.base_url)
             .field("limits", &self.limits)
             .finish_non_exhaustive()
@@ -129,6 +137,18 @@ impl LmStudioBackend {
     pub fn new(config: LmStudioConfig) -> Result<Self, BackendError> {
         let backend_id = BackendId::known(BACKEND_NAME);
         validate_config(&backend_id, &config)?;
+        let origin = BackendEndpointOrigin::from_http_url(&config.base_url)
+            .map_err(|error| configuration_error(&backend_id, error.to_string()))?;
+        let deployment_id = config
+            .deployment_id
+            .clone()
+            .unwrap_or_else(|| BackendDeploymentId::derived_for_origin(&backend_id, &origin));
+        let instance_identity = BackendInstanceIdentity::for_http_origin(
+            backend_id.clone(),
+            deployment_id,
+            &config.base_url,
+        )
+        .map_err(|error| configuration_error(&backend_id, error.to_string()))?;
 
         let mut headers = HeaderMap::new();
         if let Some(token) = &config.api_token {
@@ -156,6 +176,7 @@ impl LmStudioBackend {
 
         Ok(Self {
             backend_id,
+            instance_identity,
             base_url: config.base_url,
             limits: config.limits,
             client,
@@ -217,6 +238,7 @@ impl LmStudioBackend {
 
         Ok(ModelCatalog {
             backend_id: self.backend_id.clone(),
+            backend_instance: self.instance_identity.clone(),
             models,
             evidence: DiscoveryEvidence {
                 openai: openai_http
@@ -396,6 +418,7 @@ impl LmStudioBackend {
             usage: completion.usage.map(TokenUsage::from),
             evidence: InferenceEvidence {
                 backend_id: self.backend_id.clone(),
+                backend_instance: Some(self.instance_identity.clone()),
                 endpoint: http.endpoint,
                 status: http.status,
                 completion_id: completion.id,
@@ -517,15 +540,27 @@ impl ModelBackend for LmStudioBackend {
         &self.backend_id
     }
 
+    fn instance_identity(&self) -> &BackendInstanceIdentity {
+        &self.instance_identity
+    }
+
     fn discover_models(&self) -> BackendFuture<'_, ModelCatalog> {
-        Box::pin(self.discover())
+        Box::pin(async move {
+            self.discover()
+                .await
+                .map_err(|error| error.bind_instance(&self.instance_identity))
+        })
     }
 
     fn infer_structured(
         &self,
         request: StructuredInferenceRequest,
     ) -> BackendFuture<'_, StructuredInferenceResponse> {
-        Box::pin(self.infer(request))
+        Box::pin(async move {
+            self.infer(request)
+                .await
+                .map_err(|error| error.bind_instance(&self.instance_identity))
+        })
     }
 }
 
@@ -1217,6 +1252,7 @@ struct NativeLoadedInstance {
 #[derive(Debug, Deserialize)]
 struct NativeLoadedConfig {
     context_length: Option<u64>,
+    parallel: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1264,6 +1300,7 @@ fn descriptor_for(openai: &OpenAiModel, native: Option<&NativeModelsResponse>) -
         .map(|instance| LoadedInstance {
             id: instance.id.clone(),
             context_length: instance.config.context_length,
+            parallel_capacity: instance.config.parallel,
         })
         .collect::<Vec<_>>();
     let load_state = if loaded_instances.is_empty() {

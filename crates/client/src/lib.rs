@@ -356,7 +356,9 @@ impl Default for ClientTimeouts {
 /// enabled only when its exact file path is supplied by the caller.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DaemonLaunchOptions {
+    pub backend_config: Option<PathBuf>,
     pub model_policy: Option<PathBuf>,
+    pub workspace_state_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy)]
@@ -425,8 +427,16 @@ fn daemon_command(
 ) -> Command {
     let mut command = Command::new(executable);
     command.arg("--data-dir").arg(data_dir);
+    if let Some(backend_config) = &launch_options.backend_config {
+        command.arg("--backend-config").arg(backend_config);
+    }
     if let Some(model_policy) = &launch_options.model_policy {
         command.arg("--model-policy").arg(model_policy);
+    }
+    if let Some(workspace_state_dir) = &launch_options.workspace_state_dir {
+        command
+            .arg("--workspace-state-dir")
+            .arg(workspace_state_dir);
     }
     command
 }
@@ -1596,7 +1606,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn launch_arguments_forward_only_an_explicit_model_policy_path() {
+    fn launch_arguments_forward_only_explicit_optional_paths() {
         let default = daemon_command(
             Path::new("/Applications/BirdCode/birdcode-daemon"),
             Path::new("/tmp/BirdCode data"),
@@ -1614,7 +1624,9 @@ for line in sys.stdin:
             Path::new("/Applications/BirdCode/birdcode-daemon"),
             Path::new("/tmp/BirdCode data"),
             &DaemonLaunchOptions {
+                backend_config: Some(PathBuf::from("/tmp/config/backend routes.json")),
                 model_policy: Some(PathBuf::from("/tmp/policies/critic policy.json")),
+                workspace_state_dir: Some(PathBuf::from("/tmp/BirdCode workspace state")),
             },
         );
         assert_eq!(
@@ -1622,8 +1634,12 @@ for line in sys.stdin:
             [
                 std::ffi::OsStr::new("--data-dir"),
                 std::ffi::OsStr::new("/tmp/BirdCode data"),
+                std::ffi::OsStr::new("--backend-config"),
+                std::ffi::OsStr::new("/tmp/config/backend routes.json"),
                 std::ffi::OsStr::new("--model-policy"),
                 std::ffi::OsStr::new("/tmp/policies/critic policy.json"),
+                std::ffi::OsStr::new("--workspace-state-dir"),
+                std::ffi::OsStr::new("/tmp/BirdCode workspace state"),
             ]
         );
     }

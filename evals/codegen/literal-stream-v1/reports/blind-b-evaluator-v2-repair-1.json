@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "fixture_id": "literal-stream-v1",
+  "evaluator": "birdcode.codegen-calibration/2",
+  "evaluator_sha256": "63beaa356d286674194fd02086197a61a6ac3b8b0ba5f378270acb41a9934a28",
+  "evaluator_input_sha256": "dcb581c4d2e8bb797a0d2d3e5d74a4c747c2b3a78a640e4dbc2e1c24e90189f4",
+  "candidate_sha256": "8b60adcdd5025edc01d94aafe3f8bd82c8635a859ac04acf99fcb8332eb1c88d",
+  "source_sha256": "dafb3b993d4fe8291c131dde485f8736217810884de167a0b234b128ecb7d30d",
+  "task_sha256": "f26b95f5ddd76d548857980462e2bd0e47c05110d2b4733555ea27a3c140f24b",
+  "acceptance_sha256": "0600fd07f882b53a1b88a77407ee9af5a6294e964c6c0d7d23afd53b02d3c2c4",
+  "prompt_manifest_sha256": "a3f89b522223b204fa42c6c5ec253443636dfc3261d927fa14cc1ad10e1493b2",
+  "environment": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "node": "v22.16.0",
+    "network_policy": "outer_execution_sandbox_plus_cargo_offline",
+    "candidate_workspace": "ephemeral_and_removed_after_capture",
+    "subprocess_environment_allowlist": [
+      "PATH",
+      "HOME",
+      "CARGO_HOME",
+      "RUSTUP_HOME",
+      "TMPDIR",
+      "DEVELOPER_DIR",
+      "SDKROOT",
+      "MACOSX_DEPLOYMENT_TARGET"
+    ]
+  },
+  "commands": [
+    {
+      "argv": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd_role": "isolated_candidate_root",
+      "started_at": "2026-07-20T01:32:33.044Z",
+      "elapsed_ms": 224,
+      "exit_code": 1,
+      "signal": null,
+      "timed_out": false,
+      "stdout": "Diff in /private/var/folders/9q/85bdkfjj4jn932rfs975wk280000gn/T/birdcode-codegen-calibration-PRRGlO/src/lib.rs:43:\n \n     for chunk in chunks {\n         let chunk_len = chunk.len() as u64;\n-        \n+\n         // Check for potential overflow before adding to total scanned\n         if let Some(new_total) = total_bytes_scanned.checked_add(chunk_len) {\n             total_bytes_scanned = new_total;\nDiff in /private/var/folders/9q/85bdkfjj4jn932rfs975wk280000gn/T/birdcode-codegen-calibration-PRRGlO/src/lib.rs:54:\n         // To handle boundary matches, we create a view that is: [overlap_buffer] + [chunk]\n         // However, to keep O(needle.len()) memory, we don't allocate a new Vec for every chunk.\n         // We use the overlap buffer and then process the chunk.\n-        \n+\n         let mut search_pos = 0;\n-        \n+\n         // If there is an overlap, we need to check matches starting in the overlap\n         // and ending inside this chunk.\n         if !overlap_buffer.is_empty() {\nDiff in /private/var/folders/9q/85bdkfjj4jn932rfs975wk280000gn/T/birdcode-codegen-calibration-PRRGlO/src/lib.rs:63:\n-            // The relevant area for boundary matches is: \n+            // The relevant area for boundary matches is:\n             // suffix of previous (size needle.len()-1) + prefix of current (size needle.len()-1)\n             let combined_len = overlap_buffer.len() + chunk.len();\n-            let mut window = Vec::with_capacity(overlap_buffer.len() + chunk.len().min(needle.len() as u64) as usize);\n+            let mut window = Vec::with_capacity(\n+                overlap_buffer.len() + chunk.len().min(needle.len() as u64) as usize,\n+            );\n             window.extend_from_slice(&overlap_buffer);\n             // We only need up to needle.len()-1 from the current chunk to catch all boundary matches\n             let take_from_chunk = (chunk.len()).min(needle.len() - 1);\nDiff in /private/var/folders/9q/85bdkfjj4jn932rfs975wk280000gn/T/birdcode-codegen-calibration-PRRGlO/src/lib.rs:70:\n             window.extend_from_slice(&chunk[..take_from_chunk]);\n \n             // Search for needle in this combined window.\n-            // But we must be careful not to double-count matches that were already found \n+            // But we must be careful not to double-count matches that were already found\n             // or are purely within the overlap buffer (which shouldn't happen if logic is correct).\n             // Actually, a simpler way: search in [overlap_buffer] + [chunk].\n             // A match starting at index `i` in this window corresponds to absolute offset:\nDiff in /private/var/folders/9q/85bdkfjj4jn932rfs975wk280000gn/T/birdcode-codegen-calibration-PRRGlO/src/lib.rs:77:\n             // current_absolute_offset - overlap_buffer.len() + i.\n-            \n-            // To avoid complexity, let's use a simpler strategy: \n+\n+            // To avoid complexity, let's use a simpler strategy:\n             // 1. Process the chunk normally for internal matches.\n             // 2. Also check matches that start in the previous chunk's tail and end in this chunk.\n         }\n",
+      "stdout_truncated": false,
+      "stderr": "",
+      "stderr_truncated": false,
+      "passed": false
+    }
+  ],
+  "status": "failed"
+}

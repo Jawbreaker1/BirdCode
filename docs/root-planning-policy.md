@@ -25,12 +25,14 @@ transitions, exact artifact bindings, budgets, identities, and call ceiling.
 
 ## Configure it
 
-Copy [the example policy](../examples/root-planning-policy.json) outside the
-repository or to an ignored local path and replace every `REPLACE_WITH_...`
-value. The producer and critic must have distinct exact model IDs, deployment
-IDs, and independence-domain IDs. Both models must be discoverable through the
-configured backend before inference begins, and the model selected for the run
-must exactly match `producer.model_id`. If a caller sets an aggregate
+Copy [the example policy](../examples/root-planning-policy.json) and
+[backend manifest](../examples/backend-manifest.json) outside the repository
+or to ignored local paths and replace every `REPLACE_WITH_...` value. The
+producer and critic must have distinct exact model IDs, deployment IDs, and
+independence-domain IDs. Each policy deployment must resolve to its exact
+configured backend route, the manifest's explicit primary must be the producer,
+and both models must be discoverable before inference begins. The model selected
+for the run must exactly match `producer.model_id`. If a caller sets an aggregate
 `max_output_tokens` ceiling, it must be at least the sum of all four fixed stage
 budgets, even when the direct acceptance path will use only the first two
 stages. The desktop always supplies a ceiling (16,384 by default and maximum);
@@ -41,6 +43,7 @@ For the CLI, pass the file explicitly:
 ```sh
 target/debug/birdcode plan \
   --model-policy /absolute/path/to/root-planning-policy.json \
+  --backend-config /absolute/path/to/backend-manifest.json \
   --model EXACT_PRODUCER_MODEL_ID \
   --goal "Plan the complete outcome" \
   --workspace /absolute/path/to/repository
@@ -50,16 +53,17 @@ For the macOS desktop application, set the path before starting BirdCode:
 
 ```sh
 export BIRDCODE_MODEL_POLICY=/absolute/path/to/root-planning-policy.json
+export BIRDCODE_BACKEND_CONFIG=/absolute/path/to/backend-manifest.json
 npm run dev
 ```
 
 If the desktop application was already started with another environment,
-restart the application after changing the policy path. BirdCode shows the
+restart the application after changing either path. BirdCode shows the
 policy state in Run setup and disables plan submission when no policy is
 configured. “Policy configured” means only that an explicit path was supplied;
-the daemon validates the file, exact producer/critic identities, and aggregate
-stage budget during run preflight. The UI deliberately does not present that
-preflight as already passed.
+the daemon validates the policy, manifest, exact producer/critic routes,
+producer-primary binding, and aggregate stage budget. The UI deliberately does
+not present that validation as already passed.
 
 ## Trust boundary
 
@@ -68,14 +72,23 @@ identities are intentionally absent from the JSON; the daemon derives their
 digests from BirdCode's bundled prompt registry so a policy file cannot swap
 the root planner, critic, or repair contract.
 
-The current LM Studio adapter records and enforces its configured backend plus
-the exact catalog- and completion-reported model ID. It does **not** attest the
-policy's deployment or independence-domain labels. Those two fields therefore
-remain explicit trusted
-operator assertions, and BirdCode must not describe them as provider-attested
-until a backend supplies such evidence. The current daemon also uses one
-configured backend instance for both roles. Cross-provider review belongs to a
-later adapter milestone.
+The current LM Studio adapter records and enforces its configured deployment,
+canonical endpoint origin, instance digest, and exact catalog- and
+completion-reported model ID. The registry resolves producer and critic by
+exact `(backend_id, deployment_id)` with no primary fallback, and rejects two
+LM Studio routes that alias one canonical origin. LM Studio does **not** attest
+the policy's independence-domain labels; those remain trusted operator
+assertions, and BirdCode must not describe them as provider-attested until a
+backend supplies such evidence. Cross-provider review belongs to a later
+adapter milestone.
+
+Each Prepared call and retained response is bound to its full backend instance,
+so transport substitution at that call boundary fails before inference or at
+observation. One hardening gap remains: the first discovery does not yet retain
+both role-instance attestations as one durable preflight record. A daemon
+restart before a role's first Prepared event can therefore rebind the same
+configured deployment ID to a changed origin. Closing that restart boundary is
+required before the separation claim is considered complete.
 
 The stable protocol-v5 wire identifiers `IndependentSemanticReviewV1` and
 `IndependentCritic` predate this wording clarification. In this release,

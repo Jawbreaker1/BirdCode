@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "fixture_id": "literal-stream-v1",
+  "evaluator": "birdcode.codegen-calibration/2",
+  "evaluator_sha256": "63beaa356d286674194fd02086197a61a6ac3b8b0ba5f378270acb41a9934a28",
+  "evaluator_input_sha256": "e3719fbf23c6222f6ccfdb1f021c955db296fd5cdec2991f20e36b3fea180e64",
+  "candidate_sha256": "9f74b8010ed1f927bae0d523df6281b0b2ac5e64f87cad5626741dab7e58c358",
+  "source_sha256": "e9c9d68efba9bf9d7964d85312b07d69a9295fb91d969648203ff9136415a68d",
+  "task_sha256": "f26b95f5ddd76d548857980462e2bd0e47c05110d2b4733555ea27a3c140f24b",
+  "acceptance_sha256": "0600fd07f882b53a1b88a77407ee9af5a6294e964c6c0d7d23afd53b02d3c2c4",
+  "prompt_manifest_sha256": "a3f89b522223b204fa42c6c5ec253443636dfc3261d927fa14cc1ad10e1493b2",
+  "environment": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "node": "v22.16.0",
+    "network_policy": "outer_execution_sandbox_plus_cargo_offline",
+    "candidate_workspace": "ephemeral_and_removed_after_capture",
+    "subprocess_environment_allowlist": [
+      "PATH",
+      "HOME",
+      "CARGO_HOME",
+      "RUSTUP_HOME",
+      "TMPDIR",
+      "DEVELOPER_DIR",
+      "SDKROOT",
+      "MACOSX_DEPLOYMENT_TARGET"
+    ]
+  },
+  "commands": [
+    {
+      "argv": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd_role": "isolated_candidate_root",
+      "started_at": "2026-07-20T01:29:38.580Z",
+      "elapsed_ms": 221,
+      "exit_code": 1,
+      "signal": null,
+      "timed_out": false,
+      "stdout": "",
+      "stdout_truncated": false,
+      "stderr": "error: this file contains an unclosed delimiter\n  --> /private/var/folders/9q/85bdkfjj4jn932rfs975wk280000gn/T/birdcode-codegen-calibration-p7jIGh/src/lib.rs:41:25\n   |\n27 | {\n   | - unclosed delimiter\n...\n41 |     // representing the \n   |                         ^\n\n",
+      "stderr_truncated": false,
+      "passed": false
+    }
+  ],
+  "status": "failed"
+}

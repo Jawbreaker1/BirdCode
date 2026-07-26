@@ -1,5 +1,6 @@
 use crate::{
     FrameError, JsonLines, RunSupervisor, SupervisorDiscoveryError, SupervisorSubmitError,
+    supervisor::purpose_has_executable_supervisor,
 };
 use birdcode_protocol::{
     ClientCommand, ClientRequest, ErrorCode, ProtocolError, RunState, RuntimeCapability,
@@ -7,6 +8,9 @@ use birdcode_protocol::{
 };
 use birdcode_runtime::{LocalRuntime, Repository, RuntimeError};
 use std::io::{BufRead, Write};
+
+const SUPERVISOR_RUNTIME_CAPABILITIES: [RuntimeCapability; 1] =
+    [RuntimeCapability::DurableRootPlanning];
 
 /// Serves one ordered daemon connection until its input reaches EOF.
 ///
@@ -74,7 +78,15 @@ where
                         result
                             .capabilities
                             .supported
-                            .insert(RuntimeCapability::DurableRootPlanning);
+                            .extend(SUPERVISOR_RUNTIME_CAPABILITIES);
+                    }
+                    if supervisor.is_some_and(|supervisor| {
+                        supervisor.supports_parallel_repository_reconnaissance_v1()
+                    }) {
+                        result
+                            .capabilities
+                            .supported
+                            .insert(RuntimeCapability::ParallelRepositoryReconnaissanceV1);
                     }
                     initialized = true;
                     ServerResponse::success(request_id, ServerResult::Initialized(result))
@@ -171,9 +183,14 @@ fn create_run_response<R: Repository>(
     request_id: birdcode_protocol::RequestId,
     parameters: birdcode_protocol::CreateRunRequest,
 ) -> ServerResponse {
-    create_run_response_with_submit(runtime, request_id, parameters, |run_id| {
-        supervisor.map(|supervisor| supervisor.submit(run_id).map(|_| ()))
-    })
+    create_run_response_with_submit(
+        runtime,
+        request_id,
+        parameters,
+        |run_id| supervisor.map(|supervisor| supervisor.submit(run_id).map(|_| ())),
+        supervisor
+            .is_some_and(|supervisor| supervisor.supports_parallel_repository_reconnaissance_v1()),
+    )
 }
 
 fn create_run_response_with_submit<R, Submit>(
@@ -181,6 +198,7 @@ fn create_run_response_with_submit<R, Submit>(
     request_id: birdcode_protocol::RequestId,
     parameters: birdcode_protocol::CreateRunRequest,
     submit: Submit,
+    parallel_reconnaissance_available: bool,
 ) -> ServerResponse
 where
     R: Repository,
@@ -192,12 +210,17 @@ where
             // `create_run` has already crossed the durable commit boundary.
             // Direct submission is only an eager wake-up: the SQLite-backed
             // dispatcher, or a subsequent daemon startup, owns recovery of
-            // every nonterminal run. A closed in-memory supervisor therefore
-            // cannot retroactively turn the committed mutation into a
+            // every executable nonterminal run. A closed in-memory supervisor
+            // therefore cannot retroactively turn the committed mutation into a
             // rejection that would make a client discard its stable run id.
+            // Only purposes with a fully executable daemon handler receive
+            // this eager wake-up; admitted future purposes remain quiescent.
             if matches!(
                 run.state,
                 RunState::Queued | RunState::Running | RunState::Waiting
+            ) && purpose_has_executable_supervisor(
+                run.spec.purpose,
+                parallel_reconnaissance_available,
             ) {
                 let _ = submit(run.id);
             }
@@ -248,7 +271,10 @@ const fn command_name(command: &ClientCommand) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{create_run_response_with_submit, serve};
+    use super::{
+        SUPERVISOR_RUNTIME_CAPABILITIES, create_run_response_with_submit,
+        purpose_has_executable_supervisor, serve,
+    };
     use crate::SupervisorSubmitError;
     use birdcode_protocol::{
         BackendKind, BackendSelection, CancellationDisposition, ClientCommand, ClientIdentity,
@@ -387,6 +413,145 @@ mod tests {
     }
 
     #[test]
+    fn supervisor_does_not_advertise_unavailable_parallel_reconnaissance() {
+        assert_eq!(
+            SUPERVISOR_RUNTIME_CAPABILITIES,
+            [birdcode_protocol::RuntimeCapability::DurableRootPlanning]
+        );
+        assert!(
+            !SUPERVISOR_RUNTIME_CAPABILITIES.contains(
+                &birdcode_protocol::RuntimeCapability::ParallelRepositoryReconnaissanceV1
+            )
+        );
+    }
+
+    #[test]
+    fn unavailable_parallel_reconnaissance_is_persisted_without_eager_submission() {
+        let mut runtime = LocalRuntime::new(MemoryRepository::default());
+        let session = runtime
+            .create_session(CreateSessionRequest {
+                workspace_root: PathBuf::from("/tmp/daemon-parallel-reconnaissance").into(),
+                title: Some("Quiescent reconnaissance".to_owned()),
+            })
+            .expect("session should persist");
+        let mut submit_calls = 0_u8;
+        let response = create_run_response_with_submit(
+            &mut runtime,
+            RequestId::new(),
+            CreateRunRequest {
+                run_id: RunId::new(),
+                spec: RunSpec {
+                    session_id: session.id,
+                    purpose: RunPurpose::ParallelRepositoryReconnaissanceV1,
+                    plan_acceptance: PlanAcceptanceContract::IndependentSemanticReviewV1,
+                    backend: BackendSelection {
+                        backend_id: "lmstudio".to_owned(),
+                        kind: BackendKind::Model,
+                        model: Some("gemma-4-26b".to_owned()),
+                        reasoning_effort: None,
+                    },
+                    input: vec![InputItem::Text {
+                        text: "Kartlägg repositoryt med två isolerade utforskare.".to_owned(),
+                    }],
+                    limits: RunLimits {
+                        max_output_tokens: Some(
+                            birdcode_protocol::PARALLEL_RECONNAISSANCE_V1_DEFAULT_TOTAL_RESERVED_OUTPUT_TOKENS,
+                        ),
+                        max_wall_time_seconds: Some(600),
+                        max_subagents: 2,
+                    },
+                },
+            },
+            |_| {
+                submit_calls += 1;
+                Some(Ok(()))
+            },
+            false,
+        );
+
+        assert!(matches!(
+            response.outcome,
+            ResponseOutcome::Success {
+                result: ServerResult::Run(Run {
+                    state: RunState::Queued,
+                    ..
+                })
+            }
+        ));
+        assert_eq!(submit_calls, 0);
+    }
+
+    #[test]
+    fn admitted_read_only_execute_is_persisted_but_not_submitted_or_advertised() {
+        let mut runtime = LocalRuntime::new(MemoryRepository::default());
+        let session = runtime
+            .create_session(CreateSessionRequest {
+                workspace_root: PathBuf::from("/tmp/daemon-read-only-execute").into(),
+                title: Some("Quiescent read-only agent".to_owned()),
+            })
+            .expect("session should persist");
+        let mut submit_calls = 0_u8;
+        let response = create_run_response_with_submit(
+            &mut runtime,
+            RequestId::new(),
+            CreateRunRequest {
+                run_id: RunId::new(),
+                spec: RunSpec {
+                    session_id: session.id,
+                    purpose: RunPurpose::Execute,
+                    plan_acceptance: PlanAcceptanceContract::NotApplicable,
+                    backend: BackendSelection {
+                        backend_id: "lmstudio".to_owned(),
+                        kind: BackendKind::Model,
+                        model: Some("google/gemma-4-26b-a4b".to_owned()),
+                        reasoning_effort: Some("off".to_owned()),
+                    },
+                    input: vec![InputItem::Text {
+                        text: "Undersök repositoryt utan skrivåtkomst.".to_owned(),
+                    }],
+                    limits: RunLimits {
+                        max_output_tokens: Some(
+                            birdcode_protocol::READ_ONLY_REPOSITORY_AGENT_V1_TOTAL_RESERVED_OUTPUT_TOKENS,
+                        ),
+                        max_wall_time_seconds: Some(
+                            birdcode_protocol::READ_ONLY_REPOSITORY_AGENT_V1_MAX_WALL_TIME_SECONDS,
+                        ),
+                        max_subagents: 0,
+                    },
+                },
+            },
+            |_| {
+                submit_calls += 1;
+                Some(Ok(()))
+            },
+            false,
+        );
+
+        assert!(matches!(
+            response.outcome,
+            ResponseOutcome::Success {
+                result: ServerResult::Run(Run {
+                    state: RunState::Queued,
+                    spec: RunSpec {
+                        purpose: RunPurpose::Execute,
+                        ..
+                    },
+                    ..
+                })
+            }
+        ));
+        assert_eq!(submit_calls, 0);
+        assert!(!purpose_has_executable_supervisor(
+            RunPurpose::Execute,
+            true
+        ));
+        assert_eq!(
+            SUPERVISOR_RUNTIME_CAPABILITIES,
+            [birdcode_protocol::RuntimeCapability::DurableRootPlanning]
+        );
+    }
+
+    #[test]
     fn closed_supervisor_cannot_reject_or_reidentify_a_committed_run() {
         let directory = TempDir::new().expect("temporary state should be created");
         let store = Store::open(
@@ -432,6 +597,7 @@ mod tests {
                 submit_calls += 1;
                 Some(Err(SupervisorSubmitError::Closed))
             },
+            false,
         );
         let ResponseOutcome::Success {
             result: ServerResult::Run(first),
@@ -456,6 +622,7 @@ mod tests {
                 submit_calls += 1;
                 Some(Err(SupervisorSubmitError::Closed))
             },
+            false,
         );
         let ResponseOutcome::Success {
             result: ServerResult::Run(replayed),
@@ -513,6 +680,7 @@ mod tests {
                 },
             },
             |_| panic!("an invalid run must not reach supervisor submission"),
+            false,
         );
         assert!(matches!(
             response.outcome,

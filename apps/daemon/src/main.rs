@@ -1,7 +1,8 @@
 use birdcode_backends::{LmStudioBackend, LmStudioConfig, ModelBackend, SecretToken};
 use birdcode_daemon::model_policy::{ModelPolicyError, compile_root_planning_policy_json};
 use birdcode_daemon::{
-    HELP, ParseOutcome, RunSupervisor, RunSupervisorConfig, parse, serve_with_supervisor,
+    BackendManifest, HELP, ParseOutcome, RunSupervisor, RunSupervisorConfig, parse,
+    serve_with_supervisor,
 };
 use birdcode_protocol::RootPlanningExecutionPolicy;
 use birdcode_runtime::{LocalRuntime, RuntimePaths};
@@ -43,20 +44,26 @@ fn run() -> Result<(), Box<dyn Error>> {
     paths.prepare()?;
     let store = Store::open(paths.database(), paths.artifacts())?;
     let mut runtime = LocalRuntime::new(store);
-    let endpoint = options
-        .lmstudio_url
-        .or_else(|| std::env::var("BIRDCODE_LMSTUDIO_URL").ok())
-        .unwrap_or_else(|| DEFAULT_LMSTUDIO_URL.to_owned());
-    let mut backend_config = LmStudioConfig::new(Url::parse(&endpoint)?);
-    backend_config.api_token = std::env::var("LM_STUDIO_API_TOKEN")
-        .ok()
-        .map(SecretToken::new);
-    let backend: Arc<dyn ModelBackend> = Arc::new(LmStudioBackend::new(backend_config)?);
     let supervisor_config = RunSupervisorConfig {
         root_planning_policy,
+        recon_workspace_state_root: options.workspace_state_dir,
         ..RunSupervisorConfig::default()
     };
-    let supervisor = RunSupervisor::start(paths, backend, supervisor_config)?;
+    let supervisor = if let Some(path) = options.backend_config.as_deref() {
+        let registry = BackendManifest::load(path)?.build_registry()?;
+        RunSupervisor::start_with_registry(paths, registry, supervisor_config)?
+    } else {
+        let endpoint = options
+            .lmstudio_url
+            .or_else(|| std::env::var("BIRDCODE_LMSTUDIO_URL").ok())
+            .unwrap_or_else(|| DEFAULT_LMSTUDIO_URL.to_owned());
+        let mut legacy_config = LmStudioConfig::new(Url::parse(&endpoint)?);
+        legacy_config.api_token = std::env::var("LM_STUDIO_API_TOKEN")
+            .ok()
+            .map(SecretToken::new);
+        let backend: Arc<dyn ModelBackend> = Arc::new(LmStudioBackend::new(legacy_config)?);
+        RunSupervisor::start(paths, backend, supervisor_config)?
+    };
     let stdin = io::stdin();
     let stdout = io::stdout();
     let served = serve_with_supervisor(

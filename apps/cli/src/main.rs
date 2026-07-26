@@ -55,7 +55,9 @@ fn run() -> Result<(), Box<dyn Error>> {
         &daemon,
         &data_dir,
         DaemonLaunchOptions {
+            backend_config: options.backend_config.clone(),
             model_policy: options.model_policy.clone(),
+            workspace_state_dir: None,
         },
     )?;
     let initialized = client.initialize("birdcode-cli", env!("CARGO_PKG_VERSION"))?;
@@ -1220,13 +1222,15 @@ fn print_help() {
         "  birdcode doctor [--daemon PATH] [--data-dir PATH]\n",
         "  birdcode session-smoke [--daemon PATH] [--data-dir PATH]\n",
         "  birdcode models [--daemon PATH] [--data-dir PATH]\n",
-        "  birdcode plan --model ID --goal TEXT --model-policy PATH [--workspace PATH] \\\n",
+        "  birdcode plan --model ID --goal TEXT --model-policy PATH --backend-config PATH \\\n",
+        "    [--workspace PATH] \\\n",
         "    [--max-output-tokens N] [--max-wall-time-seconds N] \\\n",
         "    [--reasoning off|low|medium|high] \\\n",
         "    [--daemon PATH] [--data-dir PATH]\n\n",
         "Plan output is emitted only after policy-separated semantic acceptance. Model ids\n",
         "are exact, case-sensitive values from `birdcode models`; BirdCode never guesses\n",
-        "one. The strict policy file pins producer/critic lineages and stage budgets.\n\n",
+        "one. The strict policy file pins producer/critic lineages and stage budgets;\n",
+        "the backend manifest binds those lineages to exact configured deployments.\n\n",
         "BIRDCODE_DAEMON and BIRDCODE_DATA_DIR provide equivalent defaults."
     ));
 }
@@ -1257,19 +1261,28 @@ mod tests {
         validate_cli_typed_critique_binding,
     };
     use birdcode_protocol::{
-        ActorId, ArtifactChunk, ArtifactRef, BackendCatalog, BackendKind, BackendModelIdentity,
-        DiscoveredModel, EventEnvelope, EventId, EventPayload, PlanAcceptanceContract,
-        PlanCandidateBinding, PlanProposalAccepted, PlanProposalId, PlanProposalRejected,
-        PlanProposalRejectionReason, PlanSemanticReviewAccepted, PlanSemanticReviewId,
-        PlanSemanticReviewRejected, PlanSemanticReviewRejectionDisposition,
-        PlanSemanticReviewValidatedVerdict, PlanSemanticReviewValidationReceipt,
-        PlannerInferenceError, PlannerInferenceErrorKind, Provenance, RetryDisposition, RunId,
-        RunState, SessionId, Sha256Digest,
+        ActorId, ArtifactChunk, ArtifactRef, BackendCatalog, BackendInstanceIdentityV1,
+        BackendKind, BackendModelIdentity, BackendTransportIdentityV1, DiscoveredModel,
+        EventEnvelope, EventId, EventPayload, PlanAcceptanceContract, PlanCandidateBinding,
+        PlanProposalAccepted, PlanProposalId, PlanProposalRejected, PlanProposalRejectionReason,
+        PlanSemanticReviewAccepted, PlanSemanticReviewId, PlanSemanticReviewRejected,
+        PlanSemanticReviewRejectionDisposition, PlanSemanticReviewValidatedVerdict,
+        PlanSemanticReviewValidationReceipt, PlannerInferenceError, PlannerInferenceErrorKind,
+        Provenance, RetryDisposition, RunId, RunState, SessionId, Sha256Digest,
     };
 
     fn catalog(models: &[DiscoveredModel]) -> BackendCatalog {
+        let backend_instance = BackendInstanceIdentityV1::new(
+            LM_STUDIO_BACKEND_ID.to_owned(),
+            BackendTransportIdentityV1::HttpOrigin {
+                origin: "http://127.0.0.1:1234".to_owned(),
+            },
+            "cli-catalog-fixture".to_owned(),
+        )
+        .expect("catalog fixture has a valid backend instance");
         serde_json::from_value(serde_json::json!({
             "discovered_at": "2026-07-19T12:00:00Z",
+            "backend_instance": backend_instance,
             "models": models,
         }))
         .expect("catalog fixture should decode")

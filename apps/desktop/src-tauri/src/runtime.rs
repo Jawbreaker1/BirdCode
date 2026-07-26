@@ -11,9 +11,11 @@ use birdcode_protocol::{
     HealthStatus, InitializeResult, InputItem, MAX_ARTIFACT_CHUNK_BYTES, PlanAcceptanceContract,
     PlanCandidateBinding, PlanSemanticReviewAccepted, PlanSemanticReviewRejected,
     PlanSemanticReviewRejectionDisposition, PlanSemanticReviewValidatedVerdict,
-    PlanSemanticReviewValidationReceipt, PlannerInferenceObservation,
+    PlanSemanticReviewValidationReceipt, PlannerAcceptedDirectiveV1, PlannerInferenceObservation,
+    PlannerTurnObservationV1,
     ROOT_PLANNING_POLICY_V1_INITIAL_PLAN_MAX_OUTPUT_TOKENS as MAX_ROOT_PLANNER_OUTPUT_TOKENS,
-    RunId, RunLimits, RunPurpose, RunSpec, RunState, RuntimeCapability, ServerResult, SessionId,
+    RepositoryToolAuthorizationDecisionV2, RepositoryToolObservedTerminalV2, RunId, RunLimits,
+    RunPurpose, RunSpec, RunState, RuntimeCapability, ServerResult, SessionId,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -586,13 +588,16 @@ impl std::error::Error for RuntimeResetError {}
 struct ConnectionKey {
     daemon: PathBuf,
     data_dir: PathBuf,
+    backend_config: Option<PathBuf>,
     model_policy: Option<PathBuf>,
 }
 
 impl ConnectionKey {
     fn launch_options(&self) -> DaemonLaunchOptions {
         DaemonLaunchOptions {
+            backend_config: self.backend_config.clone(),
             model_policy: self.model_policy.clone(),
+            workspace_state_dir: None,
         }
     }
 }
@@ -1110,9 +1115,11 @@ fn resolve_connection_key(app: &tauri::AppHandle) -> Result<ConnectionKey, Strin
     })
     .map_err(|error| error.to_string())?;
     let model_policy = std::env::var_os("BIRDCODE_MODEL_POLICY").map(PathBuf::from);
+    let backend_config = std::env::var_os("BIRDCODE_BACKEND_CONFIG").map(PathBuf::from);
     Ok(ConnectionKey {
         daemon,
         data_dir,
+        backend_config,
         model_policy,
     })
 }
@@ -1723,6 +1730,417 @@ fn project_event(event: &EventEnvelope) -> PlanEventView {
                 "Disposition {:?} · {} required finding(s)",
                 review.disposition,
                 review.required_finding_ids.len()
+            ),
+        ),
+        EventPayload::PlannerTurnPreparedV1(prepared) => (
+            "planner_turn_prepared_v1",
+            "active",
+            "Semantic planner turn prepared",
+            format!(
+                "{:?} · plan revision {} · model {} · {} output tokens reserved",
+                prepared.purpose,
+                prepared.base_plan.revision,
+                prepared.backend_model.model_id,
+                prepared.token_reservation.max_output_tokens
+            ),
+        ),
+        EventPayload::PlannerTurnObservedV1(observed) => match &observed.outcome {
+            PlannerTurnObservationV1::Succeeded { token_usage, .. } => (
+                "planner_turn_observed_v1",
+                "active",
+                "Semantic planner turn observed",
+                format!(
+                    "Turn {} · complete response · {} total tokens",
+                    observed.turn_id, token_usage.total_tokens
+                ),
+            ),
+            PlannerTurnObservationV1::Failed { error } => (
+                "planner_turn_observed_v1",
+                "danger",
+                "Semantic planner turn failed",
+                format!(
+                    "Turn {} · typed failure {:?} · retry {:?}",
+                    observed.turn_id, error.kind, error.retry
+                ),
+            ),
+        },
+        EventPayload::PlannerTurnUnknownV1(unknown) => (
+            "planner_turn_unknown_v1",
+            "danger",
+            "Semantic planner outcome unknown",
+            format!(
+                "Turn {} · {:?} at {:?}",
+                unknown.turn_id, unknown.reason, unknown.boundary
+            ),
+        ),
+        EventPayload::PlannerTurnAcceptedV1(accepted) => match &accepted.resolved_directive {
+            PlannerAcceptedDirectiveV1::Execute { work_order } => (
+                "planner_turn_accepted_v1",
+                "success",
+                "Planner selected work",
+                format!(
+                    "{:?} · work order {} revision {} · resulting plan revision {}",
+                    accepted.purpose,
+                    work_order.work_order_id,
+                    work_order.revision,
+                    accepted.resulting_plan.revision
+                ),
+            ),
+            PlannerAcceptedDirectiveV1::Delegate { delegations } => (
+                "planner_turn_accepted_v1",
+                "success",
+                "Planner delegated work",
+                format!(
+                    "{:?} · {} delegation(s) covering {} work order(s) · resulting plan revision {}",
+                    accepted.purpose,
+                    delegations.len(),
+                    delegations
+                        .iter()
+                        .map(|delegation| delegation.work_orders.len())
+                        .sum::<usize>(),
+                    accepted.resulting_plan.revision
+                ),
+            ),
+            PlannerAcceptedDirectiveV1::Clarify { requests } => (
+                "planner_turn_accepted_v1",
+                "warning",
+                "Planner requested clarification",
+                format!(
+                    "{:?} · {} clarification request(s) · resulting plan revision {}",
+                    accepted.purpose,
+                    requests.len(),
+                    accepted.resulting_plan.revision
+                ),
+            ),
+            PlannerAcceptedDirectiveV1::Escalate { requests } => (
+                "planner_turn_accepted_v1",
+                "warning",
+                "Planner requested escalation",
+                format!(
+                    "{:?} · {} escalation request(s) · resulting plan revision {}",
+                    accepted.purpose,
+                    requests.len(),
+                    accepted.resulting_plan.revision
+                ),
+            ),
+            PlannerAcceptedDirectiveV1::FinishPendingGate { claims } => (
+                "planner_turn_accepted_v1",
+                "active",
+                "Planner proposed completion",
+                format!(
+                    "{:?} · {} finish claim(s) await the completion gate · resulting plan revision {}",
+                    accepted.purpose,
+                    claims.len(),
+                    accepted.resulting_plan.revision
+                ),
+            ),
+        },
+        EventPayload::PlannerTurnRejectedV1(rejected) => (
+            "planner_turn_rejected_v1",
+            "danger",
+            "Semantic planner turn rejected",
+            format!(
+                "Turn {} · {:?} · typed validation reason {:?}",
+                rejected.turn_id, rejected.purpose, rejected.reason
+            ),
+        ),
+        EventPayload::ReconCompletionGateAcceptedV1(accepted) => (
+            "recon_completion_gate_accepted_v1",
+            "success",
+            "Reconnaissance completion proven",
+            format!(
+                "Gate {} · plan revision {} · receipt {}",
+                accepted.gate_id,
+                accepted.resulting_plan.revision,
+                accepted.receipt_digest.as_str()
+            ),
+        ),
+        EventPayload::RepositoryWriterLeaseRevoked(revoked) => (
+            "repository_writer_lease_revoked",
+            "success",
+            "Repository writers revoked",
+            format!(
+                "Claim generation {} · evidence {}",
+                revoked.claim_generation,
+                revoked.evidence_digest.as_str()
+            ),
+        ),
+        EventPayload::RepositorySnapshotCaptureClaimAdoptedV1(adopted) => (
+            "repository_snapshot_capture_claim_adopted_v1",
+            "active",
+            "Snapshot capture claim renewed",
+            format!(
+                "Snapshot {} · claim generation {} → {}",
+                adopted.snapshot_id, adopted.prior_claim_generation, adopted.new_claim_generation
+            ),
+        ),
+        EventPayload::RepositorySnapshotCleanupGrantedV1(granted) => (
+            "repository_snapshot_cleanup_granted_v1",
+            "warning",
+            "Snapshot cleanup authorized",
+            format!(
+                "{:?} · grant generation {} · snapshot {}",
+                granted.kind, granted.cleanup_grant_generation, granted.snapshot_id
+            ),
+        ),
+        EventPayload::RepositorySnapshotCaptureAbandonedV1(abandoned) => (
+            "repository_snapshot_capture_abandoned_v1",
+            "warning",
+            "Snapshot capture abandoned",
+            format!(
+                "Lease {} · recovery {}",
+                abandoned.lease_id, abandoned.recovery_id
+            ),
+        ),
+        EventPayload::RepositorySnapshotCaptureAbandonedV2(abandoned) => (
+            "repository_snapshot_capture_abandoned_v2",
+            "warning",
+            "Snapshot capture recovery closure committed",
+            format!(
+                "Lease {} · recovery {} · grant generation {}",
+                abandoned.lease_id, abandoned.recovery_id, abandoned.cleanup_grant_generation
+            ),
+        ),
+        EventPayload::RepositorySnapshotLeaseIssued(issued) => (
+            "repository_snapshot_lease_issued",
+            "success",
+            "Read-only repository snapshot issued",
+            format!(
+                "Snapshot {} · lease {}",
+                issued.snapshot.snapshot_id, issued.snapshot.immutability_lease.lease_id
+            ),
+        ),
+        EventPayload::RepositorySnapshotLeaseReleased(released) => (
+            "repository_snapshot_lease_released",
+            "neutral",
+            "Repository snapshot released",
+            format!(
+                "Lease {} · release {}",
+                released.lease_event_id,
+                released.release_digest.as_str()
+            ),
+        ),
+        EventPayload::RepositorySnapshotReleaseReconciledV1(reconciled) => (
+            "repository_snapshot_release_reconciled_v1",
+            "success",
+            "Snapshot release reconciled",
+            format!(
+                "Lease {} · recovery {}",
+                reconciled.lease_id, reconciled.recovery_id
+            ),
+        ),
+        EventPayload::RepositorySnapshotReleaseReconciledV2(reconciled) => (
+            "repository_snapshot_release_reconciled_v2",
+            "success",
+            "Snapshot release recovery closure committed",
+            format!(
+                "Lease {} · recovery {} · grant generation {}",
+                reconciled.lease_id, reconciled.recovery_id, reconciled.cleanup_grant_generation
+            ),
+        ),
+        EventPayload::WorkspaceRecoveryFinalizedV1(finalized) => (
+            "workspace_recovery_finalized_v1",
+            "success",
+            "Workspace recovery finalized",
+            format!(
+                "Recovery {} · finalization {}",
+                finalized.recovery_id, finalized.finalization_id
+            ),
+        ),
+        EventPayload::RepositoryBrokerEpochActivatedV1(activated) => (
+            "repository_broker_epoch_activated_v1",
+            "neutral",
+            "Repository broker epoch activated",
+            format!(
+                "Broker {} active · {} prior broker epoch(s) closed",
+                activated.state.active_broker_instance_id,
+                activated.state.closed_broker_instance_ids.len()
+            ),
+        ),
+        EventPayload::ChildDelegationAuthorized(authorized) => (
+            "child_delegation_authorized",
+            "neutral",
+            "Explorer delegation authorized",
+            format!(
+                "Actor {} · work order {}",
+                authorized.spec.child_actor_id, authorized.spec.work_order_id
+            ),
+        ),
+        EventPayload::ChildDelegationAuthorizedV2(authorized) => (
+            "child_delegation_authorized_v2",
+            "neutral",
+            "Planner-v2 explorer delegation authorized",
+            format!(
+                "Actor {} · work order {} · planner turn {}",
+                authorized.spec.child_actor_id,
+                authorized.planner_work_order.work_order_id,
+                authorized.planner_turn_id
+            ),
+        ),
+        EventPayload::ChildWorkOrderIssued(issued) => (
+            "child_work_order_issued",
+            "neutral",
+            "Explorer work order issued",
+            format!(
+                "Actor {} · {:?} · {} read-only tool grant(s)",
+                issued.spec.child_actor_id,
+                issued.spec.role,
+                issued.spec.repository_authority.tool_grants.len()
+            ),
+        ),
+        EventPayload::ChildExecutionClaimAdopted(adopted) => (
+            "child_execution_claim_adopted",
+            "active",
+            "Explorer claim adopted",
+            format!(
+                "{:?} · claim generation {}",
+                adopted.kind, adopted.new_claim_generation
+            ),
+        ),
+        EventPayload::ChildExecutionStarted(started) => (
+            "child_execution_started",
+            "active",
+            "Explorer attempt started",
+            format!(
+                "Attempt {} · model {}",
+                started.binding.attempt_id, started.backend_model.model_id
+            ),
+        ),
+        EventPayload::ChildModelInferencePrepared(prepared) => (
+            "child_model_inference_prepared",
+            "active",
+            "Explorer inference prepared",
+            format!(
+                "Model turn {} · {} output tokens reserved",
+                prepared.model_call_ordinal, prepared.token_reservation.max_output_tokens
+            ),
+        ),
+        EventPayload::ChildModelInferencePreparedV2(prepared) => (
+            "child_model_inference_prepared_v2",
+            "active",
+            "Explorer inference prepared",
+            format!(
+                "Model turn {} · model {} · {} supplied tool result(s) · {} output tokens reserved",
+                prepared.prepared.model_call_ordinal,
+                prepared.prepared.backend_model.model_id,
+                prepared.supplied_tool_results.len(),
+                prepared.prepared.token_reservation.max_output_tokens
+            ),
+        ),
+        EventPayload::ChildModelInferenceObserved(observed) => (
+            "child_model_inference_observed",
+            "active",
+            "Explorer inference observed",
+            format!(
+                "Model turn {} · {:?}",
+                observed.model_call_ordinal, observed.outcome
+            ),
+        ),
+        EventPayload::ChildModelInferenceOutcomeUnknown(unknown) => (
+            "child_model_inference_outcome_unknown",
+            "danger",
+            "Explorer inference outcome unknown",
+            format!("{:?} at {:?}", unknown.reason, unknown.boundary),
+        ),
+        EventPayload::ChildToolPrepared(prepared) => (
+            "child_tool_prepared",
+            "active",
+            "Explorer tool prepared",
+            format!(
+                "Tool turn {} · {:?}",
+                prepared.tool_ordinal,
+                prepared.operation.kind()
+            ),
+        ),
+        EventPayload::ChildToolPreparedV2(prepared) => match &prepared.authorization {
+            RepositoryToolAuthorizationDecisionV2::Authorized => (
+                "child_tool_prepared_v2",
+                "active",
+                "Explorer repository tool prepared",
+                format!(
+                    "Tool turn {} · {:?} · broker call {}",
+                    prepared.tool_ordinal,
+                    prepared.operation.kind(),
+                    prepared.broker_call_sequence
+                ),
+            ),
+            RepositoryToolAuthorizationDecisionV2::Denied { denial } => (
+                "child_tool_prepared_v2",
+                "warning",
+                "Explorer repository tool denied",
+                format!(
+                    "Tool turn {} · {:?} · typed denial {:?}",
+                    prepared.tool_ordinal,
+                    prepared.operation.kind(),
+                    denial
+                ),
+            ),
+        },
+        EventPayload::ChildToolObserved(observed) => (
+            "child_tool_observed",
+            "active",
+            "Explorer tool observed",
+            format!("Call {} · {:?}", observed.tool_call_id, observed.outcome),
+        ),
+        EventPayload::ChildToolObservedV2(observed) => match &observed.terminal {
+            RepositoryToolObservedTerminalV2::Succeeded { result_artifact } => (
+                "child_tool_observed_v2",
+                "success",
+                "Explorer repository tool succeeded",
+                format!(
+                    "Call {} · result {}",
+                    observed.tool_call_id,
+                    result_artifact.sha256.as_str()
+                ),
+            ),
+            RepositoryToolObservedTerminalV2::Failed { failure, .. } => (
+                "child_tool_observed_v2",
+                "danger",
+                "Explorer repository tool failed",
+                format!(
+                    "Call {} · typed failure {:?}",
+                    observed.tool_call_id, failure
+                ),
+            ),
+            RepositoryToolObservedTerminalV2::AuthorizationDenied { denial, .. } => (
+                "child_tool_observed_v2",
+                "warning",
+                "Explorer repository tool denied",
+                format!("Call {} · typed denial {:?}", observed.tool_call_id, denial),
+            ),
+        },
+        EventPayload::ChildToolOutcomeUnknown(unknown) => (
+            "child_tool_outcome_unknown",
+            "danger",
+            "Explorer tool outcome unknown",
+            format!("{:?} at {:?}", unknown.reason, unknown.boundary),
+        ),
+        EventPayload::ChildToolOutcomeUnknownV2(unknown) => (
+            "child_tool_outcome_unknown_v2",
+            "danger",
+            "Explorer repository tool outcome unknown",
+            format!(
+                "Call {} · {:?} at {:?}",
+                unknown.tool_call_id, unknown.reason, unknown.boundary
+            ),
+        ),
+        EventPayload::ChildHandoffCommitted(handoff) => (
+            "child_handoff_committed",
+            "success",
+            "Explorer handoff retained",
+            format!("Handoff {} · evidence hash bound", handoff.handoff_id),
+        ),
+        EventPayload::ChildExecutionFinished(finished) => (
+            "child_execution_finished",
+            match finished.outcome {
+                birdcode_protocol::ChildExecutionOutcome::Succeeded { .. } => "success",
+                birdcode_protocol::ChildExecutionOutcome::Failed { .. } => "danger",
+                birdcode_protocol::ChildExecutionOutcome::Cancelled { .. } => "warning",
+            },
+            "Explorer attempt finished",
+            format!(
+                "{:?} · {} model call(s) · {} tool call(s)",
+                finished.outcome, finished.completed_model_calls, finished.completed_tool_calls
             ),
         ),
         EventPayload::BackendEvent { event_type, .. } => (
@@ -2810,6 +3228,7 @@ mod tests {
         let alternate_key = ConnectionKey {
             daemon: PathBuf::from("/birdcode-test/alternate/birdcode-daemon"),
             data_dir: PathBuf::from("/birdcode-test/alternate/data"),
+            backend_config: None,
             model_policy: None,
         };
 
@@ -3015,6 +3434,7 @@ mod tests {
         ConnectionKey {
             daemon: PathBuf::from("/birdcode-test/nonexistent/birdcode-daemon"),
             data_dir: PathBuf::from("/birdcode-test/nonexistent/data"),
+            backend_config: None,
             model_policy: None,
         }
     }
@@ -3101,8 +3521,17 @@ mod tests {
 
     #[test]
     fn model_projection_rejects_ambiguous_exact_identities() {
+        let backend_instance = birdcode_protocol::BackendInstanceIdentityV1::new(
+            "lmstudio".to_owned(),
+            birdcode_protocol::BackendTransportIdentityV1::HttpOrigin {
+                origin: "http://127.0.0.1:1234".to_owned(),
+            },
+            "desktop-model-projection-test".to_owned(),
+        )
+        .expect("backend instance fixture should be valid and digest-bound");
         let catalog: BackendCatalog = serde_json::from_value(serde_json::json!({
             "discovered_at": "2026-07-19T16:00:00Z",
+            "backend_instance": backend_instance,
             "models": [
                 {
                     "identity": {

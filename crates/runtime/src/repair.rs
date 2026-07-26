@@ -154,7 +154,7 @@ impl fmt::Display for PlanRepairCompileError {
             ),
             Self::SubagentsNotAuthorized { requested } => write!(
                 formatter,
-                "read-only plan repair cannot exercise {requested} subagent grants"
+                "subagent authority {requested} does not match the typed plan-repair purpose"
             ),
             Self::ZeroMaxOutputTokens => {
                 formatter.write_str("repair max_output_tokens must be greater than zero")
@@ -436,7 +436,10 @@ fn validate_inputs(
     repair_model: &ModelId,
     max_output_tokens: u32,
 ) -> Result<(), PlanRepairCompileError> {
-    if run.spec.purpose != RunPurpose::PlanOnly {
+    if !matches!(
+        run.spec.purpose,
+        RunPurpose::PlanOnly | RunPurpose::ParallelRepositoryReconnaissanceV1
+    ) {
         return Err(PlanRepairCompileError::UnsupportedPurpose {
             actual: run.spec.purpose,
         });
@@ -487,7 +490,12 @@ fn validate_inputs(
             resolved: repair_model.as_str().to_owned(),
         });
     }
-    if run.spec.limits.max_subagents != 0 {
+    let required_subagents = match run.spec.purpose {
+        RunPurpose::PlanOnly => 0,
+        RunPurpose::ParallelRepositoryReconnaissanceV1 => 2,
+        RunPurpose::Execute => unreachable!("unsupported purpose returned above"),
+    };
+    if run.spec.limits.max_subagents != required_subagents {
         return Err(PlanRepairCompileError::SubagentsNotAuthorized {
             requested: run.spec.limits.max_subagents,
         });

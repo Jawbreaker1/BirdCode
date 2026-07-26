@@ -1,7 +1,7 @@
 use birdcode_backends::{
-    BackendErrorKind, CapabilityState, HttpLimits, LmStudioBackend, LmStudioConfig, Message,
-    MessageRole, ModelBackend, ModelLoadState, NativeDiscoveryEvidence, NativeMatch,
-    NativeMatchKey, ReasoningSetting, SecretToken, StructuredInferenceRequest,
+    BackendDeploymentId, BackendErrorKind, CapabilityState, HttpLimits, LmStudioBackend,
+    LmStudioConfig, Message, MessageRole, ModelBackend, ModelLoadState, NativeDiscoveryEvidence,
+    NativeMatch, NativeMatchKey, ReasoningSetting, SecretToken, StructuredInferenceRequest,
     StructuredOutputSpec,
 };
 use serde_json::{Value, json};
@@ -265,7 +265,7 @@ async fn discovery_joins_only_exact_ids_and_preserves_reported_metadata() {
             "quantization": {"name": "Q8_0", "bits_per_weight": 8},
             "loaded_instances": [{
                 "id": "google/gemma-4-26b-a4b@q8_0",
-                "config": {"context_length": 121_088}
+                "config": {"context_length": 121_088, "parallel": 4}
             }],
             "max_context_length": 262_144,
             "capabilities": {
@@ -291,17 +291,17 @@ async fn discovery_joins_only_exact_ids_and_preserves_reported_metadata() {
     ])
     .await;
 
-    let catalog = backend(&server)
-        .discover_models()
-        .await
-        .expect("discovery succeeds");
+    let backend = backend(&server);
+    let catalog = backend.discover_models().await.expect("discovery succeeds");
 
+    assert_eq!(&catalog.backend_instance, backend.instance_identity());
     assert_eq!(catalog.models.len(), 2);
     let gemma = &catalog.models[0];
     assert_eq!(gemma.id.as_str(), "google/gemma-4-26b-a4b@q8_0");
     assert_eq!(gemma.load_state, ModelLoadState::Loaded);
     assert_eq!(gemma.maximum_context_tokens, Some(262_144));
     assert_eq!(gemma.loaded_instances[0].context_length, Some(121_088));
+    assert_eq!(gemma.loaded_instances[0].parallel_capacity, Some(4));
     assert_eq!(gemma.capabilities.vision, CapabilityState::Supported);
     assert_eq!(
         gemma.capabilities.trained_for_tool_use,
@@ -486,6 +486,12 @@ async fn multilingual_structured_roundtrip_is_strict_and_preserves_utf8() {
     assert_eq!(
         response.evidence.response_body_sha256,
         Some(provider_body_sha256)
+    );
+    assert!(
+        backend
+            .instance_identity()
+            .matches_response_evidence(&response.evidence),
+        "success evidence must bind the exact configured origin and instance"
     );
 
     let captured = server.captured().await;
@@ -1109,12 +1115,23 @@ async fn redirects_are_not_followed_with_discovery_credentials() {
     let mut config = LmStudioConfig::new(source.base_url.clone());
     config.api_token = Some(SecretToken::new("stay-on-origin"));
 
-    let error = LmStudioBackend::new(config)
-        .expect("loopback config is valid")
+    let backend = LmStudioBackend::new(config).expect("loopback config is valid");
+    let expected_instance = backend.instance_identity().clone();
+    let error = backend
         .discover_models()
         .await
         .expect_err("redirect is surfaced rather than followed");
     assert_eq!(error.kind, BackendErrorKind::HttpStatus);
+    assert_eq!(error.backend_instance.as_deref(), Some(&expected_instance));
+    assert!(
+        error
+            .evidence
+            .as_ref()
+            .and_then(|evidence| evidence.endpoint.as_deref())
+            .is_some_and(|endpoint| expected_instance
+                .endpoint_origin()
+                .matches_endpoint(endpoint))
+    );
     assert!(target.captured().await.is_empty());
     let source_requests = source.captured().await;
     assert_eq!(source_requests.len(), 1);
@@ -1124,6 +1141,39 @@ async fn redirects_are_not_followed_with_discovery_credentials() {
             .get("authorization")
             .map(String::as_str),
         Some("Bearer stay-on-origin")
+    );
+}
+
+#[test]
+fn same_lmstudio_provider_and_deployment_at_different_origins_are_not_equivalent() {
+    let deployment =
+        BackendDeploymentId::new("configured-lmstudio-node").expect("deployment label is valid");
+    let mut config_a =
+        LmStudioConfig::new(Url::parse("http://127.0.0.1:1234/").expect("origin A parses"));
+    config_a.deployment_id = Some(deployment.clone());
+    let mut config_b =
+        LmStudioConfig::new(Url::parse("http://127.0.0.1:1235/").expect("origin B parses"));
+    config_b.deployment_id = Some(deployment);
+    let backend_a = LmStudioBackend::new(config_a).expect("origin A config is valid");
+    let backend_b = LmStudioBackend::new(config_b).expect("origin B config is valid");
+
+    assert_eq!(backend_a.backend_id(), backend_b.backend_id());
+    assert_eq!(
+        backend_a.instance_identity().configured_deployment_id(),
+        backend_b.instance_identity().configured_deployment_id()
+    );
+    assert_eq!(
+        backend_a.instance_identity().endpoint_origin().as_str(),
+        "http://127.0.0.1:1234"
+    );
+    assert_eq!(
+        backend_b.instance_identity().endpoint_origin().as_str(),
+        "http://127.0.0.1:1235"
+    );
+    assert_ne!(backend_a.instance_identity(), backend_b.instance_identity());
+    assert_ne!(
+        backend_a.instance_identity().identity_sha256(),
+        backend_b.instance_identity().identity_sha256()
     );
 }
 

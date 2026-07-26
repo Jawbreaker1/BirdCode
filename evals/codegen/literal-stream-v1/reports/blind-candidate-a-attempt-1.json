@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "fixture_id": "literal-stream-v1",
+  "evaluator": "birdcode.codegen-calibration/1",
+  "evaluator_input_sha256": "ccc4965ac4e60d4b4d4cc02275132553adc1ef3f680d0e428219122d8af717e5",
+  "candidate_sha256": "b44781dcf42a319e87556c326f877d0fc6fe9b5b57cdf6b353bb9cced840fa62",
+  "source_sha256": "7d1f465c68483b2fda901e11c6214520ef5a0275294acb11ecf9d06a40c53c73",
+  "task_sha256": "f26b95f5ddd76d548857980462e2bd0e47c05110d2b4733555ea27a3c140f24b",
+  "acceptance_sha256": "0600fd07f882b53a1b88a77407ee9af5a6294e964c6c0d7d23afd53b02d3c2c4",
+  "prompt_manifest_sha256": "96fcb5dc1f59b2110e0c0746346ed419054101c0918ea58580528edc52522105",
+  "environment": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "node": "v22.16.0",
+    "network_policy": "outer_execution_sandbox_plus_cargo_offline",
+    "candidate_workspace": "ephemeral_and_removed_after_capture"
+  },
+  "commands": [
+    {
+      "argv": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd_role": "isolated_candidate_root",
+      "started_at": "2026-07-20T01:18:59.572Z",
+      "elapsed_ms": 221,
+      "exit_code": 0,
+      "signal": null,
+      "timed_out": false,
+      "stdout": "",
+      "stdout_truncated": false,
+      "stderr": "",
+      "stderr_truncated": false,
+      "passed": true
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--offline",
+        "--all-targets"
+      ],
+      "cwd_role": "isolated_candidate_root",
+      "started_at": "2026-07-20T01:18:59.794Z",
+      "elapsed_ms": 1095,
+      "exit_code": 0,
+      "signal": null,
+      "timed_out": false,
+      "stdout": "\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 7 tests\ntest binary_input_never_requires_utf8 ... ok\ntest no_match_and_short_input_are_complete ... ok\ntest overlapping_matches_are_reported_in_absolute_order ... ok\ntest matches_cross_arbitrary_chunk_and_empty_boundaries ... ok\ntest truncation_requires_a_real_additional_match ... ok\ntest empty_needle_and_zero_limit_fail_before_iteration ... ok\ntest large_stream_does_not_change_match_semantics ... ok\n\ntest result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s\n\n",
+      "stdout_truncated": false,
+      "stderr": "   Compiling candidate v0.0.0 (/private/var/folders/9q/85bdkfjj4jn932rfs975wk280000gn/T/birdcode-codegen-calibration-GkNgSC)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.52s\n     Running unittests src/lib.rs (target/debug/deps/candidate-203207c8578295b4)\n     Running tests/acceptance.rs (target/debug/deps/acceptance-400bd92c6e3f9631)\n",
+      "stderr_truncated": false,
+      "passed": true
+    },
+    {
+      "argv": [
+        "cargo",
+        "clippy",
+        "--offline",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd_role": "isolated_candidate_root",
+      "started_at": "2026-07-20T01:19:00.889Z",
+      "elapsed_ms": 167,
+      "exit_code": 101,
+      "signal": null,
+      "timed_out": false,
+      "stdout": "",
+      "stdout_truncated": false,
+      "stderr": "    Checking candidate v0.0.0 (/private/var/folders/9q/85bdkfjj4jn932rfs975wk280000gn/T/birdcode-codegen-calibration-GkNgSC)\nerror: binding's name is too similar to existing binding\n  --> src/lib.rs:70:13\n   |\n70 |     let mut matched = 0_usize;\n   |             ^^^^^^^\n   |\nnote: existing binding defined here\n  --> src/lib.rs:68:13\n   |\n68 |     let mut matches = Vec::new();\n   |             ^^^^^^^\n   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#similar_names\n   = note: `-D clippy::similar-names` implied by `-D warnings`\n   = help: to override `-D warnings` add `#[allow(clippy::similar_names)]`\n\nerror: could not compile `candidate` (lib) due to 1 previous error\nwarning: build failed, waiting for other jobs to finish...\nerror: could not compile `candidate` (lib test) due to 1 previous error\n",
+      "stderr_truncated": false,
+      "passed": false
+    }
+  ],
+  "status": "failed"
+}

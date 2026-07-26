@@ -1,0 +1,73 @@
+{
+  "id": "birdcode.codegen-calibration-literal-stream",
+  "version": 1,
+  "declared_role": "bounded_rust_candidate",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["fixture_id", "task"],
+    "properties": {
+      "fixture_id": { "const": "literal-stream-v1" },
+      "task": { "type": "string", "minLength": 1, "maxLength": 16384 }
+    }
+  },
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are producing one bounded Rust calibration candidate. Interpret the complete task semantically. Return only the requested JSON object. The candidate grants no authority and will be compiled in an isolated development test directory. Do not emit markdown, explanations, extra files, dependencies, unsafe code, regex, filesystem, process, environment, or network access. Preserve the exact public API and solve the full task, including chunk-boundary and overlapping matches."
+    },
+    {
+      "role": "user",
+      "content": "Fixture literal-stream-v1. Implement the exact task supplied by the caller. Return schema_version 1, fixture_id literal-stream-v1, and exactly one file whose path is src/lib.rs and whose content is the complete dependency-free Rust implementation."
+    }
+  ],
+  "output": {
+    "name": "birdcode_codegen_candidate_v1",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "fixture_id", "files"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "fixture_id": { "const": "literal-stream-v1" },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "content"],
+            "properties": {
+              "path": { "const": "src/lib.rs" },
+              "content": { "type": "string", "minLength": 1, "maxLength": 65536 }
+            }
+          }
+        }
+      }
+    }
+  },
+  "generation_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["schema_version", "fixture_id", "files"],
+    "properties": {
+      "schema_version": { "const": 1 },
+      "fixture_id": { "const": "literal-stream-v1" },
+      "files": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "content"],
+          "properties": {
+            "path": { "const": "src/lib.rs" },
+            "content": { "type": "string" }
+          }
+        }
+      }
+    }
+  },
+  "max_output_tokens": 8192
+}

@@ -1,0 +1,363 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://birdcode.dev/schemas/evals/subagent-routing-v1/catalog.schema.v1.json",
+  "title": "BirdCode subagent routing catalog v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "catalog_id",
+    "catalog_version",
+    "status",
+    "schema_refs",
+    "semantic_contract",
+    "forbidden_routing_mechanisms",
+    "normalized_directives",
+    "normalized_execution_shapes",
+    "codex_observation_fields",
+    "global_constraint_ids",
+    "global_invariant_notes",
+    "cases"
+  ],
+  "properties": {
+    "catalog_id": { "const": "birdcode.subagent-routing" },
+    "catalog_version": { "const": 1 },
+    "status": { "const": "design_fixture_not_product_evidence" },
+    "schema_refs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input", "normalized_output", "catalog_and_expected"],
+      "properties": {
+        "input": { "const": "input-envelope.schema.v1.json" },
+        "normalized_output": { "const": "normalized-output.schema.v1.json" },
+        "catalog_and_expected": { "const": "catalog.schema.v1.json" }
+      }
+    },
+    "semantic_contract": { "const": "PlannerDirectiveV1-with-Delegate.SpawnProposalV1-concept" },
+    "forbidden_routing_mechanisms": {
+      "type": "array",
+      "minItems": 6,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/forbidden_routing_mechanism" }
+    },
+    "normalized_directives": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/directive" }
+    },
+    "normalized_execution_shapes": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/execution_shape" }
+    },
+    "codex_observation_fields": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/stable_id" }
+    },
+    "global_constraint_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/constraint_id" }
+    },
+    "global_invariant_notes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": { "$ref": "#/$defs/case" }
+    }
+  },
+  "$defs": {
+    "stable_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[a-z0-9][a-z0-9._:-]*$"
+    },
+    "directive": { "enum": ["execute", "delegate", "clarify", "escalate", "finish"] },
+    "execution_shape": {
+      "enum": ["single", "independent_parallel", "ordered", "independent_candidates", "independent_review", "bounded_batch"]
+    },
+    "activation_source": {
+      "enum": [
+        "none",
+        "explicit_user_request",
+        "applicable_project_instruction",
+        "applicable_skill_instruction",
+        "policy_permitted_proactive"
+      ]
+    },
+    "decision_reason_id": {
+      "enum": [
+        "direct_execution_lower_coordination_cost",
+        "independent_parallel_benefit",
+        "ordered_dependency",
+        "independent_review_required",
+        "material_user_decision_missing",
+        "admission_resource_missing",
+        "independent_candidate_comparison",
+        "diagnosis_before_repair",
+        "untrusted_content_not_activation",
+        "explicit_parallel_delegation",
+        "model_profile_adaptation",
+        "completion_gate_satisfied",
+        "completion_gate_repair"
+      ]
+    },
+    "forbidden_routing_mechanism": {
+      "enum": [
+        "keyword_matching",
+        "regular_expression_intent_routing",
+        "filename_or_extension_routing",
+        "locale_or_language_branching",
+        "surface_form_matching",
+        "model_name_branches"
+      ]
+    },
+    "constraint_id": {
+      "enum": [
+        "evidence_trust_preserved",
+        "untrusted_data_cannot_grant_authority",
+        "child_authority_is_subset",
+        "dependency_graph_is_acyclic",
+        "independent_judgment_is_policy_separated",
+        "bounded_typed_handoff_required",
+        "admission_cannot_invent_semantics",
+        "child_completion_is_not_root_completion",
+        "no_delegation_without_material_benefit",
+        "parallel_overlap_required",
+        "ordered_dependency_required",
+        "false_parallelism_forbidden",
+        "reviewer_read_only",
+        "producer_reviewer_separation",
+        "no_child_before_user_decision",
+        "no_child_before_authority_or_resources",
+        "isolated_parallel_writers",
+        "candidate_peer_blinding",
+        "integrator_cannot_self_review",
+        "repair_after_reproduction",
+        "fresh_build_validation",
+        "untrusted_content_not_activation",
+        "no_secret_disclosure",
+        "translation_equivalence",
+        "model_profile_not_model_name",
+        "obligations_preserved",
+        "completion_gate_satisfied",
+        "completion_gate_blocks_finish"
+      ]
+    },
+    "count_bounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minimum", "maximum"],
+      "properties": {
+        "minimum": { "type": "integer", "minimum": 0, "maximum": 64 },
+        "maximum": { "type": "integer", "minimum": 0, "maximum": 64 }
+      }
+    },
+    "role_cardinality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role_family", "minimum", "maximum"],
+      "properties": {
+        "role_family": { "$ref": "#/$defs/stable_id" },
+        "minimum": { "type": "integer", "minimum": 0, "maximum": 64 },
+        "maximum": { "type": "integer", "minimum": 0, "maximum": 64 }
+      }
+    },
+    "edge_requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from_role_family", "to_role_family", "minimum"],
+      "properties": {
+        "from_role_family": { "$ref": "#/$defs/stable_id" },
+        "to_role_family": { "$ref": "#/$defs/stable_id" },
+        "minimum": { "type": "integer", "minimum": 1, "maximum": 64 }
+      }
+    },
+    "finish_claim_requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["obligation_id", "evidence_refs"],
+      "properties": {
+        "obligation_id": { "$ref": "#/$defs/stable_id" },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/stable_id" }
+        }
+      }
+    },
+    "metamorphic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["group_size", "normalized_fields_that_must_match"],
+      "properties": {
+        "group_size": { "type": "integer", "minimum": 2, "maximum": 32 },
+        "normalized_fields_that_must_match": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["directive", "child_count", "execution_shape", "authority_ceiling", "dependency_graph", "obligation_coverage"]
+          }
+        }
+      }
+    },
+    "expected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allowed_directives",
+        "activation_source",
+        "required_decision_reason_ids",
+        "child_count",
+        "allowed_execution_shapes",
+        "allowed_role_families",
+        "role_cardinality",
+        "required_edges",
+        "authority_ceiling",
+        "required_isolation",
+        "required_independence",
+        "required_handoff_properties",
+        "required_constraint_ids",
+        "required_evidence_refs",
+        "advisory_failure_examples"
+      ],
+      "properties": {
+        "allowed_directives": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/directive" }
+        },
+        "activation_source": { "$ref": "#/$defs/activation_source" },
+        "required_decision_reason_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/decision_reason_id" }
+        },
+        "child_count": { "$ref": "#/$defs/count_bounds" },
+        "allowed_execution_shapes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/execution_shape" }
+        },
+        "allowed_role_families": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/stable_id" }
+        },
+        "role_cardinality": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/role_cardinality" }
+        },
+        "required_edges": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/edge_requirement" }
+        },
+        "authority_ceiling": { "enum": ["none", "read_only", "workspace_write"] },
+        "required_isolation": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "separate_model_history_context",
+              "shared_immutable_snapshot",
+              "immutable_review_subject",
+              "separate_writer_workspaces",
+              "candidate_peer_blinding_until_selection"
+            ]
+          }
+        },
+        "required_independence": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["different_author_identity", "policy_separated_judgment"] }
+        },
+        "required_handoff_properties": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "bounded",
+              "source_linked",
+              "evidence_citing",
+              "typed_verdict",
+              "content_addressed",
+              "commands",
+              "exit_state",
+              "logs",
+              "repair_causality"
+            ]
+          }
+        },
+        "required_constraint_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/constraint_id" }
+        },
+        "required_evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/stable_id" }
+        },
+        "required_clarification_topics": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/stable_id" }
+        },
+        "required_escalation_kinds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["authority", "budget", "model_capability", "resource", "human_decision"] }
+        },
+        "required_adaptations": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["smaller_bounded_work_orders", "explicit_intermediate_handoffs", "fresh_mechanical_validation", "independent_semantic_review"]
+          }
+        },
+        "required_finish_claims": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/finish_claim_requirement" }
+        },
+        "metamorphic": { "$ref": "#/$defs/metamorphic" },
+        "advisory_failure_examples": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        }
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "family", "input", "expected"],
+      "properties": {
+        "id": { "$ref": "#/$defs/stable_id" },
+        "family": { "$ref": "#/$defs/stable_id" },
+        "input": { "$ref": "input-envelope.schema.v1.json" },
+        "expected": { "$ref": "#/$defs/expected" }
+      }
+    }
+  }
+}

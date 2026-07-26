@@ -180,20 +180,26 @@ name = "birdcode-daemon"
 version = "0.1.0"
 dependencies = [
  "birdcode-backends",
+ "birdcode-orchestrator",
  "birdcode-prompting",
  "birdcode-protocol",
  "birdcode-runtime",
  "birdcode-store",
+ "birdcode-tooling",
+ "birdcode-workspace",
  "chrono",
  "fs2",
+ "jsonschema",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -249,8 +255,13 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "jsonschema",
+ "quote",
  "serde",
  "serde_json",
+ "sha2",
+ "syn 2.0.119",
+ "url",
  "uuid",
 ]
 
@@ -273,13 +284,28 @@ name = "birdcode-store"
 version = "0.1.0"
 dependencies = [
  "birdcode-backends",
+ "birdcode-orchestrator",
  "birdcode-prompting",
  "birdcode-protocol",
+ "birdcode-tooling",
  "chrono",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "birdcode-tooling"
+version = "0.1.0"
+dependencies = [
+ "birdcode-protocol",
+ "rustix",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "uuid",
@@ -295,6 +321,23 @@ dependencies = [
  "sha2",
  "thiserror 2.0.18",
  "url",
+ "uuid",
+]
+
+[[package]]
+name = "birdcode-workspace"
+version = "0.1.0"
+dependencies = [
+ "birdcode-protocol",
+ "birdcode-store",
+ "chrono",
+ "plist",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
  "uuid",
 ]
 

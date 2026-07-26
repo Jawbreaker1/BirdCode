@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://birdcode.dev/schemas/evals/subagent-routing-v1/input-envelope.schema.v1.json",
+  "title": "BirdCode subagent routing input envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "case_id", "causal_binding", "protected_obligations", "sections"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "case_id": { "$ref": "#/$defs/stable_id" },
+    "causal_binding": { "$ref": "#/$defs/causal_binding" },
+    "protected_obligations": {
+      "type": "array",
+      "maxItems": 128,
+      "items": { "$ref": "#/$defs/protected_obligation" }
+    },
+    "sections": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": { "$ref": "#/$defs/section" }
+    }
+  },
+  "$defs": {
+    "stable_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[a-z0-9][a-z0-9._:-]*$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "causal_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root_run_id",
+        "parent_thread_id",
+        "parent_turn_id",
+        "parent_execution_id",
+        "parent_attempt_id",
+        "accepted_planner_event_id",
+        "accepted_planner_turn_id",
+        "accepted_planner_output_digest",
+        "resulting_plan_digest",
+        "root_snapshot_digest",
+        "context_manifest_digest",
+        "obligation_snapshot_digest",
+        "acceptance_policy_digest",
+        "evidence_packet_digest",
+        "planner_policy_digest",
+        "role_registry_digest",
+        "capability_registry_digest",
+        "model_profile_snapshot_digest"
+      ],
+      "properties": {
+        "root_run_id": { "$ref": "#/$defs/stable_id" },
+        "parent_thread_id": { "$ref": "#/$defs/stable_id" },
+        "parent_turn_id": { "$ref": "#/$defs/stable_id" },
+        "parent_execution_id": { "$ref": "#/$defs/stable_id" },
+        "parent_attempt_id": { "$ref": "#/$defs/stable_id" },
+        "accepted_planner_event_id": { "$ref": "#/$defs/stable_id" },
+        "accepted_planner_turn_id": { "$ref": "#/$defs/stable_id" },
+        "accepted_planner_output_digest": { "$ref": "#/$defs/digest" },
+        "resulting_plan_digest": { "$ref": "#/$defs/digest" },
+        "root_snapshot_digest": { "$ref": "#/$defs/digest" },
+        "context_manifest_digest": { "$ref": "#/$defs/digest" },
+        "obligation_snapshot_digest": { "$ref": "#/$defs/digest" },
+        "acceptance_policy_digest": { "$ref": "#/$defs/digest" },
+        "evidence_packet_digest": { "$ref": "#/$defs/digest" },
+        "planner_policy_digest": { "$ref": "#/$defs/digest" },
+        "role_registry_digest": { "$ref": "#/$defs/digest" },
+        "capability_registry_digest": { "$ref": "#/$defs/digest" },
+        "model_profile_snapshot_digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "protected_obligation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["obligation_id", "description", "required_evidence_refs"],
+      "properties": {
+        "obligation_id": { "$ref": "#/$defs/stable_id" },
+        "description": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "required_evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/stable_id" }
+        }
+      }
+    },
+    "section": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "trust", "kind", "payload"],
+      "properties": {
+        "id": { "$ref": "#/$defs/stable_id" },
+        "trust": {
+          "enum": [
+            "user",
+            "application_policy",
+            "repository_data",
+            "runtime_evidence",
+            "model_profile",
+            "accepted_handoff"
+          ]
+        },
+        "kind": {
+          "enum": [
+            "request",
+            "request_variants",
+            "policy",
+            "repository",
+            "evidence",
+            "model_profile",
+            "handoff",
+            "acceptance_state"
+          ]
+        },
+        "content_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "payload": {
+          "type": ["object", "array", "string", "number", "boolean", "null"]
+        }
+      }
+    }
+  }
+}

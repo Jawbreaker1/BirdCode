@@ -296,7 +296,10 @@ fn validate_inputs(
     reviewer_model: &ModelId,
     max_output_tokens: u32,
 ) -> Result<(), PlanCriticCompileError> {
-    if run.spec.purpose != RunPurpose::PlanOnly {
+    if !matches!(
+        run.spec.purpose,
+        RunPurpose::PlanOnly | RunPurpose::ParallelRepositoryReconnaissanceV1
+    ) {
         return Err(PlanCriticCompileError::UnsupportedPurpose {
             actual: run.spec.purpose,
         });

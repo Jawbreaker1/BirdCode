@@ -9,12 +9,13 @@ mod contract;
 mod lmstudio;
 
 pub use contract::{
-    BackendError, BackendErrorEvidence, BackendErrorKind, BackendFuture, BackendId,
-    BackendOperation, CapabilityState, ContractError, DiscoveryEvidence, HttpEvidence,
-    InferenceEvidence, LoadedInstance, Message, MessageRole, ModelBackend, ModelCapabilities,
-    ModelCatalog, ModelDescriptor, ModelId, ModelKind, ModelLoadState, NativeDiscoveryEvidence,
-    NativeMatch, NativeMatchKey, Quantization, ReasoningCapabilities, ReasoningOption,
-    ReasoningSetting, StructuredInferenceRequest, StructuredInferenceResponse,
-    StructuredOutputSpec, TokenUsage,
+    BackendDeploymentId, BackendEndpointOrigin, BackendError, BackendErrorEvidence,
+    BackendErrorKind, BackendFuture, BackendId, BackendInstanceDigest, BackendInstanceIdentity,
+    BackendInstanceIdentityError, BackendOperation, BackendTransportIdentity, CapabilityState,
+    ContractError, DiscoveryEvidence, HttpEvidence, InferenceEvidence, LoadedInstance, Message,
+    MessageRole, ModelBackend, ModelCapabilities, ModelCatalog, ModelDescriptor, ModelId,
+    ModelKind, ModelLoadState, NativeDiscoveryEvidence, NativeMatch, NativeMatchKey, Quantization,
+    ReasoningCapabilities, ReasoningOption, ReasoningSetting, StructuredInferenceRequest,
+    StructuredInferenceResponse, StructuredOutputSpec, TokenUsage,
 };
 pub use lmstudio::{HttpLimits, LmStudioBackend, LmStudioConfig, SecretToken};

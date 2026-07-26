@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "classification": "development_exploratory_model_profile_not_formal_cohort",
+  "fixture_id": "literal-stream-v1",
+  "observed_at_date": "2026-07-20",
+  "backend": "lmstudio",
+  "model": {
+    "id": "google/gemma-4-26b-a4b",
+    "load_state": "loaded",
+    "quantization": "Q8_0",
+    "loaded_context_length": 121088,
+    "maximum_context_tokens": 262144
+  },
+  "same_frozen_repair_task": {
+    "task_sha256": "b6f7bbe898ce20269a5096af1bb1adc86cc6f59d28d7d4fe1b84deb6a61fdff9",
+    "prompt_manifest_sha256": "a3f89b522223b204fa42c6c5ec253443636dfc3261d927fa14cc1ad10e1493b2",
+    "input_candidate_sha256": "d3f7e35c9780979dea6d56fd02c55815affa7e1a0b390c047c59ecac686aacb8",
+    "input_report_sha256": "2e0982b051e5f88d21f1a3d1d2f82feb234bd5ec069262fff0ca347dac76dabd"
+  },
+  "runs": [
+    {
+      "reasoning": "off",
+      "max_output_tokens": 8192,
+      "generation_evidence_sha256": "1a714d61c729a1261492a4cb175e53788f22cbf7043380bdca1c6dbedf38e6ab",
+      "outcome": {
+        "status": "response",
+        "finish_reason": "stop",
+        "input_tokens": 3109,
+        "output_tokens": 1351,
+        "candidate_sha256": "815144f33fd01b058df3857f283e633ec230fe5e4d29818956176b6a48d63ee0",
+        "mechanical_report_sha256": "adb3612aad010703e68018318cdd90c5a0aa777cb84184322ad47f291a6b1286",
+        "mechanical_status": "failed_formatting_unclosed_delimiters"
+      }
+    },
+    {
+      "reasoning": "low",
+      "max_output_tokens": 8192,
+      "generation_evidence_sha256": "3e9cfe39f575a949ec6227117fe0aa6ee9511926a9acc1010a11220de4d868fd",
+      "outcome": {
+        "status": "backend_error",
+        "error_kind": "incomplete_response",
+        "finish_reason": "length",
+        "prompt_tokens": 3337,
+        "completion_tokens": 8192,
+        "reasoning_tokens": 8186,
+        "candidate_created": false,
+        "raw_response_sha256": "09e742886d61c40aff1860a7622541232b383cefb4b06a04e3a717cc4f868132"
+      }
+    }
+  ],
+  "design_observation": "The measured profile cannot treat a generic reasoning level as a monotonic quality knob. Reasoning off returned an incomplete code artifact despite finish_reason stop; reasoning low exhausted almost the entire completion allowance as reasoning and produced no complete structured artifact. Adaptive decomposition and per-profile reasoning/output reservations must be evidence-driven rather than selected from model-name rules.",
+  "provenance_limit": "This compact observation binds hashes and selected typed fields from local create-new generation records. The complete exploratory raw records remain local temporary artifacts and are not part of the formal retained cohort, so this file must not be cited as an independently reproducible benchmark result or superiority claim."
+}

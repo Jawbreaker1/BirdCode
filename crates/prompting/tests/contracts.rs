@@ -183,6 +183,20 @@ fn bundled_manifest_and_programmatic_registration_are_fully_validated() {
         PromptRegistry::new([invalid_directive]),
         Err(PromptError::GenerationSchemaDirective(_))
     ));
+
+    let mut invalid_runtime_const =
+        parse_manifest(TASK_ROUTER_MANIFEST_JSON.as_bytes()).expect("manifest should parse");
+    invalid_runtime_const.generation_schema["properties"]["confidence"] = json!({
+        "type": "number",
+        "x-birdcode-runtime-const": {
+            "constraint": "policy",
+            "pointer": "/confidence"
+        }
+    });
+    assert!(matches!(
+        PromptRegistry::new([invalid_runtime_const]),
+        Err(PromptError::GenerationSchemaDirective(_))
+    ));
 }
 
 #[test]

@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "fixture_id": "literal-stream-v1",
+  "evaluator": "birdcode.codegen-calibration/3",
+  "evaluator_sha256": "0eacb431b4e5dd042f3f83b2948658f945f26d4207824571712f8275618c8afd",
+  "evaluator_input_encoding": "sorted-key-json-v1",
+  "evaluator_input_sha256": "2e1810876e608fdd25182ffa1b3ce58d4623c6bc4eba798ec9cf2d74eb59e6ac",
+  "candidate_sha256": "6134cd532ac71575bd7ce08ccca49a8bb486f2edb5fb45c083e64decb004829c",
+  "source_sha256": "f0099258a88baef8f33eb48b1f4148c66750b21934ec390ef17494e57e5a688b",
+  "task_sha256": "b6f7bbe898ce20269a5096af1bb1adc86cc6f59d28d7d4fe1b84deb6a61fdff9",
+  "acceptance_sha256": "0600fd07f882b53a1b88a77407ee9af5a6294e964c6c0d7d23afd53b02d3c2c4",
+  "prompt_manifest_sha256": "a3f89b522223b204fa42c6c5ec253443636dfc3261d927fa14cc1ad10e1493b2",
+  "limits": {
+    "max_candidate_bytes": 131072,
+    "max_source_bytes": 65536,
+    "max_command_stdout_bytes": 1048576,
+    "max_command_stderr_bytes": 1048576,
+    "command_timeout_ms": 60000
+  },
+  "environment": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "node": "v22.16.0",
+    "network_policy": "outer_execution_sandbox_plus_cargo_offline",
+    "candidate_workspace": "ephemeral_and_removed_after_capture",
+    "subprocess_environment_allowlist": [
+      "PATH",
+      "HOME",
+      "CARGO_HOME",
+      "RUSTUP_HOME",
+      "TMPDIR",
+      "DEVELOPER_DIR",
+      "SDKROOT",
+      "MACOSX_DEPLOYMENT_TARGET"
+    ]
+  },
+  "commands": [
+    {
+      "argv": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd_role": "isolated_candidate_root",
+      "started_at": "2026-07-20T02:40:01.020Z",
+      "elapsed_ms": 93,
+      "exit_code": 0,
+      "signal": null,
+      "timed_out": false,
+      "stdout": "",
+      "stdout_truncated": false,
+      "stderr": "",
+      "stderr_truncated": false,
+      "passed": true
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--offline",
+        "--all-targets"
+      ],
+      "cwd_role": "isolated_candidate_root",
+      "started_at": "2026-07-20T02:40:01.114Z",
+      "elapsed_ms": 752,
+      "exit_code": 0,
+      "signal": null,
+      "timed_out": false,
+      "stdout": "\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 7 tests\ntest empty_needle_and_zero_limit_fail_before_iteration ... ok\ntest binary_input_never_requires_utf8 ... ok\ntest no_match_and_short_input_are_complete ... ok\ntest matches_cross_arbitrary_chunk_and_empty_boundaries ... ok\ntest truncation_requires_a_real_additional_match ... ok\ntest overlapping_matches_are_reported_in_absolute_order ... ok\ntest large_stream_does_not_change_match_semantics ... ok\n\ntest result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s\n\n",
+      "stdout_truncated": false,
+      "stderr": "   Compiling candidate v0.0.0 (/private/var/folders/9q/85bdkfjj4jn932rfs975wk280000gn/T/birdcode-codegen-calibration-Koo6Ih)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s\n     Running unittests src/lib.rs (target/debug/deps/candidate-203207c8578295b4)\n     Running tests/acceptance.rs (target/debug/deps/acceptance-400bd92c6e3f9631)\n",
+      "stderr_truncated": false,
+      "passed": true
+    },
+    {
+      "argv": [
+        "cargo",
+        "clippy",
+        "--offline",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd_role": "isolated_candidate_root",
+      "started_at": "2026-07-20T02:40:01.866Z",
+      "elapsed_ms": 158,
+      "exit_code": 0,
+      "signal": null,
+      "timed_out": false,
+      "stdout": "",
+      "stdout_truncated": false,
+      "stderr": "    Checking candidate v0.0.0 (/private/var/folders/9q/85bdkfjj4jn932rfs975wk280000gn/T/birdcode-codegen-calibration-Koo6Ih)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.09s\n",
+      "stderr_truncated": false,
+      "passed": true
+    }
+  ],
+  "status": "passed"
+}

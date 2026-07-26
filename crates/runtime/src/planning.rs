@@ -149,7 +149,7 @@ impl fmt::Display for PlanRequestCompileError {
             ),
             Self::SubagentsNotAuthorized { requested } => write!(
                 formatter,
-                "the read-only root-planning slice authorizes zero subagents, not {requested}"
+                "subagent authority {requested} does not match the typed root-planning purpose"
             ),
             Self::EmptyInput => formatter.write_str("a root-planning run requires input"),
             Self::BlankTextInput { index } => {
@@ -448,7 +448,10 @@ fn validate_inputs(
     resolved_model_id: &ModelId,
     max_output_tokens: u32,
 ) -> Result<(), PlanRequestCompileError> {
-    if run.spec.purpose != RunPurpose::PlanOnly {
+    if !matches!(
+        run.spec.purpose,
+        RunPurpose::PlanOnly | RunPurpose::ParallelRepositoryReconnaissanceV1
+    ) {
         return Err(PlanRequestCompileError::UnsupportedPurpose {
             actual: run.spec.purpose,
         });
@@ -504,7 +507,12 @@ fn validate_inputs(
             maximum,
         });
     }
-    if run.spec.limits.max_subagents != 0 {
+    let required_subagents = match run.spec.purpose {
+        RunPurpose::PlanOnly => 0,
+        RunPurpose::ParallelRepositoryReconnaissanceV1 => 2,
+        RunPurpose::Execute => unreachable!("unsupported purpose returned above"),
+    };
+    if run.spec.limits.max_subagents != required_subagents {
         return Err(PlanRequestCompileError::SubagentsNotAuthorized {
             requested: run.spec.limits.max_subagents,
         });

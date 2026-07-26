@@ -1,0 +1,702 @@
+{
+  "candidate_sha256": "9f74b8010ed1f927bae0d523df6281b0b2ac5e64f87cad5626741dab7e58c358",
+  "catalog": {
+    "backend_id": "lmstudio",
+    "evidence": {
+      "native": {
+        "response": {
+          "body": {
+            "models": [
+              {
+                "architecture": "gemma4",
+                "capabilities": {
+                  "trained_for_tool_use": true,
+                  "vision": true
+                },
+                "description": null,
+                "display_name": "Gemma 4 26B A4B Instruct",
+                "format": "mlx",
+                "key": "gemma-4-26b-a4b-it",
+                "loaded_instances": [],
+                "max_context_length": 262144,
+                "params_string": "26B",
+                "publisher": "mlx-community",
+                "quantization": {
+                  "bits_per_weight": 4,
+                  "name": "4bit"
+                },
+                "size_bytes": 15641234086,
+                "type": "llm"
+              },
+              {
+                "architecture": "qwen2",
+                "capabilities": {
+                  "trained_for_tool_use": false,
+                  "vision": false
+                },
+                "description": null,
+                "display_name": "Qwen2.5 Coder 14B Instruct",
+                "format": "mlx",
+                "key": "qwen2.5-coder-14b-instruct-mlx",
+                "loaded_instances": [],
+                "max_context_length": 32768,
+                "params_string": "14B",
+                "publisher": "lmstudio-community",
+                "quantization": {
+                  "bits_per_weight": 4,
+                  "name": "4bit"
+                },
+                "size_bytes": 8325481542,
+                "type": "llm"
+              },
+              {
+                "display_name": "Nomic Embed Text v1.5",
+                "format": "gguf",
+                "key": "text-embedding-nomic-embed-text-v1.5",
+                "loaded_instances": [],
+                "max_context_length": 2048,
+                "params_string": null,
+                "publisher": "nomic-ai",
+                "quantization": {
+                  "bits_per_weight": 4,
+                  "name": "Q4_K_M"
+                },
+                "size_bytes": 84106624,
+                "type": "embedding"
+              },
+              {
+                "architecture": "qwen35",
+                "capabilities": {
+                  "reasoning": {
+                    "allowed_options": [
+                      "off",
+                      "on"
+                    ],
+                    "default": "on"
+                  },
+                  "trained_for_tool_use": true,
+                  "vision": true
+                },
+                "description": null,
+                "display_name": "Qwen3.6 27B",
+                "format": "gguf",
+                "key": "qwen/qwen3.6-27b",
+                "loaded_instances": [],
+                "max_context_length": 262144,
+                "params_string": "27B",
+                "publisher": "qwen",
+                "quantization": {
+                  "bits_per_weight": 6,
+                  "name": "Q6_K"
+                },
+                "selected_variant": "qwen/qwen3.6-27b@q6_k",
+                "size_bytes": 23013862549,
+                "type": "llm",
+                "variants": [
+                  "qwen/qwen3.6-27b@q4_k_m",
+                  "qwen/qwen3.6-27b@q6_k"
+                ]
+              },
+              {
+                "architecture": "qwen35moe",
+                "capabilities": {
+                  "reasoning": {
+                    "allowed_options": [
+                      "off",
+                      "on"
+                    ],
+                    "default": "on"
+                  },
+                  "trained_for_tool_use": true,
+                  "vision": true
+                },
+                "description": null,
+                "display_name": "Qwen3.6 35B A3B",
+                "format": "gguf",
+                "key": "qwen/qwen3.6-35b-a3b",
+                "loaded_instances": [],
+                "max_context_length": 262144,
+                "params_string": "35B-A3B",
+                "publisher": "qwen",
+                "quantization": {
+                  "bits_per_weight": 6,
+                  "name": "Q6_K"
+                },
+                "selected_variant": "qwen/qwen3.6-35b-a3b@q6_k",
+                "size_bytes": 29417162640,
+                "type": "llm",
+                "variants": [
+                  "qwen/qwen3.6-35b-a3b@q4_k_m",
+                  "qwen/qwen3.6-35b-a3b@q6_k"
+                ]
+              },
+              {
+                "architecture": "qwen35",
+                "capabilities": {
+                  "trained_for_tool_use": true,
+                  "vision": true
+                },
+                "description": null,
+                "display_name": "Qwen3.5 27B",
+                "format": "gguf",
+                "key": "lmstudio-community/qwen3.5-27b",
+                "loaded_instances": [],
+                "max_context_length": 262144,
+                "params_string": "27B",
+                "publisher": "lmstudio-community",
+                "quantization": {
+                  "bits_per_weight": 6,
+                  "name": "Q6_K"
+                },
+                "size_bytes": 23013674176,
+                "type": "llm"
+              },
+              {
+                "architecture": "gemma4",
+                "capabilities": {
+                  "reasoning": {
+                    "allowed_options": [
+                      "off",
+                      "on"
+                    ],
+                    "default": "on"
+                  },
+                  "trained_for_tool_use": true,
+                  "vision": true
+                },
+                "description": null,
+                "display_name": "Gemma 4 26B A4B",
+                "format": "gguf",
+                "key": "google/gemma-4-26b-a4b",
+                "loaded_instances": [
+                  {
+                    "config": {
+                      "context_length": 121088,
+                      "eval_batch_size": 2048,
+                      "flash_attention": true,
+                      "num_experts": 8,
+                      "offload_kv_cache_to_gpu": true,
+                      "parallel": 4,
+                      "physical_batch_size": 512,
+                      "speculative_draft_max_tokens": 16,
+                      "speculative_draft_min_continue_probability": 0.75,
+                      "speculative_draft_min_tokens": 0,
+                      "speculative_draft_model": "",
+                      "speculative_draft_mtp": false,
+                      "speculative_draft_simple": false
+                    },
+                    "id": "google/gemma-4-26b-a4b"
+                  }
+                ],
+                "max_context_length": 262144,
+                "params_string": "26B-A4B",
+                "publisher": "google",
+                "quantization": {
+                  "bits_per_weight": 8,
+                  "name": "Q8_0"
+                },
+                "selected_variant": "google/gemma-4-26b-a4b@q8_0",
+                "size_bytes": 28054755129,
+                "type": "llm",
+                "variants": [
+                  "google/gemma-4-26b-a4b@q8_0"
+                ]
+              },
+              {
+                "architecture": "qwen35",
+                "capabilities": {
+                  "trained_for_tool_use": true,
+                  "vision": true
+                },
+                "description": null,
+                "display_name": "Qwen3.5 27B",
+                "format": "gguf",
+                "key": "unsloth/qwen3.5-27b",
+                "loaded_instances": [],
+                "max_context_length": 262144,
+                "params_string": "27B",
+                "publisher": "unsloth",
+                "quantization": {
+                  "bits_per_weight": 4,
+                  "name": "Q4_K_S"
+                },
+                "size_bytes": 17612099744,
+                "type": "llm"
+              },
+              {
+                "architecture": "qwen35moe",
+                "capabilities": {
+                  "reasoning": {
+                    "allowed_options": [
+                      "off",
+                      "on"
+                    ],
+                    "default": "on"
+                  },
+                  "trained_for_tool_use": true,
+                  "vision": true
+                },
+                "description": null,
+                "display_name": "Qwen3.5 35B A3B",
+                "format": "gguf",
+                "key": "qwen/qwen3.5-35b-a3b",
+                "loaded_instances": [],
+                "max_context_length": 262144,
+                "params_string": "35B-A3B",
+                "publisher": "qwen",
+                "quantization": {
+                  "bits_per_weight": 4,
+                  "name": "Q4_K_M"
+                },
+                "selected_variant": "qwen/qwen3.5-35b-a3b@q4_k_m",
+                "size_bytes": 22072117341,
+                "type": "llm",
+                "variants": [
+                  "qwen/qwen3.5-35b-a3b@q4_k_m"
+                ]
+              },
+              {
+                "architecture": "qwen3next",
+                "capabilities": {
+                  "trained_for_tool_use": true,
+                  "vision": false
+                },
+                "description": null,
+                "display_name": "Qwen3 Coder Next",
+                "format": "gguf",
+                "key": "qwen/qwen3-coder-next",
+                "loaded_instances": [],
+                "max_context_length": 262144,
+                "params_string": "80B",
+                "publisher": "qwen",
+                "quantization": {
+                  "bits_per_weight": 4,
+                  "name": "Q4_K_M"
+                },
+                "selected_variant": "qwen/qwen3-coder-next@q4_k_m",
+                "size_bytes": 48487210160,
+                "type": "llm",
+                "variants": [
+                  "qwen/qwen3-coder-next@q4_k_m"
+                ]
+              },
+              {
+                "architecture": "deepseek2",
+                "capabilities": {
+                  "reasoning": {
+                    "allowed_options": [
+                      "off",
+                      "on"
+                    ],
+                    "default": "on"
+                  },
+                  "trained_for_tool_use": true,
+                  "vision": false
+                },
+                "description": null,
+                "display_name": "Glm 4.7 Flash",
+                "format": "gguf",
+                "key": "zai-org/glm-4.7-flash",
+                "loaded_instances": [],
+                "max_context_length": 202752,
+                "params_string": "30B",
+                "publisher": "zai-org",
+                "quantization": {
+                  "bits_per_weight": 4,
+                  "name": "Q4_K_M"
+                },
+                "selected_variant": "zai-org/glm-4.7-flash@q4_k_m",
+                "size_bytes": 18132739079,
+                "type": "llm",
+                "variants": [
+                  "zai-org/glm-4.7-flash@q4_k_m",
+                  "zai-org/glm-4.7-flash@q6_k"
+                ]
+              },
+              {
+                "display_name": "Nomic Embed Text v1.5",
+                "format": "gguf",
+                "key": "text-embedding-nomic-embed-text-v1.5",
+                "loaded_instances": [],
+                "max_context_length": 2048,
+                "params_string": null,
+                "publisher": "nomic-ai",
+                "quantization": {
+                  "bits_per_weight": 4,
+                  "name": "Q4_K_M"
+                },
+                "size_bytes": 84106624,
+                "type": "embedding"
+              },
+              {
+                "architecture": "gpt-oss",
+                "capabilities": {
+                  "reasoning": {
+                    "allowed_options": [
+                      "low",
+                      "medium",
+                      "high"
+                    ],
+                    "default": "low"
+                  },
+                  "trained_for_tool_use": true,
+                  "vision": false
+                },
+                "description": null,
+                "display_name": "GPT-OSS 120B",
+                "format": "gguf",
+                "key": "openai/gpt-oss-120b",
+                "loaded_instances": [],
+                "max_context_length": 131072,
+                "params_string": "120B",
+                "publisher": "openai",
+                "quantization": {
+                  "bits_per_weight": 4,
+                  "name": "MXFP4"
+                },
+                "selected_variant": "openai/gpt-oss-120b@mxfp4",
+                "size_bytes": 63387444073,
+                "type": "llm",
+                "variants": [
+                  "openai/gpt-oss-120b@mxfp4"
+                ]
+              },
+              {
+                "architecture": "qwen3moe",
+                "capabilities": {
+                  "trained_for_tool_use": true,
+                  "vision": false
+                },
+                "description": null,
+                "display_name": "Qwen3 Coder 30B",
+                "format": "gguf",
+                "key": "qwen/qwen3-coder-30b",
+                "loaded_instances": [],
+                "max_context_length": 262144,
+                "params_string": "30B-A3B",
+                "publisher": "qwen",
+                "quantization": {
+                  "bits_per_weight": 4,
+                  "name": "Q4_K_M"
+                },
+                "selected_variant": "qwen/qwen3-coder-30b@q4_k_m",
+                "size_bytes": 18632365388,
+                "type": "llm",
+                "variants": [
+                  "qwen/qwen3-coder-30b@q4_k_m"
+                ]
+              },
+              {
+                "architecture": "gpt-oss",
+                "capabilities": {
+                  "reasoning": {
+                    "allowed_options": [
+                      "low",
+                      "medium",
+                      "high"
+                    ],
+                    "default": "low"
+                  },
+                  "trained_for_tool_use": true,
+                  "vision": false
+                },
+                "description": null,
+                "display_name": "GPT-OSS 20B",
+                "format": "gguf",
+                "key": "openai/gpt-oss-20b",
+                "loaded_instances": [],
+                "max_context_length": 131072,
+                "params_string": "20B",
+                "publisher": "openai",
+                "quantization": {
+                  "bits_per_weight": 4,
+                  "name": "MXFP4"
+                },
+                "selected_variant": "openai/gpt-oss-20b@mxfp4",
+                "size_bytes": 12109664245,
+                "type": "llm",
+                "variants": [
+                  "openai/gpt-oss-20b@mxfp4"
+                ]
+              },
+              {
+                "architecture": "llama",
+                "capabilities": {
+                  "trained_for_tool_use": true,
+                  "vision": false
+                },
+                "description": null,
+                "display_name": "Llama 3.3 70B",
+                "format": "gguf",
+                "key": "meta/llama-3.3-70b",
+                "loaded_instances": [],
+                "max_context_length": 131072,
+                "params_string": "70B",
+                "publisher": "meta",
+                "quantization": {
+                  "bits_per_weight": 4,
+                  "name": "Q4_K_M"
+                },
+                "selected_variant": "meta/llama-3.3-70b@q4_k_m",
+                "size_bytes": 42520506023,
+                "type": "llm",
+                "variants": [
+                  "meta/llama-3.3-70b@q4_k_m"
+                ]
+              },
+              {
+                "architecture": "gemma3",
+                "capabilities": {
+                  "trained_for_tool_use": false,
+                  "vision": true
+                },
+                "description": null,
+                "display_name": "Gemma 3 27B",
+                "format": "gguf",
+                "key": "google/gemma-3-27b",
+                "loaded_instances": [],
+                "max_context_length": 131072,
+                "params_string": "27B",
+                "publisher": "google",
+                "quantization": {
+                  "bits_per_weight": 4,
+                  "name": "Q4_0"
+                },
+                "selected_variant": "google/gemma-3-27b@q4_0",
+                "size_bytes": 16425207993,
+                "type": "llm",
+                "variants": [
+                  "google/gemma-3-27b@q4_0"
+                ]
+              }
+            ]
+          },
+          "endpoint": "http://127.0.0.1:1234/api/v1/models",
+          "response_body_sha256": "95dc1f012fbe6843c90c79f870423cef2f25c975cc7e4f4bd557616f73174a17",
+          "status": 200
+        },
+        "status": "available"
+      },
+      "openai": {
+        "body": {
+          "data": [
+            {
+              "id": "google/gemma-4-26b-a4b",
+              "object": "model",
+              "owned_by": "organization_owner"
+            }
+          ],
+          "object": "list"
+        },
+        "endpoint": "http://127.0.0.1:1234/v1/models",
+        "response_body_sha256": "8e8c0d4be451e60f1284564cf4b95735f890e2edaeee568818dc2bc2d2009cd9",
+        "status": 200
+      }
+    },
+    "models": [
+      {
+        "architecture": "gemma4",
+        "capabilities": {
+          "reasoning": {
+            "allowed_options": [
+              "off",
+              "on"
+            ],
+            "default": "on"
+          },
+          "trained_for_tool_use": "supported",
+          "vision": "supported"
+        },
+        "display_name": "Gemma 4 26B A4B",
+        "id": "google/gemma-4-26b-a4b",
+        "kind": "language",
+        "load_state": "loaded",
+        "loaded_instances": [
+          {
+            "context_length": 121088,
+            "id": "google/gemma-4-26b-a4b"
+          }
+        ],
+        "maximum_context_tokens": 262144,
+        "native_match": {
+          "exact": "loaded_instance"
+        },
+        "publisher": "google",
+        "quantization": {
+          "bits_per_weight": 8.0,
+          "name": "Q8_0",
+          "selected_variant": "google/gemma-4-26b-a4b@q8_0"
+        }
+      }
+    ]
+  },
+  "fixture_id": "literal-stream-v1",
+  "generator": "birdcode-backends/lmstudio_codegen_calibration",
+  "outcome": {
+    "response": {
+      "evidence": {
+        "backend_id": "lmstudio",
+        "completion_id": "chatcmpl-tnhooxg9y3ja6pnx7desl",
+        "endpoint": "http://127.0.0.1:1234/v1/chat/completions",
+        "raw_response": {
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "logprobs": null,
+              "message": {
+                "content": "{\n  \"files\": [\n    {\n      \"content\": \"#[derive(Clone, Debug, Eq, PartialEq)]\\npub struct LiteralMatch {\\n    pub offset: u64,\\n}\\n\\n#[derive(Clone, Debug, Eq, PartialEq)]\\npub struct LiteralSearchResult {\\n    pub matches: Vec<LiteralMatch>,\\n    pub truncated: bool,\\n    pub bytes_scanned: u64,\\n}\\n\\n#[derive(Clone, Copy, Debug, Eq, PartialEq)]\\npub enum LiteralSearchError {\\n    EmptyNeedle,\\n    ZeroMatchLimit,\\n    OffsetOverflow,\\n}\\n\\npub fn search_literal_chunks<'a, I>(\\n    chunks: I,\\n    needle: &[u8],\\n    max_matches: usize,\\n) -> Result<LiteralSearchResult, LiteralSearchError>\\nwhere\\n    I: IntoIterator<Item = &'a [u8]>,\\n{\\n    if needle.is_empty() {\\n        return Err(LiteralSearchError::EmptyNeedle);\\n    }\\n    if max_matches == 0 {\\n        return Err(LiteralSearchError::ZeroMatchLimit);\\n    }\\n\\n    let mut matches = Vec::with_capacity(max_matches);\\n    let mut truncated = false;\\n    let mut total_bytes_scanned: u64 = 0;\\n    let mut current_absolute_offset: u64 = 0;\\n\\n    // To handle boundary matches without joining all chunks, we maintain a sliding window\\n    // representing the \",\"path\" : \"src/lib.rs\"\n    }\n    ],\n  \"fixture_id\": \"literal-stream-v1\",\n  \"schema_version\": 1\n}",
+                "reasoning_content": "",
+                "role": "assistant",
+                "tool_calls": []
+              }
+            }
+          ],
+          "created": 1784510937,
+          "id": "chatcmpl-tnhooxg9y3ja6pnx7desl",
+          "model": "google/gemma-4-26b-a4b",
+          "object": "chat.completion",
+          "stats": {},
+          "system_fingerprint": "google/gemma-4-26b-a4b",
+          "usage": {
+            "completion_tokens": 406,
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            },
+            "prompt_tokens": 656,
+            "total_tokens": 1062
+          }
+        },
+        "response_body_sha256": "1efeb2a3586abb1b0d0d8d5061a9aa569cd7d43ced81d337f3ff4ede5f4a64ad",
+        "status": 200
+      },
+      "finish_reason": "stop",
+      "model_id": "google/gemma-4-26b-a4b",
+      "raw_text": "{\n  \"files\": [\n    {\n      \"content\": \"#[derive(Clone, Debug, Eq, PartialEq)]\\npub struct LiteralMatch {\\n    pub offset: u64,\\n}\\n\\n#[derive(Clone, Debug, Eq, PartialEq)]\\npub struct LiteralSearchResult {\\n    pub matches: Vec<LiteralMatch>,\\n    pub truncated: bool,\\n    pub bytes_scanned: u64,\\n}\\n\\n#[derive(Clone, Copy, Debug, Eq, PartialEq)]\\npub enum LiteralSearchError {\\n    EmptyNeedle,\\n    ZeroMatchLimit,\\n    OffsetOverflow,\\n}\\n\\npub fn search_literal_chunks<'a, I>(\\n    chunks: I,\\n    needle: &[u8],\\n    max_matches: usize,\\n) -> Result<LiteralSearchResult, LiteralSearchError>\\nwhere\\n    I: IntoIterator<Item = &'a [u8]>,\\n{\\n    if needle.is_empty() {\\n        return Err(LiteralSearchError::EmptyNeedle);\\n    }\\n    if max_matches == 0 {\\n        return Err(LiteralSearchError::ZeroMatchLimit);\\n    }\\n\\n    let mut matches = Vec::with_capacity(max_matches);\\n    let mut truncated = false;\\n    let mut total_bytes_scanned: u64 = 0;\\n    let mut current_absolute_offset: u64 = 0;\\n\\n    // To handle boundary matches without joining all chunks, we maintain a sliding window\\n    // representing the \",\"path\" : \"src/lib.rs\"\n    }\n    ],\n  \"fixture_id\": \"literal-stream-v1\",\n  \"schema_version\": 1\n}",
+      "usage": {
+        "input_tokens": 656,
+        "output_tokens": 406,
+        "total_tokens": 1062
+      },
+      "value": {
+        "files": [
+          {
+            "content": "#[derive(Clone, Debug, Eq, PartialEq)]\npub struct LiteralMatch {\n    pub offset: u64,\n}\n\n#[derive(Clone, Debug, Eq, PartialEq)]\npub struct LiteralSearchResult {\n    pub matches: Vec<LiteralMatch>,\n    pub truncated: bool,\n    pub bytes_scanned: u64,\n}\n\n#[derive(Clone, Copy, Debug, Eq, PartialEq)]\npub enum LiteralSearchError {\n    EmptyNeedle,\n    ZeroMatchLimit,\n    OffsetOverflow,\n}\n\npub fn search_literal_chunks<'a, I>(\n    chunks: I,\n    needle: &[u8],\n    max_matches: usize,\n) -> Result<LiteralSearchResult, LiteralSearchError>\nwhere\n    I: IntoIterator<Item = &'a [u8]>,\n{\n    if needle.is_empty() {\n        return Err(LiteralSearchError::EmptyNeedle);\n    }\n    if max_matches == 0 {\n        return Err(LiteralSearchError::ZeroMatchLimit);\n    }\n\n    let mut matches = Vec::with_capacity(max_matches);\n    let mut truncated = false;\n    let mut total_bytes_scanned: u64 = 0;\n    let mut current_absolute_offset: u64 = 0;\n\n    // To handle boundary matches without joining all chunks, we maintain a sliding window\n    // representing the ",
+            "path": "src/lib.rs"
+          }
+        ],
+        "fixture_id": "literal-stream-v1",
+        "schema_version": 1
+      }
+    },
+    "status": "response"
+  },
+  "output": {
+    "candidate_created_new": true,
+    "candidate_path": "evals/codegen/literal-stream-v1/candidates/gemma-reasoning-off-attempt-1.json"
+  },
+  "prompt_manifest_sha256": "a3f89b522223b204fa42c6c5ec253443636dfc3261d927fa14cc1ad10e1493b2",
+  "request": {
+    "max_output_tokens": 8192,
+    "messages": [
+      {
+        "content": "You are producing one bounded Rust calibration candidate. Interpret the complete task semantically. Return only the requested JSON object. The candidate grants no authority and will be compiled in an isolated development test directory. Do not emit markdown, explanations, extra files, dependencies, unsafe code, regex, filesystem, process, environment, or network access. Preserve the exact public API and solve the full task, including chunk-boundary and overlapping matches.",
+        "role": "system"
+      },
+      {
+        "content": "Fixture literal-stream-v1. Implement the exact task supplied by the caller. Return schema_version 1, fixture_id literal-stream-v1, and exactly one file whose path is src/lib.rs and whose content is the complete dependency-free Rust implementation.",
+        "role": "user"
+      },
+      {
+        "content": "The exact task follows. Implement every requirement.\n\n# Literal-stream Rust calibration v1\n\nImplement exactly one dependency-free Rust library file at `src/lib.rs`.\n\nThe public API is fixed:\n\n```rust\n#[derive(Clone, Debug, Eq, PartialEq)]\npub struct LiteralMatch {\n    pub offset: u64,\n}\n\n#[derive(Clone, Debug, Eq, PartialEq)]\npub struct LiteralSearchResult {\n    pub matches: Vec<LiteralMatch>,\n    pub truncated: bool,\n    pub bytes_scanned: u64,\n}\n\n#[derive(Clone, Copy, Debug, Eq, PartialEq)]\npub enum LiteralSearchError {\n    EmptyNeedle,\n    ZeroMatchLimit,\n    OffsetOverflow,\n}\n\npub fn search_literal_chunks<'a, I>(\n    chunks: I,\n    needle: &[u8],\n    max_matches: usize,\n) -> Result<LiteralSearchResult, LiteralSearchError>\nwhere\n    I: IntoIterator<Item = &'a [u8]>;\n```\n\nRequirements:\n\n- Search the logical concatenation of all chunks without assuming UTF-8.\n- Detect matches spanning chunk boundaries and include overlapping matches.\n- Return absolute byte offsets in ascending order.\n- Retain at most `max_matches` offsets, but continue far enough to set\n  `truncated=true` if and only if another match exists.\n- `bytes_scanned` is the total number of input bytes consumed, including empty\n  chunks.\n- Return `EmptyNeedle` for an empty needle and `ZeroMatchLimit` for a zero\n  match limit before consuming the iterator.\n- Return `OffsetOverflow` if the absolute byte count cannot be represented by\n  `u64`.\n- Use memory bounded by `O(needle.len() + max_matches)` rather than joining all\n  chunks.\n- Use only the Rust standard library. Do not use regex, unsafe code, filesystem,\n  process, environment, or network access.\n\nThis is a development calibration fixture, not a hidden superiority benchmark.\nAll candidates receive this exact task and are scored only by the same compiler,\ntests, formatting, and lint commands. Provider/source identity is disclosed\nonly after the mechanical report is finalized.\n\n",
+        "role": "user"
+      }
+    ],
+    "model_id": "google/gemma-4-26b-a4b",
+    "output": {
+      "generation_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "files": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "content": {
+                  "type": "string"
+                },
+                "path": {
+                  "const": "src/lib.rs"
+                }
+              },
+              "required": [
+                "path",
+                "content"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "fixture_id": {
+            "const": "literal-stream-v1"
+          },
+          "schema_version": {
+            "const": 1
+          }
+        },
+        "required": [
+          "schema_version",
+          "fixture_id",
+          "files"
+        ],
+        "type": "object"
+      },
+      "name": "birdcode_codegen_candidate_v1",
+      "validation_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "files": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "content": {
+                  "maxLength": 65536,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "path": {
+                  "const": "src/lib.rs"
+                }
+              },
+              "required": [
+                "path",
+                "content"
+              ],
+              "type": "object"
+            },
+            "maxItems": 1,
+            "minItems": 1,
+            "type": "array"
+          },
+          "fixture_id": {
+            "const": "literal-stream-v1"
+          },
+          "schema_version": {
+            "const": 1
+          }
+        },
+        "required": [
+          "schema_version",
+          "fixture_id",
+          "files"
+        ],
+        "type": "object"
+      }
+    },
+    "reasoning": "off"
+  },
+  "request_sha256": "1f04939c311238981171120a6cd5786198c29f3e18624e42444f49fc17038fb5",
+  "request_timeout_ms": 600000,
+  "schema_version": 1,
+  "task_sha256": "f26b95f5ddd76d548857980462e2bd0e47c05110d2b4733555ea27a3c140f24b"
+}

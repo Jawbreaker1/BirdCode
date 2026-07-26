@@ -6,8 +6,14 @@
 //! values enter through independently supplied runtime snapshots and are
 //! checked mechanically before a plan revision can be accepted.
 
+use crate::planner_prompt::{
+    PlannerReplannerApplyError, PlannerReplannerInferencePolicy,
+    PlannerReplannerInferencePolicyError, PreparedPlannerReplannerRequest,
+    decode_and_apply_planner_replanner_output,
+};
+
 use birdcode_backends::{
-    BackendError, BackendId, ModelBackend, ModelId, StructuredInferenceRequest,
+    BackendError, BackendId, BackendInstanceIdentity, ModelBackend, ModelId,
     StructuredInferenceResponse,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -382,7 +388,23 @@ impl From<&ProtectedObligation> for ProtectedObligationRef {
 #[derive(Serialize)]
 struct PlannerContextHashMaterial<'a> {
     schema_version: u32,
-    evidence_ids: &'a BTreeSet<PlannerEvidenceId>,
+    evidence_bindings: &'a [PlannerEvidenceBinding],
+}
+
+/// Trusted binding from one opaque planner evidence identity to the exact
+/// normalized content address exposed in the replanner evidence packet.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlannerEvidenceBinding {
+    pub id: PlannerEvidenceId,
+    pub content_sha256: PlannerDigest,
+}
+
+impl PlannerEvidenceBinding {
+    #[must_use]
+    pub const fn new(id: PlannerEvidenceId, content_sha256: PlannerDigest) -> Self {
+        Self { id, content_sha256 }
+    }
 }
 
 /// Content-bound evidence catalog compiled at the trusted context boundary.
@@ -390,7 +412,7 @@ struct PlannerContextHashMaterial<'a> {
 #[serde(deny_unknown_fields)]
 pub struct PlannerContextCatalog {
     manifest_sha256: PlannerDigest,
-    evidence_ids: BTreeSet<PlannerEvidenceId>,
+    evidence_bindings: Vec<PlannerEvidenceBinding>,
 }
 
 impl PlannerContextCatalog {
@@ -400,15 +422,20 @@ impl PlannerContextCatalog {
     ///
     /// Rejects empty, duplicate, over-count, or over-byte-limit manifests.
     pub fn new(
-        evidence_ids: impl IntoIterator<Item = PlannerEvidenceId>,
+        evidence_bindings: impl IntoIterator<Item = PlannerEvidenceBinding>,
     ) -> Result<Self, PlannerContractError> {
-        let mut canonical = BTreeSet::new();
+        let mut canonical = evidence_bindings.into_iter().collect::<Vec<_>>();
+        canonical.sort_by(|left, right| left.id.cmp(&right.id));
+        if canonical.is_empty() {
+            return Err(PlannerContractError::EmptyContextCatalog);
+        }
+        if canonical.len() > HARD_MAX_CONTEXT_EVIDENCE_IDS {
+            return Err(PlannerContractError::TooManyContextEvidenceIds);
+        }
         let mut aggregate_encoded_bytes = 32_usize;
-        for evidence_id in evidence_ids {
-            if canonical.len() >= HARD_MAX_CONTEXT_EVIDENCE_IDS {
-                return Err(PlannerContractError::TooManyContextEvidenceIds);
-            }
-            let encoded_len = serde_json::to_vec(&evidence_id)
+        let mut previous_id = None;
+        for binding in &canonical {
+            let encoded_len = serde_json::to_vec(binding)
                 .map_err(|error| PlannerContractError::Encoding(error.to_string()))?
                 .len()
                 .saturating_add(1);
@@ -416,18 +443,16 @@ impl PlannerContextCatalog {
             if aggregate_encoded_bytes > HARD_MAX_CONTEXT_MANIFEST_ENCODED_BYTES {
                 return Err(PlannerContractError::ContextCatalogTooLarge);
             }
-            if !canonical.insert(evidence_id.clone()) {
+            if previous_id == Some(&binding.id) {
                 return Err(PlannerContractError::DuplicateContextEvidenceId(
-                    evidence_id,
+                    binding.id.clone(),
                 ));
             }
-        }
-        if canonical.is_empty() {
-            return Err(PlannerContractError::EmptyContextCatalog);
+            previous_id = Some(&binding.id);
         }
         let hash_material = PlannerContextHashMaterial {
             schema_version: PLAN_SCHEMA_VERSION,
-            evidence_ids: &canonical,
+            evidence_bindings: &canonical,
         };
         if serde_json::to_vec(&hash_material)
             .map_err(|error| PlannerContractError::Encoding(error.to_string()))?
@@ -439,7 +464,7 @@ impl PlannerContextCatalog {
         let manifest_sha256 = digest_of(&hash_material)?;
         Ok(Self {
             manifest_sha256,
-            evidence_ids: canonical,
+            evidence_bindings: canonical,
         })
     }
 
@@ -449,21 +474,43 @@ impl PlannerContextCatalog {
     }
 
     #[must_use]
-    pub const fn evidence_ids(&self) -> &BTreeSet<PlannerEvidenceId> {
-        &self.evidence_ids
+    pub fn evidence_bindings(&self) -> &[PlannerEvidenceBinding] {
+        &self.evidence_bindings
+    }
+
+    #[must_use]
+    pub fn contains_evidence(&self, evidence_id: &PlannerEvidenceId) -> bool {
+        self.evidence_bindings
+            .binary_search_by(|binding| binding.id.cmp(evidence_id))
+            .is_ok()
+    }
+
+    #[must_use]
+    pub fn evidence_content_sha256(
+        &self,
+        evidence_id: &PlannerEvidenceId,
+    ) -> Option<&PlannerDigest> {
+        self.evidence_bindings
+            .binary_search_by(|binding| binding.id.cmp(evidence_id))
+            .ok()
+            .map(|index| &self.evidence_bindings[index].content_sha256)
     }
 
     fn is_internally_valid(&self) -> bool {
-        !self.evidence_ids.is_empty()
-            && self.evidence_ids.len() <= HARD_MAX_CONTEXT_EVIDENCE_IDS
+        !self.evidence_bindings.is_empty()
+            && self.evidence_bindings.len() <= HARD_MAX_CONTEXT_EVIDENCE_IDS
+            && self
+                .evidence_bindings
+                .windows(2)
+                .all(|pair| pair[0].id < pair[1].id)
             && serde_json::to_vec(&PlannerContextHashMaterial {
                 schema_version: PLAN_SCHEMA_VERSION,
-                evidence_ids: &self.evidence_ids,
+                evidence_bindings: &self.evidence_bindings,
             })
             .is_ok_and(|encoded| encoded.len() <= HARD_MAX_CONTEXT_MANIFEST_ENCODED_BYTES)
             && digest_of(&PlannerContextHashMaterial {
                 schema_version: PLAN_SCHEMA_VERSION,
-                evidence_ids: &self.evidence_ids,
+                evidence_bindings: &self.evidence_bindings,
             })
             .is_ok_and(|digest| digest == self.manifest_sha256)
     }
@@ -478,11 +525,11 @@ impl<'de> Deserialize<'de> for PlannerContextCatalog {
         #[serde(deny_unknown_fields)]
         struct Repr {
             manifest_sha256: PlannerDigest,
-            evidence_ids: Vec<PlannerEvidenceId>,
+            evidence_bindings: Vec<PlannerEvidenceBinding>,
         }
 
         let repr = Repr::deserialize(deserializer)?;
-        let catalog = Self::new(repr.evidence_ids).map_err(serde::de::Error::custom)?;
+        let catalog = Self::new(repr.evidence_bindings).map_err(serde::de::Error::custom)?;
         if catalog.manifest_sha256 != repr.manifest_sha256 {
             return Err(serde::de::Error::custom(
                 "planner context manifest digest does not match canonical evidence",
@@ -927,6 +974,19 @@ pub struct ValidatedPlannerTurn {
     pub directive: ResolvedPlannerDirective,
 }
 
+/// Internal enriched result from the single authoritative validation pass.
+///
+/// The allocation map deliberately does not become part of
+/// [`ValidatedPlannerTurn`]'s durable serde wire. Prompt adapters that must
+/// project model-local identities into another typed boundary can consume the
+/// exact allocation produced while applying the patch instead of reimplementing
+/// deterministic identity derivation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ValidatedPlannerTurnWithAllocations {
+    pub(crate) validated: ValidatedPlannerTurn,
+    pub(crate) local_work_order_ids: BTreeMap<LocalWorkOrderId, PlanWorkOrderId>,
+}
+
 /// Collect-all mechanical defects in a model-authored plan turn.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -1098,7 +1158,6 @@ impl PlannerTurnProposal {
     ///
     /// Returns every safely collectable mechanical violation. Structural hard
     /// limits and stale trust bindings fail before graph traversal or cloning.
-    #[allow(clippy::too_many_lines)]
     pub fn validate_and_apply(
         &self,
         base: &PlanSnapshot,
@@ -1106,6 +1165,20 @@ impl PlannerTurnProposal {
         context: &PlannerContextCatalog,
         policy: &PlannerPolicy,
     ) -> Result<ValidatedPlannerTurn, PlannerValidationError> {
+        self.validate_and_apply_with_allocations(base, obligations, context, policy)
+            .map(|result| result.validated)
+    }
+
+    /// Runs the same authoritative transition while retaining model-local
+    /// work-order identity allocations for trusted in-process adapters.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn validate_and_apply_with_allocations(
+        &self,
+        base: &PlanSnapshot,
+        obligations: &ProtectedObligationCatalog,
+        context: &PlannerContextCatalog,
+        policy: &PlannerPolicy,
+    ) -> Result<ValidatedPlannerTurnWithAllocations, PlannerValidationError> {
         let structural = structural_violations(self, base, policy);
         if !structural.is_empty() {
             return Err(PlannerValidationError {
@@ -1208,10 +1281,13 @@ impl PlannerTurnProposal {
         let plan_sha256 = next.sha256().map_err(|_| PlannerValidationError {
             violations: vec![PlannerViolation::BasePlanInvalid],
         })?;
-        Ok(ValidatedPlannerTurn {
-            plan: next,
-            plan_sha256,
-            directive: resolved_directive,
+        Ok(ValidatedPlannerTurnWithAllocations {
+            validated: ValidatedPlannerTurn {
+                plan: next,
+                plan_sha256,
+                directive: resolved_directive,
+            },
+            local_work_order_ids: work_ids,
         })
     }
 }
@@ -1907,7 +1983,7 @@ fn validate_basis(
         });
     }
     for evidence_id in &basis.evidence_ids {
-        if !context.evidence_ids().contains(evidence_id) {
+        if !context.contains_evidence(evidence_id) {
             violations.push(PlannerViolation::UnknownEvidence {
                 evidence_id: evidence_id.clone(),
             });
@@ -2349,7 +2425,7 @@ fn validate_evidence_set(
         });
     }
     for evidence_id in evidence_ids {
-        if !context.evidence_ids().contains(evidence_id) {
+        if !context.contains_evidence(evidence_id) {
             violations.push(PlannerViolation::UnknownEvidence {
                 evidence_id: evidence_id.clone(),
             });
@@ -2406,6 +2482,7 @@ pub struct PlannerAttemptPrepared {
     pub parent_attempt_id: Option<PlannerAttemptId>,
     pub budget_reservation_id: BudgetReservationId,
     pub backend_id: BackendId,
+    pub backend_instance: BackendInstanceIdentity,
     pub model_id: ModelId,
     pub max_output_tokens: u32,
     pub base_plan_sha256: PlannerDigest,
@@ -2413,8 +2490,10 @@ pub struct PlannerAttemptPrepared {
     pub acceptance_policy_sha256: PlannerDigest,
     pub context_manifest_sha256: PlannerDigest,
     pub planner_policy_sha256: PlannerDigest,
-    pub request_sha256: PlannerDigest,
-    pub request: StructuredInferenceRequest,
+    pub inference_policy_sha256: PlannerDigest,
+    pub inference_policy: Box<PlannerReplannerInferencePolicy>,
+    pub prompt_bundle_sha256: PlannerDigest,
+    pub prompt_bundle: Box<PreparedPlannerReplannerRequest>,
     /// Exact authority snapshots required to replay the deterministic decision
     /// after a crash. Their independently repeated digests above make corrupt
     /// or substituted snapshots fail closed.
@@ -2462,6 +2541,8 @@ impl PlannerAttemptObserved {
 pub enum PlannerResponseViolation {
     ModelIdentityMismatch,
     BackendIdentityMismatch,
+    BackendInstanceIdentityMismatch,
+    EndpointOriginMismatch,
     RawTextIsNotJson,
     RawTextValueMismatch,
     OutputTokenLimitExceeded { maximum: u64, actual: u64 },
@@ -2475,6 +2556,9 @@ pub enum PlannerRejection {
         violations: Vec<PlannerResponseViolation>,
     },
     OutputDecode {
+        message: String,
+    },
+    PromptContract {
         message: String,
     },
     PlanValidation {
@@ -2543,13 +2627,18 @@ pub trait PlannerJournal: Send + Sync {
     /// Retains one transition according to the journal's durability contract.
     ///
     /// A `Prepared` acknowledgement must atomically reserve the declared token
-    /// ceiling before returning. The executor will call no backend before it
-    /// receives that acknowledgement.
+    /// ceiling before returning. `expected_inference_policy` must come from
+    /// trusted runtime configuration, never from the record being admitted.
+    /// The executor will call no backend before it receives acknowledgement.
     ///
     /// # Errors
     ///
     /// Returns an error unless the transition is durably accepted.
-    fn retain(&self, record: &PlannerJournalRecord) -> Result<(), PlannerJournalError>;
+    fn retain(
+        &self,
+        record: &PlannerJournalRecord,
+        expected_inference_policy: &PlannerReplannerInferencePolicy,
+    ) -> Result<(), PlannerJournalError>;
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2587,9 +2676,17 @@ impl PlannerJournalProjection {
     ///
     /// # Errors
     ///
-    /// Rejects missing, duplicate, out-of-order, or hash-unbound transitions.
+    /// Rejects missing, duplicate, out-of-order, hash-unbound, or externally
+    /// policy-inconsistent transitions. The expected policy is never inferred
+    /// from a retained record.
     #[allow(clippy::too_many_lines)]
-    pub fn replay(records: &[PlannerJournalRecord]) -> Result<Self, PlannerJournalError> {
+    pub fn replay(
+        records: &[PlannerJournalRecord],
+        expected_inference_policy: &PlannerReplannerInferencePolicy,
+    ) -> Result<Self, PlannerJournalError> {
+        expected_inference_policy
+            .validate_integrity()
+            .map_err(|error| inference_policy_journal_error(&error))?;
         if records.len() > HARD_MAX_ACTIVE_JOURNAL_RECORDS {
             return Err(PlannerJournalError::new(
                 "active planner journal exceeds its hard record limit; durable archival is required",
@@ -2601,7 +2698,7 @@ impl PlannerJournalProjection {
         for record in records {
             match record {
                 PlannerJournalRecord::Prepared(prepared) => {
-                    if !prepared_is_internally_valid(prepared)? {
+                    if !prepared_is_internally_valid(prepared, expected_inference_policy)? {
                         return Err(PlannerJournalError::new(
                             "planner preparation does not bind its request and authority snapshots",
                         ));
@@ -2691,7 +2788,7 @@ impl PlannerJournalProjection {
                     let ReplayedPlannerDecision::Accepted {
                         proposal_sha256,
                         result,
-                    } = replay_planner_decision(prepared, observed)?
+                    } = replay_planner_decision(prepared, observed, expected_inference_policy)?
                     else {
                         return Err(PlannerJournalError::new(
                             "planner acceptance contradicts the observed deterministic decision",
@@ -2734,7 +2831,7 @@ impl PlannerJournalProjection {
                         ));
                     }
                     let ReplayedPlannerDecision::Rejected(expected_rejection) =
-                        replay_planner_decision(prepared, observed)?
+                        replay_planner_decision(prepared, observed, expected_inference_policy)?
                     else {
                         return Err(PlannerJournalError::new(
                             "planner rejection contradicts the observed deterministic decision",
@@ -2759,28 +2856,52 @@ impl PlannerJournalProjection {
 
 fn prepared_is_internally_valid(
     prepared: &PlannerAttemptPrepared,
+    expected_inference_policy: &PlannerReplannerInferencePolicy,
 ) -> Result<bool, PlannerJournalError> {
-    let request_sha256 =
-        digest_of(&prepared.request).map_err(|error| contract_journal_error(&error))?;
+    let prompt_bundle_sha256 = digest_of(prepared.prompt_bundle.as_ref())
+        .map_err(|error| contract_journal_error(&error))?;
     let base_plan_sha256 = prepared
         .base_plan
         .sha256()
         .map_err(|error| contract_journal_error(&error))?;
-    Ok(prepared.request.model_id() == &prepared.model_id
-        && prepared.request.max_output_tokens() == prepared.max_output_tokens
-        && request_sha256 == prepared.request_sha256
-        && base_plan_sha256 == prepared.base_plan_sha256
-        && prepared.obligations.snapshot_sha256() == &prepared.obligation_snapshot_sha256
-        && prepared.obligations.acceptance_policy_sha256() == &prepared.acceptance_policy_sha256
-        && prepared.context.manifest_sha256() == &prepared.context_manifest_sha256
-        && prepared.policy.policy_sha256() == &prepared.planner_policy_sha256
-        && planner_setup_violations(
-            &prepared.base_plan,
-            &prepared.obligations,
-            &prepared.context,
-            &prepared.policy,
-        )
-        .is_empty())
+    Ok(
+        prepared.inference_policy.as_ref() == expected_inference_policy
+            && &prepared.inference_policy_sha256 == expected_inference_policy.policy_sha256()
+            && prepared.prompt_bundle.inference_policy_sha256()
+                == expected_inference_policy.policy_sha256()
+            && &prepared.backend_id == expected_inference_policy.backend_id()
+            && &prepared.backend_instance == expected_inference_policy.backend_instance()
+            && &prepared.model_id == expected_inference_policy.model_id()
+            && prepared.max_output_tokens == expected_inference_policy.max_output_tokens()
+            && prepared.prompt_bundle.inference().model_id() == &prepared.model_id
+            && prepared.prompt_bundle.inference().reasoning()
+                == expected_inference_policy.reasoning()
+            && prepared.prompt_bundle.inference().max_output_tokens() == prepared.max_output_tokens
+            && prompt_bundle_sha256 == prepared.prompt_bundle_sha256
+            && base_plan_sha256 == prepared.base_plan_sha256
+            && prepared.obligations.snapshot_sha256() == &prepared.obligation_snapshot_sha256
+            && prepared.obligations.acceptance_policy_sha256()
+                == &prepared.acceptance_policy_sha256
+            && prepared.context.manifest_sha256() == &prepared.context_manifest_sha256
+            && prepared.policy.policy_sha256() == &prepared.planner_policy_sha256
+            && prepared
+                .prompt_bundle
+                .validate_against(
+                    &prepared.base_plan,
+                    &prepared.obligations,
+                    &prepared.context,
+                    &prepared.policy,
+                    expected_inference_policy,
+                )
+                .is_ok()
+            && planner_setup_violations(
+                &prepared.base_plan,
+                &prepared.obligations,
+                &prepared.context,
+                &prepared.policy,
+            )
+            .is_empty(),
+    )
 }
 
 enum ReplayedPlannerDecision {
@@ -2794,14 +2915,26 @@ enum ReplayedPlannerDecision {
 fn replay_planner_decision(
     prepared: &PlannerAttemptPrepared,
     observed: &PlannerAttemptObserved,
+    expected_inference_policy: &PlannerReplannerInferencePolicy,
 ) -> Result<ReplayedPlannerDecision, PlannerJournalError> {
     let PlannerInferenceObservation::Response { response } = &observed.observation else {
-        return Ok(ReplayedPlannerDecision::Rejected(PlannerRejection::Backend));
+        let PlannerInferenceObservation::Error { error } = &observed.observation else {
+            unreachable!("planner inference observation has a closed response/error wire")
+        };
+        let violations = planner_backend_error_violations(error, &prepared.backend_instance);
+        return Ok(ReplayedPlannerDecision::Rejected(
+            if violations.is_empty() {
+                PlannerRejection::Backend
+            } else {
+                PlannerRejection::ResponseContract { violations }
+            },
+        ));
     };
     let response_violations = planner_response_violations(
         response,
         &prepared.model_id,
         &prepared.backend_id,
+        &prepared.backend_instance,
         prepared.max_output_tokens,
     );
     if !response_violations.is_empty() {
@@ -2811,32 +2944,43 @@ fn replay_planner_decision(
             },
         ));
     }
-    let proposal = match serde_json::from_value::<PlannerTurnProposal>(response.value.clone()) {
-        Ok(proposal) => proposal,
-        Err(error) => {
-            return Ok(ReplayedPlannerDecision::Rejected(
-                PlannerRejection::OutputDecode {
-                    message: error.to_string(),
-                },
-            ));
-        }
-    };
-    let proposal_sha256 = digest_of(&proposal).map_err(|error| contract_journal_error(&error))?;
-    match proposal.validate_and_apply(
+    let (proposal, result) = match decode_and_apply_planner_replanner_output(
+        &prepared.prompt_bundle,
+        &response.value,
         &prepared.base_plan,
         &prepared.obligations,
         &prepared.context,
         &prepared.policy,
+        expected_inference_policy,
     ) {
-        Ok(result) => Ok(ReplayedPlannerDecision::Accepted {
-            proposal_sha256,
-            result: Box::new(result),
-        }),
-        Err(error) => Ok(ReplayedPlannerDecision::Rejected(
-            PlannerRejection::PlanValidation {
-                violations: error.violations,
-            },
-        )),
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(ReplayedPlannerDecision::Rejected(planner_prompt_rejection(
+                error,
+            )));
+        }
+    };
+    let proposal_sha256 = digest_of(&proposal).map_err(|error| contract_journal_error(&error))?;
+    Ok(ReplayedPlannerDecision::Accepted {
+        proposal_sha256,
+        result: Box::new(result),
+    })
+}
+
+fn planner_prompt_rejection(error: PlannerReplannerApplyError) -> PlannerRejection {
+    match error {
+        PlannerReplannerApplyError::OutputDecode(error) => PlannerRejection::OutputDecode {
+            message: error.to_string(),
+        },
+        PlannerReplannerApplyError::Plan(error) => PlannerRejection::PlanValidation {
+            violations: error.violations,
+        },
+        PlannerReplannerApplyError::Setup(error) => PlannerRejection::PromptContract {
+            message: error.to_string(),
+        },
+        PlannerReplannerApplyError::Prompt(error) => PlannerRejection::PromptContract {
+            message: error.to_string(),
+        },
     }
 }
 
@@ -2863,33 +3007,43 @@ impl InMemoryPlannerJournal {
     /// # Errors
     ///
     /// Returns an error for poisoned storage or an invalid event sequence.
-    pub fn projection(&self) -> Result<PlannerJournalProjection, PlannerJournalError> {
-        PlannerJournalProjection::replay(&self.snapshot()?)
+    pub fn projection(
+        &self,
+        expected_inference_policy: &PlannerReplannerInferencePolicy,
+    ) -> Result<PlannerJournalProjection, PlannerJournalError> {
+        PlannerJournalProjection::replay(&self.snapshot()?, expected_inference_policy)
     }
 }
 
 impl PlannerJournal for InMemoryPlannerJournal {
-    fn retain(&self, record: &PlannerJournalRecord) -> Result<(), PlannerJournalError> {
+    fn retain(
+        &self,
+        record: &PlannerJournalRecord,
+        expected_inference_policy: &PlannerReplannerInferencePolicy,
+    ) -> Result<(), PlannerJournalError> {
         let mut records = self
             .records
             .lock()
             .map_err(|_| PlannerJournalError::new("planner journal lock was poisoned"))?;
         let mut candidate = records.clone();
         candidate.push(record.clone());
-        PlannerJournalProjection::replay(&candidate)?;
+        PlannerJournalProjection::replay(&candidate, expected_inference_policy)?;
         records.push(record.clone());
         Ok(())
     }
 }
 
 /// Complete authoritative inputs for one planner inference attempt.
+///
+/// The trusted inference policy is deliberately absent: it is owned by the
+/// executor/runtime and cannot be supplied or replaced by this request.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlannerExecutionRequest {
     pub execution_id: PlannerExecutionId,
     pub attempt_id: PlannerAttemptId,
     pub parent_attempt_id: Option<PlannerAttemptId>,
     pub budget_reservation_id: BudgetReservationId,
-    pub inference: StructuredInferenceRequest,
+    pub prompt_bundle: PreparedPlannerReplannerRequest,
     pub base_plan: PlanSnapshot,
     pub obligations: ProtectedObligationCatalog,
     pub context: PlannerContextCatalog,
@@ -2899,7 +3053,7 @@ pub struct PlannerExecutionRequest {
 impl PlannerExecutionRequest {
     #[must_use]
     pub fn new(
-        inference: StructuredInferenceRequest,
+        prompt_bundle: PreparedPlannerReplannerRequest,
         base_plan: PlanSnapshot,
         obligations: ProtectedObligationCatalog,
         context: PlannerContextCatalog,
@@ -2910,7 +3064,7 @@ impl PlannerExecutionRequest {
             attempt_id: PlannerAttemptId::new(),
             parent_attempt_id: None,
             budget_reservation_id: BudgetReservationId::new(),
-            inference,
+            prompt_bundle,
             base_plan,
             obligations,
             context,
@@ -2945,8 +3099,14 @@ pub struct PlannerExecution {
 
 #[derive(Debug, Error)]
 pub enum PlannerExecutionError {
+    #[error(transparent)]
+    InferencePolicy(#[from] PlannerReplannerInferencePolicyError),
+    #[error("configured planner backend does not match the trusted inference policy")]
+    BackendPolicyMismatch,
     #[error("planner setup is invalid: {violations:?}")]
     Setup { violations: Vec<PlannerViolation> },
+    #[error("planner prompt boundary is invalid: {message}")]
+    PromptBoundary { message: String },
     #[error("planner preparation was not acknowledged: {message}")]
     PreparationUnacknowledged { message: String },
     #[error(
@@ -2968,9 +3128,13 @@ pub enum PlannerExecutionError {
 }
 
 /// Runs one prepared, observed, and durably decided planner attempt.
+///
+/// `inference_policy` is an independently configured authority input, not a
+/// property recovered from the request or durable candidate.
 pub struct PlannerExecutor<'a, B: ModelBackend + ?Sized, J: PlannerJournal + ?Sized> {
     backend: &'a B,
     journal: &'a J,
+    inference_policy: &'a PlannerReplannerInferencePolicy,
 }
 
 impl<'a, B, J> PlannerExecutor<'a, B, J>
@@ -2979,8 +3143,16 @@ where
     J: PlannerJournal + ?Sized,
 {
     #[must_use]
-    pub const fn new(backend: &'a B, journal: &'a J) -> Self {
-        Self { backend, journal }
+    pub const fn new(
+        backend: &'a B,
+        journal: &'a J,
+        inference_policy: &'a PlannerReplannerInferencePolicy,
+    ) -> Self {
+        Self {
+            backend,
+            journal,
+            inference_policy,
+        }
     }
 
     /// Executes exactly one inference after durable preparation.
@@ -2996,6 +3168,7 @@ where
         &self,
         request: PlannerExecutionRequest,
     ) -> Result<PlannerExecution, PlannerExecutionError> {
+        self.inference_policy.validate_integrity()?;
         let setup_violations = planner_setup_violations(
             &request.base_plan,
             &request.obligations,
@@ -3007,35 +3180,63 @@ where
                 violations: setup_violations,
             });
         }
+        request
+            .prompt_bundle
+            .validate_against(
+                &request.base_plan,
+                &request.obligations,
+                &request.context,
+                &request.policy,
+                self.inference_policy,
+            )
+            .map_err(|error| PlannerExecutionError::PromptBoundary {
+                message: error.to_string(),
+            })?;
+        if self.backend.backend_id() != self.inference_policy.backend_id()
+            || self.backend.instance_identity() != self.inference_policy.backend_instance()
+            || self
+                .backend
+                .instance_identity()
+                .validate_integrity()
+                .is_err()
+        {
+            return Err(PlannerExecutionError::BackendPolicyMismatch);
+        }
 
         let base_plan_sha256 = request
             .base_plan
             .sha256()
             .map_err(|error| PlannerExecutionError::Encoding(error.to_string()))?;
-        let request_sha256 = digest_of(&request.inference)
+        let prompt_bundle_sha256 = digest_of(&request.prompt_bundle)
             .map_err(|error| PlannerExecutionError::Encoding(error.to_string()))?;
         let prepared = PlannerAttemptPrepared {
             execution_id: request.execution_id,
             attempt_id: request.attempt_id,
             parent_attempt_id: request.parent_attempt_id,
             budget_reservation_id: request.budget_reservation_id,
-            backend_id: self.backend.backend_id().clone(),
-            model_id: request.inference.model_id().clone(),
-            max_output_tokens: request.inference.max_output_tokens(),
+            backend_id: self.inference_policy.backend_id().clone(),
+            backend_instance: self.inference_policy.backend_instance().clone(),
+            model_id: self.inference_policy.model_id().clone(),
+            max_output_tokens: self.inference_policy.max_output_tokens(),
             base_plan_sha256,
             obligation_snapshot_sha256: request.obligations.snapshot_sha256.clone(),
             acceptance_policy_sha256: request.obligations.acceptance_policy_sha256.clone(),
             context_manifest_sha256: request.context.manifest_sha256().clone(),
             planner_policy_sha256: request.policy.policy_sha256.clone(),
-            request_sha256,
-            request: request.inference.clone(),
+            inference_policy_sha256: self.inference_policy.policy_sha256().clone(),
+            inference_policy: Box::new(self.inference_policy.clone()),
+            prompt_bundle_sha256,
+            prompt_bundle: Box::new(request.prompt_bundle.clone()),
             base_plan: Box::new(request.base_plan.clone()),
             obligations: Box::new(request.obligations.clone()),
             context: Box::new(request.context.clone()),
             policy: Box::new(request.policy.clone()),
         };
         self.journal
-            .retain(&PlannerJournalRecord::Prepared(prepared.clone()))
+            .retain(
+                &PlannerJournalRecord::Prepared(prepared.clone()),
+                self.inference_policy,
+            )
             .map_err(|error| PlannerExecutionError::PreparationUnacknowledged {
                 message: error.message,
             })?;
@@ -3043,7 +3244,10 @@ where
         // Calling the backend itself may allocate or start work, so it occurs
         // strictly after the journal acknowledgement above, not merely after a
         // future is constructed.
-        let backend_result = self.backend.infer_structured(request.inference).await;
+        let backend_result = self
+            .backend
+            .infer_structured(request.prompt_bundle.inference().clone())
+            .await;
         let observation = match backend_result {
             Ok(response) => PlannerInferenceObservation::Response {
                 response: Box::new(response),
@@ -3060,7 +3264,10 @@ where
             observation,
         };
         self.journal
-            .retain(&PlannerJournalRecord::Observed(observed.clone()))
+            .retain(
+                &PlannerJournalRecord::Observed(observed.clone()),
+                self.inference_policy,
+            )
             .map_err(|error| PlannerExecutionError::ObservationUnacknowledged {
                 attempt_id: request.attempt_id,
                 message: error.message,
@@ -3070,11 +3277,19 @@ where
             .sha256()
             .map_err(|error| PlannerExecutionError::Encoding(error.to_string()))?;
         let PlannerInferenceObservation::Response { response } = &observed.observation else {
+            let PlannerInferenceObservation::Error { error } = &observed.observation else {
+                unreachable!("planner inference observation has a closed response/error wire")
+            };
+            let violations = planner_backend_error_violations(error, &prepared.backend_instance);
             return self.rejected_execution(
                 prepared,
                 observed,
                 observed_sha256,
-                PlannerRejection::Backend,
+                if violations.is_empty() {
+                    PlannerRejection::Backend
+                } else {
+                    PlannerRejection::ResponseContract { violations }
+                },
             );
         };
 
@@ -3082,6 +3297,7 @@ where
             response,
             &prepared.model_id,
             &prepared.backend_id,
+            &prepared.backend_instance,
             prepared.max_output_tokens,
         );
         if !response_violations.is_empty() {
@@ -3095,39 +3311,27 @@ where
             );
         }
 
-        let proposal = match serde_json::from_value::<PlannerTurnProposal>(response.value.clone()) {
-            Ok(proposal) => proposal,
+        let (proposal, result) = match decode_and_apply_planner_replanner_output(
+            &request.prompt_bundle,
+            &response.value,
+            &request.base_plan,
+            &request.obligations,
+            &request.context,
+            &request.policy,
+            self.inference_policy,
+        ) {
+            Ok(value) => value,
             Err(error) => {
                 return self.rejected_execution(
                     prepared,
                     observed,
                     observed_sha256,
-                    PlannerRejection::OutputDecode {
-                        message: error.to_string(),
-                    },
+                    planner_prompt_rejection(error),
                 );
             }
         };
         let proposal_sha256 = digest_of(&proposal)
             .map_err(|error| PlannerExecutionError::Encoding(error.to_string()))?;
-        let result = match proposal.validate_and_apply(
-            &request.base_plan,
-            &request.obligations,
-            &request.context,
-            &request.policy,
-        ) {
-            Ok(result) => result,
-            Err(error) => {
-                return self.rejected_execution(
-                    prepared,
-                    observed,
-                    observed_sha256,
-                    PlannerRejection::PlanValidation {
-                        violations: error.violations,
-                    },
-                );
-            }
-        };
         let accepted = PlannerAttemptAccepted {
             execution_id: request.execution_id,
             attempt_id: request.attempt_id,
@@ -3136,7 +3340,10 @@ where
             result: result.clone(),
         };
         self.journal
-            .retain(&PlannerJournalRecord::Accepted(accepted))
+            .retain(
+                &PlannerJournalRecord::Accepted(accepted),
+                self.inference_policy,
+            )
             .map_err(|error| PlannerExecutionError::DecisionUnacknowledged {
                 attempt_id: request.attempt_id,
                 message: error.message,
@@ -3162,7 +3369,10 @@ where
             rejection: rejection.clone(),
         };
         self.journal
-            .retain(&PlannerJournalRecord::Rejected(rejected))
+            .retain(
+                &PlannerJournalRecord::Rejected(rejected),
+                self.inference_policy,
+            )
             .map_err(|error| PlannerExecutionError::DecisionUnacknowledged {
                 attempt_id: prepared.attempt_id,
                 message: error.message,
@@ -3207,6 +3417,7 @@ fn planner_response_violations(
     response: &StructuredInferenceResponse,
     expected_model: &ModelId,
     expected_backend: &BackendId,
+    expected_instance: &BackendInstanceIdentity,
     max_output_tokens: u32,
 ) -> Vec<PlannerResponseViolation> {
     let mut violations = Vec::new();
@@ -3215,6 +3426,15 @@ fn planner_response_violations(
     }
     if &response.evidence.backend_id != expected_backend {
         violations.push(PlannerResponseViolation::BackendIdentityMismatch);
+    }
+    if response.evidence.backend_instance.as_ref() != Some(expected_instance) {
+        violations.push(PlannerResponseViolation::BackendInstanceIdentityMismatch);
+    }
+    if !expected_instance
+        .endpoint_origin()
+        .matches_endpoint(&response.evidence.endpoint)
+    {
+        violations.push(PlannerResponseViolation::EndpointOriginMismatch);
     }
     match serde_json::from_str::<serde_json::Value>(&response.raw_text) {
         Ok(value) if value != response.value => {
@@ -3236,7 +3456,39 @@ fn planner_response_violations(
     violations
 }
 
+fn planner_backend_error_violations(
+    error: &BackendError,
+    expected_instance: &BackendInstanceIdentity,
+) -> Vec<PlannerResponseViolation> {
+    let mut violations = Vec::new();
+    if &error.backend_id != expected_instance.backend_id() {
+        violations.push(PlannerResponseViolation::BackendIdentityMismatch);
+    }
+    if error.backend_instance.as_deref() != Some(expected_instance) {
+        violations.push(PlannerResponseViolation::BackendInstanceIdentityMismatch);
+    }
+    if error
+        .evidence
+        .as_ref()
+        .and_then(|evidence| evidence.endpoint.as_deref())
+        .is_some_and(|endpoint| {
+            !expected_instance
+                .endpoint_origin()
+                .matches_endpoint(endpoint)
+        })
+    {
+        violations.push(PlannerResponseViolation::EndpointOriginMismatch);
+    }
+    violations
+}
+
 fn contract_journal_error(error: &PlannerContractError) -> PlannerJournalError {
+    PlannerJournalError::new(error.to_string())
+}
+
+fn inference_policy_journal_error(
+    error: &PlannerReplannerInferencePolicyError,
+) -> PlannerJournalError {
     PlannerJournalError::new(error.to_string())
 }
 

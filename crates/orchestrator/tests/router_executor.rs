@@ -1,6 +1,7 @@
 use birdcode_backends::{
-    BackendError, BackendErrorKind, BackendFuture, BackendId, BackendOperation, InferenceEvidence,
-    MessageRole as BackendMessageRole, ModelBackend, ModelCatalog, ModelId,
+    BackendDeploymentId, BackendEndpointOrigin, BackendError, BackendErrorKind, BackendFuture,
+    BackendId, BackendInstanceIdentity, BackendOperation, BackendTransportIdentity,
+    InferenceEvidence, MessageRole as BackendMessageRole, ModelBackend, ModelCatalog, ModelId,
     StructuredInferenceRequest, StructuredInferenceResponse, TokenUsage,
 };
 use birdcode_orchestrator::{
@@ -23,6 +24,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct FakeBackend {
     id: BackendId,
+    instance: BackendInstanceIdentity,
     replies: Mutex<VecDeque<Result<StructuredInferenceResponse, BackendError>>>,
     requests: Mutex<Vec<StructuredInferenceRequest>>,
     calls: AtomicUsize,
@@ -32,6 +34,7 @@ impl FakeBackend {
     fn new(replies: Vec<Result<StructuredInferenceResponse, BackendError>>) -> Self {
         Self {
             id: backend_id(),
+            instance: backend_instance(),
             replies: Mutex::new(replies.into()),
             requests: Mutex::new(Vec::new()),
             calls: AtomicUsize::new(0),
@@ -50,6 +53,10 @@ impl FakeBackend {
 impl ModelBackend for FakeBackend {
     fn backend_id(&self) -> &BackendId {
         &self.id
+    }
+
+    fn instance_identity(&self) -> &BackendInstanceIdentity {
+        &self.instance
     }
 
     fn discover_models(&self) -> BackendFuture<'_, ModelCatalog> {
@@ -80,6 +87,18 @@ fn model_id() -> ModelId {
     ModelId::new("fake/router-model").expect("valid model id")
 }
 
+fn backend_instance() -> BackendInstanceIdentity {
+    BackendInstanceIdentity::new(
+        backend_id(),
+        BackendTransportIdentity::HttpOrigin {
+            origin: BackendEndpointOrigin::parse("http://127.0.0.1:19005")
+                .expect("canonical test origin"),
+        },
+        BackendDeploymentId::new("router-test-deployment").expect("deployment ID"),
+    )
+    .expect("backend instance")
+}
+
 fn response(value: Value) -> StructuredInferenceResponse {
     StructuredInferenceResponse {
         model_id: model_id(),
@@ -89,7 +108,8 @@ fn response(value: Value) -> StructuredInferenceResponse {
         usage: None,
         evidence: InferenceEvidence {
             backend_id: backend_id(),
-            endpoint: "fake://structured-inference".to_owned(),
+            backend_instance: Some(backend_instance()),
+            endpoint: "http://127.0.0.1:19005/v1/chat/completions".to_owned(),
             status: 200,
             completion_id: Some("completion-1".to_owned()),
             response_body_sha256: Some("0".repeat(64)),
@@ -155,6 +175,7 @@ fn response_contract_cases(value: Value, maximum: u64) -> Vec<ResponseContractCa
 fn backend_failure() -> BackendError {
     BackendError {
         backend_id: backend_id(),
+        backend_instance: Some(Box::new(backend_instance())),
         operation: BackendOperation::StructuredInference,
         kind: BackendErrorKind::Transport,
         message: "simulated repair transport failure".to_owned(),

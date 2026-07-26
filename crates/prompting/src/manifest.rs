@@ -27,6 +27,14 @@ pub const PLAN_CRITIC_MANIFEST_JSON: &str =
     include_str!("../../../prompts/plan-semantic-critic/1.0.0/manifest.json");
 pub const PLAN_REPAIR_MANIFEST_JSON: &str =
     include_str!("../../../prompts/root-plan-repair/1.0.0/manifest.json");
+pub const REPOSITORY_EXPLORER_MANIFEST_JSON: &str =
+    include_str!("../../../prompts/repository-explorer/1.0.0/manifest.json");
+pub const REPOSITORY_REVIEWER_MANIFEST_JSON: &str =
+    include_str!("../../../prompts/repository-semantic-reviewer/1.0.0/manifest.json");
+pub const PLANNER_REPLANNER_MANIFEST_JSON: &str =
+    include_str!("../../../prompts/planner-replanner/1.0.0/manifest.json");
+pub const PLANNER_REPLANNER_V2_MANIFEST_JSON: &str =
+    include_str!("../../../prompts/planner-replanner-v2/1.0.0/manifest.json");
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
 #[derive(Debug, Error)]
@@ -61,7 +69,23 @@ pub enum PromptError {
     RootPlannerOutputInvariant(Vec<crate::root_planner::RootPlannerInvariantViolation>),
     #[error("model output violates semantic plan-critic invariants: {0:?}")]
     PlanCriticOutputInvariant(Vec<crate::plan_critic::PlanCriticInvariantViolation>),
-    #[error("generation schema contains an invalid dynamic directive: {0}")]
+    #[error("model output violates repository-explorer invariants: {0:?}")]
+    RepositoryExplorerOutputInvariant(
+        Vec<crate::repository_explorer::RepositoryExplorerInvariantViolation>,
+    ),
+    #[error("model output violates repository-reviewer invariants: {0:?}")]
+    RepositoryReviewerOutputInvariant(
+        Vec<crate::repository_reviewer::RepositoryReviewInvariantViolationV1>,
+    ),
+    #[error("model output violates planner-replanner invariants: {0:?}")]
+    PlannerReplannerOutputInvariant(
+        Vec<crate::planner_replanner::PlannerReplannerInvariantViolation>,
+    ),
+    #[error("model output violates planner-replanner-v2 invariants: {0:?}")]
+    PlannerReplannerV2OutputInvariant(
+        Vec<crate::planner_replanner_v2::PlannerReplannerV2InvariantViolation>,
+    ),
+    #[error("generation schema contains an invalid directive: {0}")]
     GenerationSchemaDirective(String),
 }
 
@@ -338,6 +362,10 @@ pub fn builtin_registry() -> Result<PromptRegistry, PromptError> {
         parse_manifest(ROOT_PLANNER_MANIFEST_JSON.as_bytes())?,
         parse_manifest(PLAN_CRITIC_MANIFEST_JSON.as_bytes())?,
         parse_manifest(PLAN_REPAIR_MANIFEST_JSON.as_bytes())?,
+        parse_manifest(REPOSITORY_EXPLORER_MANIFEST_JSON.as_bytes())?,
+        parse_manifest(REPOSITORY_REVIEWER_MANIFEST_JSON.as_bytes())?,
+        parse_manifest(PLANNER_REPLANNER_MANIFEST_JSON.as_bytes())?,
+        parse_manifest(PLANNER_REPLANNER_V2_MANIFEST_JSON.as_bytes())?,
     ])
 }
 
@@ -430,6 +458,22 @@ impl PromptRegistry {
             crate::plan_critic::validate_plan_critic_output(value, invocation)
                 .map_err(PromptError::PlanCriticOutputInvariant)?;
         }
+        if crate::repository_explorer::is_repository_explorer_key(key) {
+            crate::repository_explorer::validate_repository_explorer_output(value, invocation)
+                .map_err(PromptError::RepositoryExplorerOutputInvariant)?;
+        }
+        if crate::repository_reviewer::is_repository_reviewer_key(key) {
+            crate::repository_reviewer::validate_repository_review_output(value, invocation)
+                .map_err(PromptError::RepositoryReviewerOutputInvariant)?;
+        }
+        if crate::planner_replanner::is_planner_replanner_key(key) {
+            crate::planner_replanner::validate_planner_replanner_output(value, invocation)
+                .map_err(PromptError::PlannerReplannerOutputInvariant)?;
+        }
+        if crate::planner_replanner_v2::is_planner_replanner_v2_key(key) {
+            crate::planner_replanner_v2::validate_planner_replanner_v2_output(value, invocation)
+                .map_err(PromptError::PlannerReplannerV2OutputInvariant)?;
+        }
         Ok(())
     }
 
@@ -445,7 +489,7 @@ impl PromptRegistry {
         invocation: &PromptInvocation,
         bytes: &[u8],
     ) -> Result<T, PromptError> {
-        let value = serde_json::from_slice::<Value>(bytes)?;
+        let value = serde_json::from_slice::<UniqueJsonValue>(bytes)?.0;
         self.validate_output(compiled, invocation, &value)?;
         serde_json::from_value(value).map_err(PromptError::from)
     }
@@ -506,6 +550,36 @@ fn validate_generation_directives(value: &Value) -> Result<(), PromptError> {
             }
         }
         Value::Object(object) => {
+            if object.contains_key("x-birdcode-runtime-const")
+                && object.contains_key("x-birdcode-dynamic-enum")
+            {
+                return Err(PromptError::GenerationSchemaDirective(
+                    "schema node cannot combine generation directives".to_owned(),
+                ));
+            }
+            if let Some(directive) = object.get("x-birdcode-runtime-const") {
+                let valid = object.len() == 1
+                    && directive.as_object().is_some_and(|directive| {
+                        directive.len() == 2
+                            && directive
+                                .get("constraint")
+                                .and_then(Value::as_str)
+                                .is_some_and(|name| !name.is_empty() && name.len() <= 128)
+                            && directive
+                                .get("pointer")
+                                .and_then(Value::as_str)
+                                .is_some_and(|pointer| {
+                                    pointer.starts_with('/')
+                                        && pointer.len() <= 512
+                                        && !pointer.contains('\0')
+                                })
+                    });
+                if !valid {
+                    return Err(PromptError::GenerationSchemaDirective(
+                        "invalid runtime const directive".to_owned(),
+                    ));
+                }
+            }
             if let Some(directive) = object.get("x-birdcode-dynamic-enum")
                 && (directive.as_str() != Some("input_section_names")
                     || object.get("type").and_then(Value::as_str) != Some("string")

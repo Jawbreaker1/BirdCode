@@ -25,10 +25,20 @@ strongest available Codex Sol/Ultra baseline under fair clean-room comparison.
 That is a measured product target, not a superiority claim the current
 foundation has earned.
 
-The project is currently at the **policy-separated semantic root-review
-milestone**. The native desktop and CLI can discover exact already-loaded LM
-Studio models and submit a `PlanOnly` run under an explicit producer/critic
-role-separation policy. The daemon retains every compiled prompt, the canonical
+The current branch contains two maturity levels that are deliberately kept
+distinct:
+
+- **Product-wired:** the native desktop and CLI can discover exact
+  already-loaded LM Studio models and submit a durable `PlanOnly` run under an
+  explicit producer/critic role-separation policy.
+- **Standalone and executable:** Rust agent kernels can plan, use bounded
+  repository tools, revise from observations, perform one isolated file
+  replacement, retain a diff, publish an immutable candidate, and commission a
+  separate model-backed semantic review. These kernels run in deterministic
+  tests and opt-in live LM Studio tests, but are not yet reachable from the
+  desktop, CLI, or durable root supervisor.
+
+The product-wired planner retains every compiled prompt, the canonical
 provider-neutral structured request, exact assistant response text, parsed
 provider response JSON, the SHA-256 digest of the exact HTTP response bytes,
 typed proposal, critique, repair authorization, validation result, artifact
@@ -44,21 +54,24 @@ Store derives every accepted verdict from the exact retained reviewer response,
 so a separate forged receipt cannot turn `revise`, invalid output, or a
 different critique into an acceptance.
 
-This is a real durable semantic loop, but it is not yet a coding agent. The
-live root receives the user's goal and repository identity; it does not yet
-inspect repository contents, call tools, edit files, execute work orders,
-launch child agents, or replan from tool evidence.
+The live product root still receives only the user's goal and repository
+identity. It does not yet execute the standalone repository-agent vertical,
+launch child agents, or replan from retained child/tool evidence.
 
 The configured separation policy requires distinct discovered model IDs and
-distinct declared deployment and independence-domain IDs. The current LM
-Studio backend reports exact model IDs but does not attest the latter two
-declarations, and both roles use the same configured backend instance. BirdCode
-therefore describes this as policy separation, not provider-attested
-independence.
+distinct declared deployment and independence-domain IDs. A strict versioned
+backend manifest now binds each declared deployment to an exact backend
+instance, including its canonical endpoint origin and identity digest; the
+daemon refuses missing routes, implicit fallback, a critic configured as the
+public primary, and two LM Studio deployments masquerading behind one origin.
+LM Studio still does not attest the user-declared independence-domain IDs, so
+BirdCode describes this as configuration-enforced separation rather than
+provider-attested organizational independence.
 
-> **Plainly:** BirdCode can now create, criticize, repair once, and accept or
-> reject a durable typed root plan through the GUI or CLI. It cannot execute
-> that plan yet, so it is still not a Codex replacement.
+> **Plainly:** BirdCode now has an executable coding-agent kernel and a
+> separately product-wired durable planning loop. The missing step is connecting
+> them: the GUI and CLI still cannot execute an accepted plan, so BirdCode is
+> not yet a usable Codex replacement.
 
 ## Parallel agency is the execution model
 
@@ -76,20 +89,31 @@ accessibility, UX review, integration, context distillation, documentation, and
 blind outcome review. Semantic decisions stay model-driven through versioned
 typed contracts. The target runtime must enforce permissions, budgets,
 isolation, causal history, cancellation, mailbox delivery, and publication
-gates. In the current product slice, only typed prompt/response contracts,
-role-policy eligibility, model-call/token/time ceilings, durable stage
-transitions, claims, cancellation, and terminal decisions are enforced;
-brokers, isolated workspaces, child mailboxes, and publication gates do not yet
-exist.
+gates. In the product-wired slice, typed prompt/response contracts, role-policy
+eligibility, model-call/token/time ceilings, durable stage transitions, claims,
+cancellation, and terminal decisions are enforced. Standalone daemon/crate
+kernels now also implement a descriptor-confined read-only repository broker,
+macOS snapshot/worktree boundaries, an isolated single-writer lane, immutable
+candidate publication, semantic repository review, and current-generation
+selection. None is connected to GUI/CLI run supervision; durable child
+mailboxes and a merge/promotion gate still do not exist.
 
 **Current truth:** the product-wired path performs policy-separated semantic
-review and at most one root-plan repair. A separate tested planner/replanner kernel
-already represents model-authored `Execute`, `Delegate`, `Clarify`,
-`Escalate`, and `Finish` directives plus bounded plan patches and revisions,
-but it is not connected to the daemon path. No model-backed child actor,
-worktree lease, mailbox, handoff, tooling session, or integration actor
-executes today. The critic is a distinct model role in the root supervisor,
-not yet a general child-agent runtime.
+review and at most one root-plan repair. The standalone path represents
+model-authored `Execute`, `Delegate`, `Clarify`, `Escalate`, and `Finish`
+directives; a repository explorer can plan, call tree/read/literal-search
+tools, observe their exact results, revise, and hand off evidence. A bounded
+implementation worker can read, replace, inspect the diff, and finish inside an
+isolated temporary Git worktree. A separate no-tool reviewer judges the sealed
+candidate. No model-backed child actor, worktree lease, mailbox, tooling
+session, candidate reviewer, or integration actor executes through the GUI,
+CLI, or `RunSupervisor` today.
+
+The standalone current-generation registry atomically selects a
+journal-verified, lifecycle-ready review subject under private per-work-order
+track authority. Its binding is observable state and a compare-and-swap
+expectation—not evidence that semantic review passed, not mechanical
+validation, and not merge or promotion authority.
 
 ## Current interface
 
@@ -169,9 +193,13 @@ scrape credentials or copy private implementation code.
 
 ### A general Tooling Plane
 
-Agents need far more than a test command. BirdCode's planned Tooling Plane is a
+Agents need far more than a test command. BirdCode's Tooling Plane is a
 permissioned, schema-first capability layer shared by root, specialist,
-candidate, integration, and review actors.
+candidate, integration, and review actors. Its first implemented slice is
+intentionally narrow: descriptor-confined repository tree, bounded file-read,
+and literal-search operations plus isolated macOS snapshot/worktree
+primitives. The table describes the complete required reach, not the current
+implementation.
 
 | Tool family | Required reach |
 | --- | --- |
@@ -203,50 +231,64 @@ never turn a mechanically failing result into a pass.
 
 ## Status
 
-BirdCode is pre-alpha and targets macOS on Apple Silicon first. The current
-Protocol-v5 milestone is verified at source commit
+BirdCode is pre-alpha and targets macOS on Apple Silicon first. The latest
+commit-pinned product release gate remains Protocol v5 at source
 `78a77b40483b3a6949bab8301a62483168e13d5a`; its exact scope and host evidence
-are recorded in the [commit-pinned release gate](docs/reviews/2026-07-20-semantic-root-review.md).
+are recorded in the [semantic root-review release gate](docs/reviews/2026-07-20-semantic-root-review.md).
+The newer repository-agent capabilities below are branch-level standalone
+kernels until they receive their own product-wired, commit-pinned release gate.
 
 | Area | Status | What works now |
 | --- | --- | --- |
-| Tauri 2 + React desktop | Implemented semantic-review PlanOnly slice | Starts the real daemon and forwards an explicit policy path when configured, discovers exact loaded LM Studio models, gates semantic submission on that policy, submits/cancels one run, reconciles ambiguous starts, replays typed review/repair events, and verifies every displayed artifact hash |
-| Rust CLI | Implemented semantic-review PlanOnly subset | `doctor`, `session-smoke`, `models`, and `plan`; `plan` requires `--model-policy`, and success prints only the final semantically accepted, hash-verified JSON artifact |
-| Local daemon and client | Implemented semantic-review PlanOnly slice | Protocol v5 over bounded JSON-lines/stdio; discovery can start without a policy, while every new semantic `PlanOnly` run requires one. Supervision, run identity, dispatch, claims, typed failures, deadlines, cancellation, replay, and exact model selection are durable |
+| Tauri 2 + React desktop | Implemented semantic-review PlanOnly slice | Starts the real daemon and forwards explicit policy/backend-manifest paths when configured, discovers the explicit primary LM Studio route, submits/cancels one run, reconciles ambiguous starts, replays typed review/repair events, and verifies every displayed artifact hash |
+| Rust CLI | Implemented semantic-review PlanOnly subset | `doctor`, `session-smoke`, `models`, and `plan`; `plan` requires both `--model-policy` and `--backend-config`, and success prints only the final semantically accepted, hash-verified JSON artifact |
+| Local daemon and client | Implemented exact multi-deployment PlanOnly slice | Bounded JSON-lines/stdio plus a strict versioned backend manifest. Public discovery uses only the explicit producer-primary route; semantic stages resolve exact producer/critic routes with no fallback and bind Prepared, response evidence, and provenance to the full backend instance |
 | Durable store | Implemented foundation | Append-only events, bounded paging, checkpointed upgrades, indexed run state, closed-world schema health, token ledgers, claim leases, and verified content-addressed artifacts |
 | Durable root planner | **Product-wired with policy-separated review** | `InitialPlan → InitialReview → optional Repair → FinalReview`; direct acceptance uses two calls, repair uses four, and every prompt/response/candidate/critique/receipt is retained and causally bound |
 | Semantic task router | Implemented standalone | LLM-classified action, access, and delegation strategy with typed collect-all validation and no heuristic fallback |
 | Standalone router executor | Implemented standalone | First-pass routing plus at most one typed, patch-only evidence repair; fake-backend tested and not daemon-wired |
 | Planner/replanner kernel | Implemented standalone | Model-authored plan patches and `Execute`/`Delegate`/`Clarify`/`Escalate`/`Finish` directives are bounded against trusted compiled obligations, context, budgets, and authority; not daemon-wired |
-| Actor-graph scheduler kernel | Implemented standalone | Validates model-authored DAGs against a trusted policy, executes read-only dependency-ready workers concurrently, bounds retries/deadlines/cleanup/budgets, and retains typed causal provenance; writes fail closed and no production worker or durable journal exists yet |
-| LM Studio backend | Implemented; PlanOnly-wired | Exact read-only discovery plus strict structured inference with bounded HTTP behavior; used by the durable root planner and standalone versioned evals |
+| Actor-graph scheduler kernel | Implemented standalone | Validates model-authored DAGs against trusted role, lineage, dependency, workspace, budget, write-conflict, and independent-review policy; dependency-ready test workers overlap, while exact dispatch journals bind the repository-agent slices below |
+| Repository explorer | Implemented standalone; model-backed test slice | A provider-neutral plan-bearing worker calls only granted tree, bounded file-read, and literal-search tools, observes exact retained results, revises, and returns an evidence-bound handoff; live Gemma exercised read → revise → finish, but the worker is not root-supervisor-wired |
+| Repository implementation worker | Implemented standalone; model-backed test slice | One exact work order can read and replace one granted UTF-8 file, inspect the bounded Git diff, and finish inside a detached temporary worktree with a single writer lane and retained causal artifacts; no build/test command or destination integration follows it yet |
+| Candidate publication lifecycle | Implemented standalone | Seals immutable baseline/preimage/postimage/diff/handoff evidence, binds scheduler dispatch and cleanup, and exposes a ready subject only after the exact worktree release lifecycle; this is evidence packaging, not acceptance or promotion |
+| Repository semantic reviewer | Implemented standalone; model-backed test slice | Resolves one exact journal-anchored immutable candidate, invokes one configured model with no tools, validates and retains a typed verdict, permits at most one field-isolated missing-evidence repair, and reconstructs a closed typed result route; not `RunSupervisor`/GUI/CLI-wired |
+| Candidate current-generation registry | Volatile reference implementation | Private process-local per-work-order authority and full-binding compare-and-swap select lifecycle-ready review subjects into monotonic generations. Exact replay stays historical; stale, foreign, substituted, conflicting, concurrent-successor, and overflow cases fail closed. It does not consume a semantic-pass or mechanical-validation receipt and grants no write/merge/promotion authority |
+| LM Studio backend | Implemented; PlanOnly-wired | Exact read-only discovery plus strict structured inference with bounded HTTP behavior; used by the durable root planner, standalone repository workers, and versioned evals |
 | Execution & Validation Plane | Implemented typed foundation | Composite surface/platform targets, immutable run manifests, commands, bounds, hash-linked provenance, evidence policy, and blind review packages; no process or platform adapter executes yet |
-| Agent execution loop | **Semantic-review planning loop only** | The daemon invokes producer and critic roles for root planning and one bounded repair; repository discovery, tool use, work-order execution, and model-backed child agents do not execute yet |
+| Agent execution loop | **Standalone repository vertical; product still PlanOnly** | Explorer and implementation workers perform model → tool observation → revised model turns; candidate packaging and independent semantic review follow. The daemon product route still invokes only root producer/critic planning and one bounded repair |
 | Context compilation and compaction | Designed | Architecture and invariants are documented; runtime implementation remains |
-| General Tooling Plane and permission broker | Designed, not implemented | No repository, shell, filesystem, Git, browser, or platform tool is exposed to a live agent yet |
-| Parallel agent runtime | **Kernel only; not product-wired** | A standalone generic scheduler executes test workers with real overlap, but no model-backed child, broker-provisioned workspace, durable mailbox/journal, cancellation/recovery, or integration path executes through the daemon |
+| General Tooling Plane and permission broker | Standalone read-only foundation | Descriptor-confined tree, bounded file-read, and literal-search broker plus macOS snapshot/worktree primitives exist under tests; no product-wired broker coordinator, shell/process, browser, or general platform tool surface yet |
+| Parallel agent runtime | **Standalone kernels; not product-wired** | The scheduler proves real overlap for dependency-ready test workers, and the live reviewer gate submits three model cases concurrently. No root-spawned model child graph, durable mailbox/coordinator, cancellation/recovery, candidate integration, or GUI/CLI timeline executes yet |
 | Ollama and OpenAI adapters | Planned | Provider contract exists; adapters do not |
 | Local Codex bridge | Planned | Clean-room adapter direction is documented; no product integration exists yet |
 | Windows and Linux | Planned | Core boundaries are portable, but builds and platform behavior are not yet verified |
 
-The policy-separated semantic root reviewer is the exception to the otherwise
-standalone agent kernels: it is connected end to end through both GUI and CLI.
-Its earlier single-producer predecessor was run live against the locally loaded
-Gemma model. In the retained `2026-07-19` environment observation, LM Studio
-exposed only that one loaded model, which is deliberately insufficient to claim
-a live policy-separated review run. [Inspect that bounded inventory
-observation](docs/evidence/2026-07-19-semantic-root-review/). The semantic router, portable router executor, richer planner/replanner,
-and actor-graph scheduler remain fake-worker/backend validated kernels and are
-not yet daemon capabilities. The validation-plane crate likewise defines and
-tests contracts only; it does not yet run commands, launch applications, drive
-Playwright, or capture media.
+The policy-separated semantic root reviewer remains the only agent loop
+connected end to end through both GUI and CLI. Its earlier single-producer
+predecessor was run live against the locally loaded Gemma model. In the
+retained `2026-07-19` environment observation, LM Studio exposed only that one
+loaded model, which is deliberately insufficient to claim a live
+policy-separated root-review run. [Inspect that bounded inventory
+observation](docs/evidence/2026-07-19-semantic-root-review/).
+
+The standalone repository vertical is further along than the product surface:
+it can model candidate publication, exact semantic review, and race-safe
+current-generation selection. It still cannot mechanically build/test a
+selected candidate or atomically promote it into a destination repository.
+Its worker journals, candidate store, and current-generation registry are
+in-memory reference implementations behind narrow traits, not a durable
+Store-backed end-to-end runtime.
+The validation-plane crate likewise defines and tests contracts only; it does
+not yet run commands, launch applications, drive Playwright, or capture media.
 
 ## Proof, not promises
 
 The strongest retained signals for this foundation are deliberately narrow and
-reproducible. There is not yet a retained live protocol-v5 run with two
-eligible models; current v5 evidence consists of deterministic/adversarial
-tests plus the explicitly insufficient one-model inventory shown above:
+reproducible. The last commit-pinned product release gate is still
+Protocol-v5, and there is not yet a retained live v5 run with two eligible
+models. The newer standalone repository-agent vertical adds a local live-model
+checkpoint, but that opt-in test is not retained release evidence:
 
 - **The Protocol-v5 policy-separated semantic review gate is green.** Source
   commit `78a77b40483b3a6949bab8301a62483168e13d5a` passed 455 Rust test
@@ -258,6 +300,17 @@ tests plus the explicitly insufficient one-model inventory shown above:
   run, code execution, a parallel agent runtime, or Codex parity. [Read the
   release gate](docs/reviews/2026-07-20-semantic-root-review.md) and [desktop
   capture provenance](docs/evidence/2026-07-20-desktop-captures/README.md).
+- **The standalone semantic reviewer completed three live cases concurrently.**
+  The ignored opt-in test used the locally configured
+  `google/gemma-4-26b-a4b` deployment with a 32K context window. It returned
+  `Revise` for a multilingual prompt-injection/nonce-corruption candidate,
+  `Revise` for a semantic `request_id` → `user_id` key substitution, and
+  `Inconclusive` after the single permitted repair when whole-repository
+  compilation evidence was absent. The default budgets were 6,144 primary and
+  4,096 repair output tokens per case. This demonstrates actual parallel
+  model-backed review and bounded repair in the standalone worker; it does not
+  attest model weights, prove reviewer independence, or constitute a
+  commit-pinned product gate.
 - **A real durable root-planning turn completed through the product path—and
   exposed the next missing layer.** From source
   `006786caec7f484a07a3d8fb1851e0246e56e154`, the CLI selected exact loaded
@@ -299,16 +352,18 @@ tests plus the explicitly insufficient one-model inventory shown above:
   four earlier router snapshots, while the root-planner review preserves two
   schema failures and the final semantically insufficient plan instead of
   cherry-picking only green-looking output.
-- **Scope matters.** The live evidence remains the earlier Protocol-v4 planning
-  request and standalone router catalog. Current Protocol-v5 evidence is
-  deterministic/adversarial plus one insufficient model inventory. None of it
-  validates work-order execution, live-model repair/review, repository tools,
-  child agents, compaction, Codex parity, or product security.
+- **Scope matters.** The opt-in Gemma checkpoint validates only three
+  standalone reviewer cases. Neither it nor the retained product evidence
+  validates product-wired work-order execution, candidate build/start/test
+  adapters, a durable current-generation registry, atomic promotion,
+  compaction, Codex parity, or product security.
 
 ## Architecture
 
-The solid path below exists today. Dashed connections show the next integration
-layers rather than current runtime behavior.
+Solid connections below are implemented code paths; the repository-agent island
+is standalone/test-wired, while the desktop-to-supervisor path is
+product-wired. Dashed connections show the missing integration layers rather
+than current runtime behavior.
 
 ```mermaid
 flowchart LR
@@ -330,6 +385,19 @@ flowchart LR
     Prompting --> RouterExecutor["Portable router executor<br/>one evidence-only repair"]
     RouterExecutor -->|"provider-neutral; fake-backend validated"| ModelBackend["Model backend contract"]
     Validation["Typed validation contracts<br/>blind evidence policy"] -->|"standalone contract tests"| Blind["Provider-blind review package"]
+
+    ActorKernel["Standalone actor-graph kernel"] --> Explorer["Repository explorer<br/>plan → tool → observe → revise"]
+    Explorer --> ReadTools["Descriptor-confined<br/>tree · read · literal search"]
+    Explorer --> Handoff["Evidence-bound handoff"]
+    ActorKernel --> Implementer["Single-file implementation worker"]
+    Implementer --> Worktree["Detached temporary Git worktree<br/>single writer lane"]
+    Worktree --> Candidate["Immutable candidate<br/>publish → cleanup → ready"]
+    Candidate --> Reviewer["No-tool semantic reviewer"]
+    Reviewer --> ReviewRoute["Non-authorizing typed route"]
+    Candidate --> Head["Volatile current-generation CAS<br/>ready subject only"]
+    Explorer --> ModelBackend
+    Implementer --> ModelBackend
+    Reviewer --> ModelBackend
 
     Supervisor -.->|"next: execute accepted work orders"| Orchestrator["Durable child-agent runtime"]
     Orchestrator -.-> Actors["Root · specialist · candidate<br/>integration · review actors"]
@@ -363,7 +431,7 @@ From the repository root:
 
 ```sh
 npm ci
-cargo test --workspace
+npm run cargo -- test --workspace
 npm test
 npm run typecheck
 npm run dev
@@ -372,21 +440,23 @@ npm run dev
 `npm run dev` prepares the host-native daemon sidecar and opens the Tauri
 desktop application. The UI can discover exact model IDs with no policy, but
 it keeps plan submission disabled until `BIRDCODE_MODEL_POLICY` names an
-explicit policy path. The desktop reports only that the path is configured;
-the daemon validates the exact producer, critic, prompt contracts, and stage
-budgets during run preflight and may reject an invalid or unavailable policy.
+explicit policy path. A genuinely separated run also needs
+`BIRDCODE_BACKEND_CONFIG`; the daemon validates both exact routes before it
+prepares durable state and refuses to substitute the primary route for a
+missing critic. The desktop reports only that configuration paths were
+provided; the daemon remains the authority for their contents.
 See [policy-separated root-planning review](docs/root-planning-policy.md). Controls
 for later execution and comparison stages remain disabled.
 
 To build and exercise the current CLI subset:
 
 ```sh
-cargo build --workspace
-target/debug/birdcode doctor
-target/debug/birdcode session-smoke
-target/debug/birdcode models
-target/debug/birdcode plan \
+npm run cargo -- run -p birdcode-cli -- doctor
+npm run cargo -- run -p birdcode-cli -- session-smoke
+npm run cargo -- run -p birdcode-cli -- models
+npm run cargo -- run -p birdcode-cli -- plan \
   --model-policy /absolute/path/to/root-planning-policy.json \
+  --backend-config /absolute/path/to/backend-manifest.json \
   --model <exact-loaded-producer-model-id> \
   --goal "Plan the complete outcome" --workspace /path/to/repository
 ```
@@ -401,6 +471,15 @@ Development path overrides:
 - `BIRDCODE_MODEL_POLICY` selects the desktop application's strict root-planning
   policy. The CLI requires the equivalent path as `--model-policy` instead of
   silently reading an identity policy from the environment.
+- `BIRDCODE_BACKEND_CONFIG` selects the desktop application's strict backend
+  manifest. The CLI requires the equivalent `--backend-config` path for
+  `plan`.
+
+Start from [the checked-in policy](examples/root-planning-policy.json) and
+[backend-manifest](examples/backend-manifest.json) templates. Their producer
+and critic deployment IDs must match exactly. The example uses separate
+loopback ports because one LM Studio origin cannot serve as evidence for two
+independent configured deployments.
 
 ## LM Studio discovery and live evaluation
 
@@ -410,21 +489,21 @@ and never loads, unloads, or downloads a model.
 Inspect the model catalog reported by an already-running instance:
 
 ```sh
-cargo run -p birdcode-backends --example lmstudio_probe
+npm run cargo -- run -p birdcode-backends --example lmstudio_probe
 ```
 
 Run the small strict-JSON connectivity prompt against an exact model ID
 returned by discovery:
 
 ```sh
-cargo run -p birdcode-backends --example lmstudio_probe -- --infer <exact-model-id>
+npm run cargo -- run -p birdcode-backends --example lmstudio_probe -- --infer <exact-model-id>
 ```
 
 Run the catalog-driven semantic-router evaluation against exactly one already
 loaded language model:
 
 ```sh
-cargo run -p birdcode-prompting --example lmstudio_router_eval -- \
+npm run cargo -- run -p birdcode-prompting --example lmstudio_router_eval -- \
   --infer-loaded \
   --output evals/reports/local-router-eval.json \
   --source-revision "REVISION" \
@@ -545,6 +624,9 @@ foundation already enforces several important boundaries:
 - the LM Studio client disables proxy use and redirect following so sensitive
   prompts and authorization headers stay on the configured origin;
 - API tokens use a redacting type and are never included in debug output;
+- backend manifests reject unknown fields and inline credentials, are bounded
+  to 256 KiB/64 routes, and may reference secrets only by environment-variable
+  name;
 - BirdCode-created state directories use mode `0700` and state files use
   `0600` on Unix; existing roots are preserved only when they are not writable
   by group/others, symlink-sensitive paths are rejected, and artifact hashes
@@ -561,10 +643,15 @@ foundation already enforces several important boundaries:
   run, then re-derives producer and critic meaning from their exact retained
   prompts, canonical provider-neutral requests, exact assistant text, parsed
   provider responses, and response-byte digests. It checks model, token,
-  provenance, media-type, candidate, critique, validation, and receipt bindings; no
-  semantic output is currently connected to tools, and future execution paths
-  must additionally pass deterministic permission, budget, and
-  state-transition checks;
+  provenance, media-type, candidate, critique, validation, and receipt
+  bindings. This product-wired root output is not connected to tools;
+- standalone repository-agent tool requests pass exact grant, path, budget,
+  persist-before-effect, artifact, and evidence-binding checks. The read broker
+  exposes no shell, process, environment, credential, network, or write API;
+- temporary Git worktrees isolate edits and retain exact preimage/postimage/diff
+  evidence, but they are not a VM or a security sandbox. The product path must
+  still provision and durably supervise tool and workspace authority before
+  executing model output;
 - append-only authority and forged-receipt resistance are enforced by the
   trusted BirdCode runtime and SQLite schema. The event log is not currently
   signed, hash-chained, or externally anchored against a privileged storage
@@ -577,14 +664,22 @@ foundation already enforces several important boundaries:
 Run the portable deterministic foundation gate from the repository root:
 
 ```sh
-cargo fmt --all -- --check
-cargo check --workspace --all-targets
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
+npm run cargo -- fmt --all -- --check
+npm run cache:inspect
+npm run cargo -- test --workspace --all-targets
+npm run cargo -- clippy --workspace --all-targets
 npm test
-npm run typecheck
 npm run build
+node --test scripts/build_cache.test.mjs scripts/codegen_calibration.test.mjs
 ```
+
+All repository Cargo commands go through the checked-in wrapper. It shares one
+marked cache across worktrees, removes it after 72 hours of inactivity, and
+refuses a new build when less than 20 GiB is free. The first wrapper invocation
+safely upgrades a legacy BirdCode-marked cache with Cargo's cache tag before
+inspection. `npm run cache:clean` is a dry-run inspection;
+`npm run cache:clean:apply` removes only a stale cache whose BirdCode marker and
+Cargo cache tag both validate.
 
 Create a native bundle for the current host with:
 
@@ -612,7 +707,7 @@ authoritative wherever possible.
 ```text
 apps/desktop       Tauri 2 + React desktop shell and daemon sidecar manager
 apps/cli           Deliberately small CLI over the shared daemon protocol
-apps/daemon        Local JSON-lines server
+apps/daemon        Local JSON-lines server plus standalone repository-agent workers
 crates/protocol    Provider-, UI-, and OS-independent wire/domain types
 crates/client      Bounded daemon process and request client
 crates/runtime     Portable mechanical runtime state transitions
@@ -620,6 +715,8 @@ crates/store       SQLite event log and content-addressed artifacts
 crates/prompting   Versioned prompt registry, compiler, and semantic router
 crates/backends    Provider-neutral model contract and LM Studio adapter
 crates/orchestrator Standalone semantic routing plus trusted-policy actor-graph scheduling
+crates/tooling     Descriptor-confined repository tree/read/literal-search broker
+crates/workspace   macOS snapshot lifecycle and isolated temporary Git worktrees
 crates/validation  Typed Execution & Validation Plane contracts and blind evidence policy
 prompts            Application prompt manifests and schemas
 evals              Versioned semantic evaluation cases
@@ -636,23 +733,28 @@ the application's eventual license decision.
 
 ## Roadmap
 
-1. Wire accepted root plans through typed `Delegate` decisions to two real
-   read-only model explorers with separate contexts, brokered tree/list,
-   bounded file-read and literal-search tools, durable handoffs, truthful
-   overlap evidence, cancellation, replay, and GUI/CLI timelines.
-2. Feed those retained handoffs immediately into a second planner turn that
-   cites actual child/tool evidence and ends honestly in `Waiting`; add
-   list/inspect/follow-up/interrupt/wait controls and child crash recovery.
-3. Execute one isolated writing child with a Git worktree/overlay, hash-bound
-   patch handoff, deterministic integration ownership, and bounded local build
-   validation.
-4. Prove a genuinely parallel writing graph with atomic live budget ledgers,
-   durable mailboxes, candidate selection, subtree cancellation, integration,
+1. Connect accepted root plans to the existing repository explorer through a
+   durable child lifecycle, then launch at least two isolated model-backed
+   explorers concurrently and show their tool calls, handoffs, budgets,
+   cancellation, and overlap truthfully in GUI and CLI.
+2. Feed retained child/tool evidence into a second root planning turn and wire
+   the existing implementation worker, candidate lifecycle, semantic reviewer,
+   and current-generation state through Store-backed journals rather than their
+   in-memory reference implementations.
+3. Implement the first real Execution & Validation adapter: bounded local
+   process execution with exact argv/environment, streaming logs, exit status,
+   cleanup, and compiler/test evidence. A candidate cannot advance from
+   semantic review alone.
+4. Add an explicit destination integration/promotion authority with
+   time-of-check/time-of-use-safe revalidation, then prove one complete
+   plan → inspect → edit → build/test → review → repair → revalidate journey.
+5. Generalize the writer beyond one full-file replacement and prove a genuinely
+   parallel candidate graph with isolated worktrees, atomic live budget
+   ledgers, durable mailboxes, subtree cancellation, selection, integration,
    and independent review.
-5. Broaden the Tooling and Execution & Validation planes, starting with local
-   process and Playwright web slices, then API/server and CLI/TUI adapters.
-6. Feed retained evidence back into bounded repair and graph replanning, then
-   prove a complete multi-agent build/start/use/repair/revalidate journey.
+6. Broaden the Tooling and Execution & Validation planes to Playwright web,
+   API/server, CLI/TUI, desktop, simulator, Android, Windows, and Linux
+   adapters.
 7. Add semantic retrieval and versioned compaction checkpoints without
    destructive history loss; use eval-derived model profiles to adapt context,
    decomposition, specialists, parallel candidates, and escalation.

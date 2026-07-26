@@ -301,21 +301,87 @@ fn specialize_generation_schema(
         .iter()
         .map(|section| Value::String(section.name.clone()))
         .collect::<Vec<_>>();
-    expand_generation_directives(&mut schema, &section_names)?;
+    expand_generation_directives(&mut schema, &section_names, &invocation.runtime_constraints)?;
+    if contains_generation_directive(&schema) {
+        return Err(PromptError::GenerationSchemaDirective(
+            "specialized generation schema retains an unresolved directive".to_owned(),
+        ));
+    }
+    jsonschema::validator_for(&schema).map_err(|error| PromptError::SchemaCompilation {
+        target: "specialized generation_schema".to_owned(),
+        message: error.to_string(),
+    })?;
     Ok(schema)
+}
+
+fn contains_generation_directive(value: &Value) -> bool {
+    match value {
+        Value::Array(values) => values.iter().any(contains_generation_directive),
+        Value::Object(object) => {
+            object.contains_key("x-birdcode-runtime-const")
+                || object.contains_key("x-birdcode-dynamic-enum")
+                || object.values().any(contains_generation_directive)
+        }
+        _ => false,
+    }
 }
 
 fn expand_generation_directives(
     value: &mut Value,
     section_names: &[Value],
+    runtime_constraints: &[RuntimeConstraint],
 ) -> Result<(), PromptError> {
     match value {
         Value::Array(values) => {
             for value in values {
-                expand_generation_directives(value, section_names)?;
+                expand_generation_directives(value, section_names, runtime_constraints)?;
             }
         }
         Value::Object(object) => {
+            if let Some(directive) = object.remove("x-birdcode-runtime-const") {
+                if !object.is_empty() {
+                    return Err(PromptError::GenerationSchemaDirective(
+                        "runtime const must be the only schema keyword".to_owned(),
+                    ));
+                }
+                let directive_object = directive.as_object().ok_or_else(|| {
+                    PromptError::GenerationSchemaDirective(
+                        "runtime const directive must be an object".to_owned(),
+                    )
+                })?;
+                let constraint = directive_object
+                    .get("constraint")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        PromptError::GenerationSchemaDirective(
+                            "runtime const constraint is missing".to_owned(),
+                        )
+                    })?;
+                let pointer = directive_object
+                    .get("pointer")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        PromptError::GenerationSchemaDirective(
+                            "runtime const pointer is missing".to_owned(),
+                        )
+                    })?;
+                let resolved = runtime_constraints
+                    .iter()
+                    .find(|candidate| candidate.name == constraint)
+                    .and_then(|candidate| candidate.payload.pointer(pointer))
+                    .filter(|value| {
+                        matches!(value, Value::Null | Value::Bool(_) | Value::Number(_))
+                            || matches!(value, Value::String(text) if text.len() <= 16_384)
+                    })
+                    .cloned()
+                    .ok_or_else(|| {
+                        PromptError::GenerationSchemaDirective(format!(
+                            "runtime const {constraint}{pointer} is unresolved or non-scalar"
+                        ))
+                    })?;
+                object.insert("const".to_owned(), resolved);
+                return Ok(());
+            }
             if let Some(directive) = object.remove("x-birdcode-dynamic-enum") {
                 if directive.as_str() != Some("input_section_names") {
                     return Err(PromptError::GenerationSchemaDirective(
@@ -325,7 +391,7 @@ fn expand_generation_directives(
                 object.insert("enum".to_owned(), Value::Array(section_names.to_vec()));
             }
             for value in object.values_mut() {
-                expand_generation_directives(value, section_names)?;
+                expand_generation_directives(value, section_names, runtime_constraints)?;
             }
         }
         _ => {}

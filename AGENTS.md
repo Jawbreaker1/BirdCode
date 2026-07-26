@@ -90,3 +90,18 @@ These instructions apply to the entire repository.
 - Run formatting, static checks, unit tests, and the relevant end-to-end path.
 - Record known platform gaps explicitly; do not silently label macOS-only code
   as cross-platform.
+
+## Local build-cache discipline
+
+- Run repository Cargo commands through `npm run cargo -- <cargo arguments>`.
+  The wrapper assigns every root agent, subagent, and worktree the same marked
+  Cargo target instead of allocating one multi-gigabyte target per audit.
+- Never create a new `CARGO_TARGET_DIR` for an agent, review, crate, or test.
+  Override `BIRDCODE_CARGO_TARGET_DIR` only when the user explicitly requests a
+  different cache root.
+- Inspect cleanup with `npm run cache:clean`; deletion requires the explicit
+  `npm run cache:clean:apply` command. Cleanup may remove only the configured
+  directory after both the BirdCode marker and Cargo `CACHEDIR.TAG` validate.
+- The wrapper removes a marked cache after 72 hours of inactivity and refuses
+  to start Cargo when less than 20 GiB remains. Do not bypass either guard to
+  make a build pass.

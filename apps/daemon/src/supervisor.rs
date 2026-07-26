@@ -4,9 +4,12 @@
 //! opens and drops a separate [`Store`] before the next asynchronous boundary,
 //! so provider waits can never retain a database transaction or connection.
 
+use crate::backend_registry::{BackendRegistry, BackendRegistryError, BackendRouteKey};
+use crate::model_call_scheduler::{ModelCallPermit, ModelCallQueueExit, ModelCallScheduler};
 use birdcode_backends::{
-    BackendError, BackendErrorKind, BackendId, ModelBackend, ModelCatalog, ModelId, ModelLoadState,
-    ReasoningSetting, StructuredInferenceRequest, StructuredInferenceResponse,
+    BackendError, BackendErrorKind, BackendId, BackendInstanceIdentity, ModelBackend, ModelCatalog,
+    ModelId, ModelLoadState, ReasoningSetting, StructuredInferenceRequest,
+    StructuredInferenceResponse,
 };
 use birdcode_prompting::{
     CompiledPrompt, PlanCriticOutput, PlanCriticPolicy, PlanCriticVerdict, PromptError,
@@ -14,27 +17,29 @@ use birdcode_prompting::{
     builtin_registry, classify_root_planner_rejection,
 };
 use birdcode_protocol::{
-    ActorId, ArtifactRef, BackendCatalog, BackendKind, BackendModelIdentity, BackendSelection,
-    CancellationRequestId, DiscoveredModel, EventEnvelope, EventId, EventPayload,
-    InferenceAttemptId, ModelLineage, NewEvent, PlanAcceptanceContract, PlanCandidateBinding,
-    PlanProposalAccepted, PlanProposalId, PlanProposalRejected, PlanProposalRejectionReason,
-    PlanSemanticReviewAccepted, PlanSemanticReviewId, PlanSemanticReviewRejected,
-    PlanSemanticReviewRejectionDisposition, PlanSemanticReviewValidatedVerdict,
-    PlanSemanticReviewValidationReceipt, PlannerInferenceError, PlannerInferenceErrorKind,
-    PlannerInferenceObservation, PlannerInferenceObserved, PlannerInferenceOutcomeUnknown,
-    PlannerInferencePrepared, PlannerStageContext, Provenance,
+    ActorId, ArtifactRef, BackendCatalog, BackendInstanceIdentityV1, BackendKind,
+    BackendModelIdentity, BackendSelection, BackendTransportIdentityV1, CancellationRequestId,
+    DiscoveredModel, EventEnvelope, EventId, EventPayload, InferenceAttemptId, ModelLineage,
+    NewEvent, PlanAcceptanceContract, PlanCandidateBinding, PlanProposalAccepted, PlanProposalId,
+    PlanProposalRejected, PlanProposalRejectionReason, PlanSemanticReviewAccepted,
+    PlanSemanticReviewId, PlanSemanticReviewRejected, PlanSemanticReviewRejectionDisposition,
+    PlanSemanticReviewValidatedVerdict, PlanSemanticReviewValidationReceipt, PlannerInferenceError,
+    PlannerInferenceErrorKind, PlannerInferenceObservation, PlannerInferenceObserved,
+    PlannerInferenceOutcomeUnknown, PlannerInferencePrepared, PlannerStageContext, Provenance,
     ROOT_PLANNING_EXECUTION_POLICY_MEDIA_TYPE, RetryDisposition, RootPlanningExecutionPolicy,
     RootPlanningFailed, RootPlanningFailurePhase, RootPlanningFailureReason, RootPlanningModelRole,
     RootPlanningModelSubject, RootPlanningStage, RootPlanningStageFailed,
     RootPlanningStageFailureId, RootPlanningStageFailureReason, Run, RunClaimId, RunClaimed, RunId,
-    RunState, RuntimeInstanceId, Session, Sha256Digest, TokenReservation, TokenReservationId,
-    TokenUsage, UnknownInferenceBoundary, UnknownInferenceOutcomeReason,
+    RunPurpose, RunState, RuntimeInstanceId, Session, Sha256Digest, TokenReservation,
+    TokenReservationId, TokenUsage, UnknownInferenceBoundary, UnknownInferenceOutcomeReason,
 };
 use birdcode_runtime::{
     MAX_ROOT_PLANNER_OUTPUT_TOKENS, RuntimePaths, compile_plan_critic_request,
     compile_plan_repair_request, compile_root_plan_request,
 };
-use birdcode_store::{DeadlineAppendOutcome, RunRecoveryPage, Store, StoreError};
+use birdcode_store::{
+    DeadlineAppendOutcome, PlannerV2NotDispatchedReason, RunRecoveryPage, Store, StoreError,
+};
 use chrono::{Duration as ChronoDuration, Utc};
 use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
@@ -43,6 +48,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -72,6 +78,10 @@ const MIN_CLAIM_LEASE: Duration = Duration::from_millis(30);
 const MAX_TRANSITION_APPEND_ATTEMPTS: usize = 8;
 const MIN_DURABLE_DISPATCH_BACKOFF: Duration = Duration::from_millis(50);
 const MAX_DURABLE_DISPATCH_BACKOFF: Duration = Duration::from_secs(1);
+// Kept false until the protocol-v7 product vertical has a complete durable
+// planner/child/tool/replan/completion path and its deterministic E2E suite.
+// Partial scaffolding must never become an advertised executable capability.
+const PARALLEL_RECONNAISSANCE_V1_PRODUCT_COMPLETE: bool = false;
 
 /// Bounded policy for one background supervisor instance.
 #[derive(Clone, Debug)]
@@ -83,9 +93,12 @@ pub struct RunSupervisorConfig {
     pub actor_id: ActorId,
     pub command_capacity: usize,
     pub worker_threads: usize,
-    /// Hard limit on simultaneously supervised runs and therefore on model
-    /// inference futures owned by this instance.
+    /// Hard limit on simultaneously supervised runs. This is deliberately
+    /// independent from provider-call capacity and per-run subagent budgets.
     pub max_concurrent_runs: usize,
+    /// Shared provider-neutral capacity across every planner and child model
+    /// call owned by this supervisor. Queueing is fair across runs.
+    pub max_parallel_model_calls: usize,
     pub discovery_timeout: Duration,
     pub claim_lease: Duration,
     pub max_recovery_events: usize,
@@ -94,6 +107,10 @@ pub struct RunSupervisorConfig {
     pub max_startup_runs: usize,
     pub max_discovered_models: usize,
     pub default_max_output_tokens: u32,
+    /// External, daemon-owned state for immutable repository images, mounts,
+    /// and cleanup journals.  `None` keeps the reconnaissance adapter disabled
+    /// rather than falling back to workspace-local `.birdcode` state.
+    pub recon_workspace_state_root: Option<PathBuf>,
     /// Trusted daemon-owned producer/reviewer identities and closed stage
     /// budgets. `None` can replay protocol-v4 legacy history but cannot start
     /// a new independently reviewed planning run.
@@ -108,12 +125,14 @@ impl Default for RunSupervisorConfig {
             command_capacity: 128,
             worker_threads: 2,
             max_concurrent_runs: 2,
+            max_parallel_model_calls: 4,
             discovery_timeout: Duration::from_secs(5),
             claim_lease: Duration::from_secs(60),
             max_recovery_events: 16_384,
             max_startup_runs: 4_096,
             max_discovered_models: 4_096,
             default_max_output_tokens: 4_096,
+            recon_workspace_state_root: None,
             root_planning_policy: None,
         }
     }
@@ -129,6 +148,11 @@ impl RunSupervisorConfig {
         }
         if self.max_concurrent_runs == 0 {
             return Err(SupervisorStartError::InvalidConfig("max_concurrent_runs"));
+        }
+        if self.max_parallel_model_calls == 0 {
+            return Err(SupervisorStartError::InvalidConfig(
+                "max_parallel_model_calls",
+            ));
         }
         if self.discovery_timeout.is_zero() || self.discovery_timeout > MAX_DISCOVERY_TIMEOUT {
             return Err(SupervisorStartError::InvalidConfig("discovery_timeout"));
@@ -175,6 +199,16 @@ impl RunSupervisorConfig {
 #[derive(Debug)]
 pub enum SupervisorStartError {
     InvalidConfig(&'static str),
+    MissingPrimaryBackend,
+    PolicyRouteUnavailable {
+        role: RootPlanningModelRole,
+        source: BackendRegistryError,
+    },
+    PrimaryRouteDoesNotMatchProducer {
+        primary: BackendRouteKey,
+        producer: BackendRouteKey,
+    },
+    BackendRegistry(BackendRegistryError),
     Io(io::Error),
 }
 
@@ -182,16 +216,58 @@ impl fmt::Display for SupervisorStartError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidConfig(field) => write!(formatter, "invalid supervisor {field}"),
+            Self::MissingPrimaryBackend => {
+                formatter.write_str("supervisor backend registry has no explicit primary route")
+            }
+            Self::PolicyRouteUnavailable { role, source } => write!(
+                formatter,
+                "trusted {} backend route is unavailable at startup: {source}",
+                root_planning_role_label(*role)
+            ),
+            Self::PrimaryRouteDoesNotMatchProducer { primary, producer } => write!(
+                formatter,
+                "primary backend route {} / {} does not match trusted producer route {} / {}",
+                primary.backend_id(),
+                primary.configured_deployment_id().as_str(),
+                producer.backend_id(),
+                producer.configured_deployment_id().as_str()
+            ),
+            Self::BackendRegistry(error) => write!(formatter, "invalid backend registry: {error}"),
             Self::Io(error) => write!(formatter, "could not start supervisor: {error}"),
         }
     }
 }
 
-impl std::error::Error for SupervisorStartError {}
+impl std::error::Error for SupervisorStartError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::PolicyRouteUnavailable { source, .. } | Self::BackendRegistry(source) => {
+                Some(source)
+            }
+            Self::Io(source) => Some(source),
+            Self::InvalidConfig(_)
+            | Self::MissingPrimaryBackend
+            | Self::PrimaryRouteDoesNotMatchProducer { .. } => None,
+        }
+    }
+}
+
+const fn root_planning_role_label(role: RootPlanningModelRole) -> &'static str {
+    match role {
+        RootPlanningModelRole::Producer => "producer",
+        RootPlanningModelRole::IndependentCritic => "independent critic",
+    }
+}
 
 impl From<io::Error> for SupervisorStartError {
     fn from(error: io::Error) -> Self {
         Self::Io(error)
+    }
+}
+
+impl From<BackendRegistryError> for SupervisorStartError {
+    fn from(error: BackendRegistryError) -> Self {
+        Self::BackendRegistry(error)
     }
 }
 
@@ -328,6 +404,7 @@ pub struct RunSupervisor {
     shutdown: CancellationToken,
     backend_id: BackendId,
     discovery_timeout: Duration,
+    parallel_reconnaissance_available: bool,
     active_cancellations: Arc<Mutex<BTreeMap<RunId, CancellationToken>>>,
     dispatch_wake: Arc<Notify>,
     events: Mutex<std::sync::mpsc::Receiver<RunSupervisorEvent>>,
@@ -347,7 +424,55 @@ impl RunSupervisor {
         backend: Arc<dyn ModelBackend>,
         config: RunSupervisorConfig,
     ) -> Result<Self, SupervisorStartError> {
+        let primary = BackendRouteKey::from_instance(backend.instance_identity());
+        let registry = BackendRegistry::new([backend], Some(primary))?;
+        Self::start_with_registry(paths, registry, config)
+    }
+
+    /// Starts the supervisor with an immutable set of exact backend
+    /// deployments. Public discovery is intentionally limited to the
+    /// registry's explicit primary route; semantic stages resolve their
+    /// trusted lineage without fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry has no valid explicit primary or
+    /// when the ordinary supervisor bounds/runtime cannot be constructed.
+    pub fn start_with_registry(
+        paths: RuntimePaths,
+        backend_registry: BackendRegistry,
+        config: RunSupervisorConfig,
+    ) -> Result<Self, SupervisorStartError> {
         config.validate()?;
+        let primary_route = backend_registry
+            .primary_key()
+            .cloned()
+            .ok_or(SupervisorStartError::MissingPrimaryBackend)?;
+        let backend = backend_registry
+            .resolve_primary()?
+            .ok_or(SupervisorStartError::MissingPrimaryBackend)?;
+        if let Some(policy) = &config.root_planning_policy {
+            let producer =
+                backend_registry
+                    .resolve_lineage(&policy.producer)
+                    .map_err(|source| SupervisorStartError::PolicyRouteUnavailable {
+                        role: RootPlanningModelRole::Producer,
+                        source,
+                    })?;
+            backend_registry
+                .resolve_lineage(&policy.critic)
+                .map_err(|source| SupervisorStartError::PolicyRouteUnavailable {
+                    role: RootPlanningModelRole::IndependentCritic,
+                    source,
+                })?;
+            let producer_route = BackendRouteKey::from_instance(producer.instance_identity());
+            if primary_route != producer_route {
+                return Err(SupervisorStartError::PrimaryRouteDoesNotMatchProducer {
+                    primary: primary_route,
+                    producer: producer_route,
+                });
+            }
+        }
         paths.prepare()?;
         let runtime = RuntimeBuilder::new_multi_thread()
             .worker_threads(config.worker_threads)
@@ -366,12 +491,24 @@ impl RunSupervisor {
         let background_dispatch_wake = Arc::clone(&dispatch_wake);
         let backend_id = backend.backend_id().clone();
         let discovery_timeout = config.discovery_timeout;
+        let parallel_reconnaissance_available = PARALLEL_RECONNAISSANCE_V1_PRODUCT_COMPLETE
+            && cfg!(target_os = "macos")
+            && config.recon_workspace_state_root.is_some()
+            && config.root_planning_policy.is_some();
+        let model_calls = ModelCallScheduler::new(config.max_parallel_model_calls)
+            .map_err(|_| SupervisorStartError::InvalidConfig("max_parallel_model_calls"))?;
+        debug_assert_eq!(
+            model_calls.maximum_parallel_calls(),
+            config.max_parallel_model_calls
+        );
         let thread = std::thread::Builder::new()
             .name("birdcode-run-supervisor".to_owned())
             .spawn(move || {
                 runtime.block_on(supervisor_loop(
                     paths,
+                    backend_registry,
                     backend,
+                    model_calls,
                     config,
                     background_commands,
                     receiver,
@@ -380,6 +517,7 @@ impl RunSupervisor {
                     background_shutdown,
                     background_cancellations,
                     background_dispatch_wake,
+                    parallel_reconnaissance_available,
                 ));
             })?;
         Ok(Self {
@@ -388,6 +526,7 @@ impl RunSupervisor {
             shutdown,
             backend_id,
             discovery_timeout,
+            parallel_reconnaissance_available,
             active_cancellations,
             dispatch_wake,
             events: Mutex::new(events),
@@ -438,6 +577,13 @@ impl RunSupervisor {
     #[must_use]
     pub const fn backend_id(&self) -> &BackendId {
         &self.backend_id
+    }
+
+    /// Whether this process has a configured platform adapter and an explicit
+    /// external snapshot-state root for the v1 reconnaissance path.
+    #[must_use]
+    pub const fn supports_parallel_repository_reconnaissance_v1(&self) -> bool {
+        self.parallel_reconnaissance_available
     }
 
     /// Performs provider discovery on the background runtime and waits only
@@ -526,7 +672,9 @@ impl Drop for RunSupervisor {
 #[allow(clippy::too_many_lines)]
 async fn supervisor_loop(
     paths: RuntimePaths,
+    backend_registry: BackendRegistry,
     backend: Arc<dyn ModelBackend>,
+    model_calls: ModelCallScheduler,
     config: RunSupervisorConfig,
     durable_commands: mpsc::Sender<SubmitCommand>,
     mut commands: mpsc::Receiver<SubmitCommand>,
@@ -535,6 +683,7 @@ async fn supervisor_loop(
     shutdown: CancellationToken,
     active_cancellations: Arc<Mutex<BTreeMap<RunId, CancellationToken>>>,
     dispatch_wake: Arc<Notify>,
+    parallel_reconnaissance_available: bool,
 ) {
     let mut tasks = JoinSet::new();
     let mut task_runs = HashMap::new();
@@ -546,6 +695,7 @@ async fn supervisor_loop(
         Arc::clone(&dispatch_wake),
         shutdown.clone(),
         config.max_startup_runs,
+        parallel_reconnaissance_available,
         events.clone(),
     ));
     let mut dispatcher_finished = false;
@@ -561,9 +711,12 @@ async fn supervisor_loop(
                 &mut task_runs,
                 &events,
                 &paths,
+                &backend_registry,
                 &backend,
+                &model_calls,
                 &config,
                 &shutdown,
+                parallel_reconnaissance_available,
                 command,
             );
         }
@@ -671,6 +824,7 @@ async fn durable_dispatch_loop(
     wake: Arc<Notify>,
     shutdown: CancellationToken,
     scan_quantum: usize,
+    parallel_reconnaissance_available: bool,
     events: std::sync::mpsc::SyncSender<RunSupervisorEvent>,
 ) -> DurableDispatcherExit {
     let mut cursor = None;
@@ -719,6 +873,21 @@ async fn durable_dispatch_loop(
 
         let has_more = page.has_more;
         for run in page.runs {
+            // Protocol admission is intentionally broader than this daemon's
+            // executable capability set. Leave unavailable purposes durable
+            // and quiescent instead of repeatedly claiming or failing them.
+            if !purpose_has_executable_supervisor(
+                run.spec.purpose,
+                parallel_reconnaissance_available,
+            ) {
+                cursor = Some(run.id);
+                scanned_since_yield += 1;
+                if scanned_since_yield == scan_quantum {
+                    scanned_since_yield = 0;
+                    tokio::task::yield_now().await;
+                }
+                continue;
+            }
             match enqueue_durable_run(&commands, &active_cancellations, &shutdown, run.id).await {
                 DurableAdmission::Enqueued | DurableAdmission::AlreadyActive => {
                     cursor = Some(run.id);
@@ -829,27 +998,35 @@ fn spawn_run_task(
     task_runs: &mut HashMap<tokio::task::Id, RunId>,
     events: &std::sync::mpsc::SyncSender<RunSupervisorEvent>,
     paths: &RuntimePaths,
+    backend_registry: &BackendRegistry,
     backend: &Arc<dyn ModelBackend>,
+    model_calls: &ModelCallScheduler,
     config: &RunSupervisorConfig,
     shutdown: &CancellationToken,
+    parallel_reconnaissance_available: bool,
     command: SubmitCommand,
 ) {
     let _ = events.try_send(RunSupervisorEvent::Started {
         run_id: command.run_id,
     });
     let run_paths = paths.clone();
+    let run_backend_registry = backend_registry.clone();
     let run_backend = Arc::clone(backend);
+    let run_model_calls = model_calls.clone();
     let run_config = config.clone();
     let run_shutdown = shutdown.clone();
     let run_id = command.run_id;
     let abort_handle = tasks.spawn(async move {
-        let result = Box::pin(supervise_run(
+        let result = Box::pin(supervise_run_with_registry(
             run_paths,
+            run_backend_registry,
             run_backend,
+            run_model_calls,
             run_config,
             command.run_id,
             command.cancellation,
             run_shutdown,
+            parallel_reconnaissance_available,
         ))
         .await;
         (command.run_id, result)
@@ -895,6 +1072,26 @@ fn publish_joined(
     run_id
 }
 
+pub(crate) fn protocol_backend_instance(
+    instance: &BackendInstanceIdentity,
+) -> Result<BackendInstanceIdentityV1, String> {
+    instance
+        .validate_integrity()
+        .map_err(|error| error.to_string())?;
+    let projected = BackendInstanceIdentityV1::new(
+        instance.backend_id().as_str().to_owned(),
+        BackendTransportIdentityV1::HttpOrigin {
+            origin: instance.endpoint_origin().as_str().to_owned(),
+        },
+        instance.configured_deployment_id().as_str().to_owned(),
+    )
+    .map_err(|error| error.to_string())?;
+    if projected.identity_sha256.as_str() != instance.identity_sha256().as_str() {
+        return Err("backend and protocol instance identity digests disagree".to_owned());
+    }
+    Ok(projected)
+}
+
 async fn discover_for_protocol(
     backend: &dyn ModelBackend,
     config: &RunSupervisorConfig,
@@ -908,6 +1105,13 @@ async fn discover_for_protocol(
             "discovery returned another backend identity".to_owned(),
         ));
     }
+    if &catalog.backend_instance != backend.instance_identity()
+        || catalog.backend_instance.validate_integrity().is_err()
+    {
+        return Err(SupervisorDiscoveryError::Backend(
+            "discovery returned another configured backend instance".to_owned(),
+        ));
+    }
     if catalog.models.len() > config.max_discovered_models {
         return Err(SupervisorDiscoveryError::CatalogTooLarge {
             maximum: config.max_discovered_models,
@@ -915,8 +1119,11 @@ async fn discover_for_protocol(
         });
     }
     let backend_id = catalog.backend_id.as_str().to_owned();
+    let backend_instance = protocol_backend_instance(&catalog.backend_instance)
+        .map_err(SupervisorDiscoveryError::Backend)?;
     Ok(BackendCatalog {
         discovered_at: Utc::now(),
+        backend_instance,
         models: catalog
             .models
             .into_iter()
@@ -938,7 +1145,7 @@ async fn discover_for_protocol(
 }
 
 #[derive(Debug)]
-enum SupervisorRunError {
+pub(crate) enum SupervisorRunError {
     Store(StoreError),
     ArtifactPersistence(StoreError),
     Io(io::Error),
@@ -946,6 +1153,7 @@ enum SupervisorRunError {
     CommittedArtifact(String),
     Contract(String),
     Background(String),
+    UnsupportedRunPurpose(RunPurpose),
 }
 
 impl fmt::Display for SupervisorRunError {
@@ -968,6 +1176,12 @@ impl fmt::Display for SupervisorRunError {
             Self::Contract(message) => write!(formatter, "planner contract failed: {message}"),
             Self::Background(message) => {
                 write!(formatter, "background operation failed: {message}")
+            }
+            Self::UnsupportedRunPurpose(purpose) => {
+                write!(
+                    formatter,
+                    "run purpose {purpose:?} has no executable daemon handler"
+                )
             }
         }
     }
@@ -1020,6 +1234,9 @@ enum RetainedInferenceEvidence {
     },
     Error {
         error: BackendError,
+    },
+    NotDispatched {
+        reason: PlannerV2NotDispatchedReason,
     },
     CancelledBeforeCall,
 }
@@ -1494,19 +1711,215 @@ fn attach_decision(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SupervisorRunRoute {
+    PlanOnlyIndependentSemanticReviewV1,
+    PlanOnlyLegacyMechanicalOnlyV4,
+    ParallelRepositoryReconnaissanceV1,
+}
+
+fn supervisor_run_route(
+    purpose: RunPurpose,
+    plan_acceptance: PlanAcceptanceContract,
+) -> Result<SupervisorRunRoute, SupervisorRunError> {
+    match purpose {
+        RunPurpose::PlanOnly => match plan_acceptance {
+            PlanAcceptanceContract::IndependentSemanticReviewV1 => {
+                Ok(SupervisorRunRoute::PlanOnlyIndependentSemanticReviewV1)
+            }
+            PlanAcceptanceContract::LegacyMechanicalOnlyV4 => {
+                Ok(SupervisorRunRoute::PlanOnlyLegacyMechanicalOnlyV4)
+            }
+            PlanAcceptanceContract::NotApplicable => Err(SupervisorRunError::InvalidState(
+                "PlanOnly run cannot use the not_applicable acceptance contract".to_owned(),
+            )),
+        },
+        RunPurpose::ParallelRepositoryReconnaissanceV1 => match plan_acceptance {
+            PlanAcceptanceContract::IndependentSemanticReviewV1 => {
+                Ok(SupervisorRunRoute::ParallelRepositoryReconnaissanceV1)
+            }
+            PlanAcceptanceContract::LegacyMechanicalOnlyV4
+            | PlanAcceptanceContract::NotApplicable => Err(SupervisorRunError::InvalidState(
+                "parallel repository reconnaissance requires independent semantic review"
+                    .to_owned(),
+            )),
+        },
+        RunPurpose::Execute => Err(SupervisorRunError::UnsupportedRunPurpose(
+            RunPurpose::Execute,
+        )),
+    }
+}
+
+pub(crate) const fn purpose_has_executable_supervisor(
+    purpose: RunPurpose,
+    parallel_reconnaissance_available: bool,
+) -> bool {
+    matches!(purpose, RunPurpose::PlanOnly)
+        || (parallel_reconnaissance_available
+            && matches!(purpose, RunPurpose::ParallelRepositoryReconnaissanceV1))
+}
+
+async fn load_run_for_supervisor_dispatch(
+    paths: RuntimePaths,
+    run_id: RunId,
+) -> Result<Run, SupervisorRunError> {
+    store_phase(paths, move |store| {
+        store
+            .get_run(run_id)?
+            .ok_or_else(|| SupervisorRunError::InvalidState(format!("run {run_id} not found")))
+    })
+    .await
+}
+
+/// Drives the independent root-planning prerequisite, then pauses at the
+/// still-disabled reconnaissance product boundary. Root-planning replay is
+/// itself durable, so an accepted root plan is observed rather than repeated
+/// on every subsequent supervisor pass.
+async fn supervise_parallel_repository_reconnaissance_v1(
+    paths: RuntimePaths,
+    backend_registry: BackendRegistry,
+    backend: Arc<dyn ModelBackend>,
+    run_id: RunId,
+    model_calls: ModelCallScheduler,
+    config: RunSupervisorConfig,
+    cancellation: CancellationToken,
+    shutdown: CancellationToken,
+) -> Result<RunCompletion, SupervisorRunError> {
+    let run = load_run_for_supervisor_dispatch(paths.clone(), run_id).await?;
+    crate::recon::preflight_recon_budget(&run)?;
+    crate::recon::preflight_recon_claim_adoption_budget(&run, config.claim_lease)?;
+    if is_terminal(run.state) {
+        return Ok(RunCompletion::AlreadyTerminal(run.state));
+    }
+
+    let completion = Box::pin(supervise_plan_only_run(
+        paths.clone(),
+        backend_registry,
+        backend,
+        model_calls,
+        config,
+        run_id,
+        cancellation,
+        shutdown,
+    ))
+    .await?;
+    if completion != RunCompletion::Paused {
+        return Ok(completion);
+    }
+    let projection = store_phase(paths, move |store| {
+        store
+            .recon_run_projection(run_id)?
+            .ok_or_else(|| SupervisorRunError::InvalidState("recon run is missing".to_owned()))
+    })
+    .await?;
+    if projection.run_state != RunState::Running || projection.planner.accepted_root_plan.is_none()
+    {
+        return Err(SupervisorRunError::InvalidState(
+            "recon root-planning phase paused without an accepted durable root plan".to_owned(),
+        ));
+    }
+
+    // Snapshot/planner/child/gate execution remains fail-closed until its
+    // Store-total vertical and deterministic E2E proof are complete.
+    Ok(RunCompletion::Paused)
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_lines)]
 async fn supervise_run(
     paths: RuntimePaths,
     backend: Arc<dyn ModelBackend>,
+    model_calls: ModelCallScheduler,
     config: RunSupervisorConfig,
     run_id: RunId,
     cancellation: CancellationToken,
     shutdown: CancellationToken,
+    parallel_reconnaissance_available: bool,
+) -> Result<RunCompletion, SupervisorRunError> {
+    let primary = BackendRouteKey::from_instance(backend.instance_identity());
+    let backend_registry = BackendRegistry::new([Arc::clone(&backend)], Some(primary))
+        .map_err(|error| SupervisorRunError::Contract(error.to_string()))?;
+    supervise_run_with_registry(
+        paths,
+        backend_registry,
+        backend,
+        model_calls,
+        config,
+        run_id,
+        cancellation,
+        shutdown,
+        parallel_reconnaissance_available,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn supervise_run_with_registry(
+    paths: RuntimePaths,
+    backend_registry: BackendRegistry,
+    backend: Arc<dyn ModelBackend>,
+    model_calls: ModelCallScheduler,
+    config: RunSupervisorConfig,
+    run_id: RunId,
+    cancellation: CancellationToken,
+    shutdown: CancellationToken,
+    parallel_reconnaissance_available: bool,
 ) -> Result<RunCompletion, SupervisorRunError> {
     let Some(_lock) = acquire_run_lock(paths.clone(), run_id).await? else {
         return Ok(RunCompletion::Contended);
     };
 
+    let run = load_run_for_supervisor_dispatch(paths.clone(), run_id).await?;
+    let route = supervisor_run_route(run.spec.purpose, run.spec.plan_acceptance)?;
+    match route {
+        SupervisorRunRoute::PlanOnlyIndependentSemanticReviewV1
+        | SupervisorRunRoute::PlanOnlyLegacyMechanicalOnlyV4 => {
+            Box::pin(supervise_plan_only_run(
+                paths,
+                backend_registry,
+                backend,
+                model_calls,
+                config,
+                run_id,
+                cancellation,
+                shutdown,
+            ))
+            .await
+        }
+        SupervisorRunRoute::ParallelRepositoryReconnaissanceV1 => {
+            if !parallel_reconnaissance_available {
+                return if is_terminal(run.state) {
+                    Ok(RunCompletion::AlreadyTerminal(run.state))
+                } else {
+                    Ok(RunCompletion::Paused)
+                };
+            }
+            supervise_parallel_repository_reconnaissance_v1(
+                paths,
+                backend_registry,
+                backend,
+                run_id,
+                model_calls,
+                config,
+                cancellation,
+                shutdown,
+            )
+            .await
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn supervise_plan_only_run(
+    paths: RuntimePaths,
+    backend_registry: BackendRegistry,
+    backend: Arc<dyn ModelBackend>,
+    model_calls: ModelCallScheduler,
+    config: RunSupervisorConfig,
+    run_id: RunId,
+    cancellation: CancellationToken,
+    shutdown: CancellationToken,
+) -> Result<RunCompletion, SupervisorRunError> {
     let mut deadline_elapsed_while_waiting = false;
     let (_session, run, history) = loop {
         match begin_run(paths.clone(), run_id, config.clone()).await? {
@@ -1551,7 +1964,8 @@ async fn supervise_run(
     if run.spec.plan_acceptance == PlanAcceptanceContract::IndependentSemanticReviewV1 {
         return Box::pin(supervise_semantic_run(
             paths,
-            backend,
+            backend_registry,
+            model_calls,
             config,
             run,
             history,
@@ -1779,7 +2193,9 @@ async fn supervise_run(
                 SupervisorRunError::ArtifactPersistence(_) => {
                     Some(RootPlanningFailureReason::ArtifactPersistenceFailed)
                 }
-                SupervisorRunError::InvalidState(_) | SupervisorRunError::CommittedArtifact(_) => {
+                SupervisorRunError::InvalidState(_)
+                | SupervisorRunError::CommittedArtifact(_)
+                | SupervisorRunError::UnsupportedRunPurpose(_) => {
                     Some(RootPlanningFailureReason::DurableStateConflict)
                 }
                 SupervisorRunError::Contract(_) => {
@@ -1866,34 +2282,72 @@ async fn supervise_run(
         return Ok(completion_for_state(actual));
     }
 
-    // This method call may create provider work. It is intentionally after the
-    // Prepared event has been acknowledged by a separate Store connection.
-    let inference = backend.infer_structured(prepared.request.clone());
-    tokio::pin!(inference);
-    let heartbeat_interval = (config.claim_lease / 3).max(Duration::from_millis(10));
-    let inference_end = loop {
-        let heartbeat = tokio::time::sleep(heartbeat_interval);
-        tokio::pin!(heartbeat);
-        let boundary = tokio::select! {
-            biased;
-            result = &mut inference => Some(InferenceEnd::Observed(result)),
-            () = cancellation.cancelled() => Some(InferenceEnd::Cancelled),
-            () = shutdown.cancelled() => Some(InferenceEnd::Shutdown),
-            () = wait_for_deadline(deadline) => Some(InferenceEnd::Deadline),
-            () = &mut heartbeat => None,
-        };
-        if let Some(boundary) = boundary {
-            break boundary;
+    let inference_end = match await_model_call_slot(
+        paths.clone(),
+        run_id,
+        &config,
+        &model_calls,
+        &cancellation,
+        &shutdown,
+        deadline,
+    )
+    .await?
+    {
+        ModelCallSlotEnd::Acquired(_model_call_permit) => {
+            // This method call may create provider work. It is intentionally
+            // after both durable Prepared and global capacity acquisition.
+            let inference = backend.infer_structured(prepared.request.clone());
+            tokio::pin!(inference);
+            let heartbeat_interval = (config.claim_lease / 3).max(Duration::from_millis(10));
+            loop {
+                let heartbeat = tokio::time::sleep(heartbeat_interval);
+                tokio::pin!(heartbeat);
+                let boundary = tokio::select! {
+                    biased;
+                    result = &mut inference => Some(InferenceEnd::Observed(result)),
+                    () = cancellation.cancelled() => Some(InferenceEnd::Cancelled),
+                    () = shutdown.cancelled() => Some(InferenceEnd::Shutdown),
+                    () = wait_for_deadline(deadline) => Some(InferenceEnd::Deadline),
+                    () = &mut heartbeat => None,
+                };
+                if let Some(boundary) = boundary {
+                    break boundary;
+                }
+                if let Err(error) = renew_claim(paths.clone(), run_id, config.clone()).await {
+                    break InferenceEnd::RenewalFailed(error);
+                }
+                if durable_cancellation_generation(
+                    paths.clone(),
+                    run_id,
+                    config.max_recovery_events,
+                )
+                .await?
+                    > 0
+                {
+                    break InferenceEnd::Cancelled;
+                }
+            }
         }
-        if let Err(error) = renew_claim(paths.clone(), run_id, config.clone()).await {
-            break InferenceEnd::RenewalFailed(error);
+        ModelCallSlotEnd::Cancelled => {
+            ensure_durable_cancellation(paths.clone(), run_id, config.clone()).await?;
+            renew_claim(paths.clone(), run_id, config.clone()).await?;
+            append_cancelled_before_call(paths.clone(), run_id, config.actor_id, &prepared).await?;
+            let actual = transition_run(
+                paths,
+                run_id,
+                config.actor_id,
+                config.max_recovery_events,
+                RunState::Cancelled,
+            )
+            .await?;
+            return Ok(completion_for_state(actual));
         }
-        if durable_cancellation_generation(paths.clone(), run_id, config.max_recovery_events)
-            .await?
-            > 0
-        {
-            break InferenceEnd::Cancelled;
-        }
+        ModelCallSlotEnd::Shutdown => return Ok(RunCompletion::Contended),
+        ModelCallSlotEnd::Deadline => InferenceEnd::Deadline,
+        ModelCallSlotEnd::ClaimRenewalFailed(error) => InferenceEnd::RenewalFailed(error),
+        ModelCallSlotEnd::SchedulerClosed => InferenceEnd::RenewalFailed(
+            SupervisorRunError::Background("model-call scheduler closed unexpectedly".to_owned()),
+        ),
     };
     // A provider future and the wall timer can become ready in the same
     // scheduler turn. The result branch is intentionally polled first to
@@ -2016,6 +2470,7 @@ enum SemanticPreparedExecution {
 async fn execute_semantic_prepared(
     paths: RuntimePaths,
     backend: Arc<dyn ModelBackend>,
+    model_calls: ModelCallScheduler,
     config: RunSupervisorConfig,
     run_id: RunId,
     prepared: PreparedCall,
@@ -2040,32 +2495,97 @@ async fn execute_semantic_prepared(
         )));
     }
 
-    let inference = backend.infer_structured(prepared.request.clone());
-    tokio::pin!(inference);
-    let heartbeat_interval = (config.claim_lease / 3).max(Duration::from_millis(10));
-    let inference_end = loop {
-        let heartbeat = tokio::time::sleep(heartbeat_interval);
-        tokio::pin!(heartbeat);
-        let boundary = tokio::select! {
-            biased;
-            result = &mut inference => Some(InferenceEnd::Observed(result)),
-            () = cancellation.cancelled() => Some(InferenceEnd::Cancelled),
-            () = shutdown.cancelled() => Some(InferenceEnd::Shutdown),
-            () = wait_for_deadline(deadline) => Some(InferenceEnd::Deadline),
-            () = &mut heartbeat => None,
+    let pre_dispatch_violations = semantic_pre_dispatch_violations(&prepared, &*backend);
+    if !pre_dispatch_violations.is_empty() {
+        let reason = if pre_dispatch_violations.iter().any(|violation| {
+            matches!(
+                violation,
+                SemanticPreDispatchViolation::LiveBackendIdentityMismatch
+                    | SemanticPreDispatchViolation::LiveBackendInstanceMismatch
+                    | SemanticPreDispatchViolation::InvalidLiveBackendInstance
+                    | SemanticPreDispatchViolation::MissingPreparedBackendInstance
+                    | SemanticPreDispatchViolation::StageLineageDeploymentMismatch
+            )
+        }) {
+            PlannerV2NotDispatchedReason::BackendInstanceDrift
+        } else {
+            PlannerV2NotDispatchedReason::ModelProfileDrift
         };
-        if let Some(boundary) = boundary {
-            break boundary;
+        let observed =
+            append_not_dispatched(paths, run_id, config.actor_id, &prepared, reason).await?;
+        return Ok(SemanticPreparedExecution::Observed(Box::new(observed)));
+    }
+
+    let inference_end = match await_model_call_slot(
+        paths.clone(),
+        run_id,
+        &config,
+        &model_calls,
+        cancellation,
+        shutdown,
+        deadline,
+    )
+    .await?
+    {
+        ModelCallSlotEnd::Acquired(_model_call_permit) => {
+            let inference = backend.infer_structured(prepared.request.clone());
+            tokio::pin!(inference);
+            let heartbeat_interval = (config.claim_lease / 3).max(Duration::from_millis(10));
+            loop {
+                let heartbeat = tokio::time::sleep(heartbeat_interval);
+                tokio::pin!(heartbeat);
+                let boundary = tokio::select! {
+                    biased;
+                    result = &mut inference => Some(InferenceEnd::Observed(result)),
+                    () = cancellation.cancelled() => Some(InferenceEnd::Cancelled),
+                    () = shutdown.cancelled() => Some(InferenceEnd::Shutdown),
+                    () = wait_for_deadline(deadline) => Some(InferenceEnd::Deadline),
+                    () = &mut heartbeat => None,
+                };
+                if let Some(boundary) = boundary {
+                    break boundary;
+                }
+                if let Err(error) = renew_claim(paths.clone(), run_id, config.clone()).await {
+                    break InferenceEnd::RenewalFailed(error);
+                }
+                if durable_cancellation_generation(
+                    paths.clone(),
+                    run_id,
+                    config.max_recovery_events,
+                )
+                .await?
+                    > 0
+                {
+                    break InferenceEnd::Cancelled;
+                }
+            }
         }
-        if let Err(error) = renew_claim(paths.clone(), run_id, config.clone()).await {
-            break InferenceEnd::RenewalFailed(error);
+        ModelCallSlotEnd::Cancelled => {
+            ensure_durable_cancellation(paths.clone(), run_id, config.clone()).await?;
+            renew_claim(paths.clone(), run_id, config.clone()).await?;
+            append_cancelled_before_call(paths.clone(), run_id, config.actor_id, &prepared).await?;
+            let actual = transition_run(
+                paths,
+                run_id,
+                config.actor_id,
+                config.max_recovery_events,
+                RunState::Cancelled,
+            )
+            .await?;
+            return Ok(SemanticPreparedExecution::Terminal(completion_for_state(
+                actual,
+            )));
         }
-        if durable_cancellation_generation(paths.clone(), run_id, config.max_recovery_events)
-            .await?
-            > 0
-        {
-            break InferenceEnd::Cancelled;
+        ModelCallSlotEnd::Shutdown => {
+            return Ok(SemanticPreparedExecution::Terminal(
+                RunCompletion::Contended,
+            ));
         }
+        ModelCallSlotEnd::Deadline => InferenceEnd::Deadline,
+        ModelCallSlotEnd::ClaimRenewalFailed(error) => InferenceEnd::RenewalFailed(error),
+        ModelCallSlotEnd::SchedulerClosed => InferenceEnd::RenewalFailed(
+            SupervisorRunError::Background("model-call scheduler closed unexpectedly".to_owned()),
+        ),
     };
     // See the legacy path above: an already-ready result cannot outrun the
     // absolute deadline merely because it won the biased select branch.
@@ -2319,7 +2839,8 @@ fn later_discovery_failure_reason(failure: &PreInferenceFailure) -> RootPlanning
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn supervise_semantic_run(
     paths: RuntimePaths,
-    backend: Arc<dyn ModelBackend>,
+    backend_registry: BackendRegistry,
+    model_calls: ModelCallScheduler,
     config: RunSupervisorConfig,
     mut run: Run,
     mut history: RunHistory,
@@ -2431,14 +2952,14 @@ async fn supervise_semantic_run(
                     .await?;
                     return Ok(completion_for_state(actual));
                 }
-                let decision = match decide_or_fail_semantic_observed(
+                let decision = match Box::pin(decide_or_fail_semantic_observed(
                     paths.clone(),
                     run_id,
                     config.clone(),
                     prepared,
                     observed,
                     deadline,
-                )
+                ))
                 .await?
                 {
                     SemanticObservedDecision::Decided(decision) => decision,
@@ -2461,6 +2982,16 @@ async fn supervise_semantic_run(
                 continue;
             }
             RecoveryAction::Terminal(state) => {
+                if state == RunState::Completed
+                    && run.spec.purpose == RunPurpose::ParallelRepositoryReconnaissanceV1
+                {
+                    // For reconnaissance this is a terminal state of the
+                    // independent root-planning sub-machine, not of the run.
+                    // The accepted plan becomes planner-v2 evidence; only the
+                    // later Store completion gate may authorize
+                    // Running -> Completed.
+                    return Ok(RunCompletion::Paused);
+                }
                 let actual = transition_run(
                     paths,
                     run_id,
@@ -2611,7 +3142,7 @@ async fn supervise_semantic_run(
         }
         if resolved_models.is_none() {
             resolved_models = match discover_semantic_models(
-                Arc::clone(&backend),
+                &backend_registry,
                 &run,
                 &policy,
                 &config,
@@ -2765,7 +3296,9 @@ async fn supervise_semantic_run(
                         | StoreError::ArtifactTooLarge
                         | StoreError::ArtifactIntegrity,
                     ) => Some(RootPlanningStageFailureReason::InvalidCommittedArtifact),
-                    SupervisorRunError::InvalidState(_) | SupervisorRunError::Store(_) => {
+                    SupervisorRunError::InvalidState(_)
+                    | SupervisorRunError::UnsupportedRunPurpose(_)
+                    | SupervisorRunError::Store(_) => {
                         Some(RootPlanningStageFailureReason::DurableStateConflict)
                     }
                     SupervisorRunError::Io(_) | SupervisorRunError::Background(_) => None,
@@ -2784,6 +3317,7 @@ async fn supervise_semantic_run(
                         SupervisorRunError::Store(error) if error.is_retryable() => None,
                         SupervisorRunError::InvalidState(_)
                         | SupervisorRunError::CommittedArtifact(_)
+                        | SupervisorRunError::UnsupportedRunPurpose(_)
                         | SupervisorRunError::Store(_) => {
                             Some(RootPlanningFailureReason::DurableStateConflict)
                         }
@@ -2836,16 +3370,27 @@ async fn supervise_semantic_run(
                 return Ok(completion_for_state(actual));
             }
         };
-        match execute_semantic_prepared(
+        let stage_backend = resolved_models
+            .as_ref()
+            .ok_or_else(|| {
+                SupervisorRunError::InvalidState(
+                    "semantic model discovery completed without resolved models".to_owned(),
+                )
+            })?
+            .for_stage(stage)
+            .backend
+            .clone();
+        match Box::pin(execute_semantic_prepared(
             paths.clone(),
-            Arc::clone(&backend),
+            stage_backend,
+            model_calls.clone(),
             config.clone(),
             run_id,
             prepared,
             &cancellation,
             &shutdown,
             deadline,
-        )
+        ))
         .await?
         {
             SemanticPreparedExecution::Terminal(completion) => return Ok(completion),
@@ -2871,14 +3416,14 @@ async fn supervise_semantic_run(
                     .await?;
                     return Ok(completion_for_state(actual));
                 }
-                let decision = match decide_or_fail_semantic_observed(
+                let decision = match Box::pin(decide_or_fail_semantic_observed(
                     paths.clone(),
                     run_id,
                     config.clone(),
                     observed.prepared,
                     observed.observed,
                     deadline,
-                )
+                ))
                 .await?
                 {
                     SemanticObservedDecision::Decided(decision) => decision,
@@ -2998,7 +3543,7 @@ async fn begin_run(
     .await
 }
 
-async fn renew_claim(
+pub(crate) async fn renew_claim(
     paths: RuntimePaths,
     run_id: RunId,
     config: RunSupervisorConfig,
@@ -3060,22 +3605,34 @@ fn supervisor_provenance(backend: Option<birdcode_protocol::BackendSelection>) -
 #[derive(Clone, Debug)]
 struct ResolvedModel {
     model_id: ModelId,
+    backend_instance: BackendInstanceIdentityV1,
     max_output_tokens: u32,
     total_token_budget: u64,
     reasoning: Option<ReasoningSetting>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct ResolvedSemanticModel {
+    backend: Arc<dyn ModelBackend>,
+    backend_instance: BackendInstanceIdentityV1,
     model_id: ModelId,
     total_token_budget: u64,
     reasoning: Option<ReasoningSetting>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct ResolvedSemanticModels {
     producer: ResolvedSemanticModel,
     critic: ResolvedSemanticModel,
+}
+
+impl ResolvedSemanticModels {
+    fn for_stage(&self, stage: RootPlanningStage) -> &ResolvedSemanticModel {
+        match stage {
+            RootPlanningStage::InitialPlan | RootPlanningStage::Repair => &self.producer,
+            RootPlanningStage::InitialReview | RootPlanningStage::FinalReview => &self.critic,
+        }
+    }
 }
 
 enum DiscoveryEnd {
@@ -3131,18 +3688,28 @@ async fn discover_model(
         () = shutdown.cancelled() => return Err(DiscoveryEnd::Shutdown),
         () = wait_for_deadline(deadline) => return Err(DiscoveryEnd::Deadline),
     };
-    if catalog.backend_id != *backend.backend_id() {
+    if catalog.backend_id != *backend.backend_id()
+        || catalog.backend_instance != *backend.instance_identity()
+    {
         return Err(DiscoveryEnd::Failed(PreInferenceFailure::new(
             RootPlanningFailurePhase::ModelDiscovery,
             RootPlanningFailureReason::InvalidDiscoveryCatalog,
-            "model discovery returned another backend identity",
+            "model discovery returned another backend instance",
         )));
     }
-    resolve_catalog(&catalog, run, config)
+    let backend_instance =
+        protocol_backend_instance(&catalog.backend_instance).map_err(|detail| {
+            DiscoveryEnd::Failed(PreInferenceFailure::new(
+                RootPlanningFailurePhase::ModelDiscovery,
+                RootPlanningFailureReason::InvalidDiscoveryCatalog,
+                detail,
+            ))
+        })?;
+    resolve_catalog(&catalog, backend_instance, run, config)
 }
 
 async fn discover_semantic_models(
-    backend: Arc<dyn ModelBackend>,
+    backend_registry: &BackendRegistry,
     run: &Run,
     policy: &RootPlanningExecutionPolicy,
     config: &RunSupervisorConfig,
@@ -3150,36 +3717,29 @@ async fn discover_semantic_models(
     shutdown: &CancellationToken,
     deadline: Option<chrono::DateTime<Utc>>,
 ) -> Result<ResolvedSemanticModels, DiscoveryEnd> {
-    validate_semantic_selection(run, policy, backend.backend_id())?;
-    let discovery = tokio::time::timeout(config.discovery_timeout, backend.discover_models());
-    let catalog = tokio::select! {
-        biased;
-        result = discovery => match result {
-            Ok(Ok(catalog)) => catalog,
-            Ok(Err(error)) => return Err(DiscoveryEnd::Failed(PreInferenceFailure::new(
-                RootPlanningFailurePhase::ModelDiscovery,
-                RootPlanningFailureReason::BackendDiscoveryFailed,
-                error.to_string(),
-            ))),
-            Err(_) => return Err(DiscoveryEnd::Failed(PreInferenceFailure::new(
-                RootPlanningFailurePhase::ModelDiscovery,
-                RootPlanningFailureReason::DiscoveryTimedOut,
-                "model discovery timed out",
-            ))),
-        },
-        () = cancellation.cancelled() => return Err(DiscoveryEnd::Cancelled),
-        () = shutdown.cancelled() => return Err(DiscoveryEnd::Shutdown),
-        () = wait_for_deadline(deadline) => return Err(DiscoveryEnd::Deadline),
-    };
-    if catalog.backend_id != *backend.backend_id()
-        || catalog.models.len() > config.max_discovered_models
-    {
-        return Err(DiscoveryEnd::Failed(PreInferenceFailure::new(
-            RootPlanningFailurePhase::ModelDiscovery,
-            RootPlanningFailureReason::InvalidDiscoveryCatalog,
-            "semantic planning discovery returned an invalid bounded catalog",
-        )));
-    }
+    validate_semantic_selection(run, policy)?;
+    let producer_backend = backend_registry
+        .resolve_lineage(&policy.producer)
+        .map_err(|error| {
+            DiscoveryEnd::Failed(PreInferenceFailure::for_model(
+                RootPlanningFailurePhase::Preflight,
+                RootPlanningFailureReason::InvalidRunConfiguration,
+                RootPlanningModelRole::Producer,
+                &policy.producer,
+                format!("trusted producer backend route is unavailable: {error}"),
+            ))
+        })?;
+    let critic_backend = backend_registry
+        .resolve_lineage(&policy.critic)
+        .map_err(|error| {
+            DiscoveryEnd::Failed(PreInferenceFailure::for_model(
+                RootPlanningFailurePhase::Preflight,
+                RootPlanningFailureReason::InvalidRunConfiguration,
+                RootPlanningModelRole::IndependentCritic,
+                &policy.critic,
+                format!("trusted critic backend route is unavailable: {error}"),
+            ))
+        })?;
     let budgets = &policy.stage_budgets;
     let producer_required = budgets
         .initial_plan_output_tokens
@@ -3188,27 +3748,110 @@ async fn discover_semantic_models(
         .initial_review_output_tokens
         .max(budgets.final_review_output_tokens);
     let reasoning = parse_reasoning(run.spec.backend.reasoning_effort.as_deref())?;
-    let producer = resolve_semantic_lineage_model(
-        &catalog,
+    let producer_discovery = discover_semantic_lineage_model(
+        producer_backend,
         &policy.producer,
         producer_required,
         reasoning,
         RootPlanningModelRole::Producer,
-    )?;
-    let critic = resolve_semantic_lineage_model(
-        &catalog,
+        config,
+        cancellation,
+        shutdown,
+        deadline,
+    );
+    let critic_discovery = discover_semantic_lineage_model(
+        critic_backend,
         &policy.critic,
         critic_required,
         reasoning,
         RootPlanningModelRole::IndependentCritic,
-    )?;
-    Ok(ResolvedSemanticModels { producer, critic })
+        config,
+        cancellation,
+        shutdown,
+        deadline,
+    );
+    // Discovery is side-effect-free, so both exact routes can be checked in
+    // parallel. Results are consumed producer-first for deterministic failure
+    // attribution when both complete with errors in the same poll.
+    let (producer, critic) = tokio::join!(producer_discovery, critic_discovery);
+    Ok(ResolvedSemanticModels {
+        producer: producer?,
+        critic: critic?,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn discover_semantic_lineage_model(
+    backend: Arc<dyn ModelBackend>,
+    lineage: &ModelLineage,
+    required_output_tokens: u64,
+    reasoning: Option<ReasoningSetting>,
+    role: RootPlanningModelRole,
+    config: &RunSupervisorConfig,
+    cancellation: &CancellationToken,
+    shutdown: &CancellationToken,
+    deadline: Option<chrono::DateTime<Utc>>,
+) -> Result<ResolvedSemanticModel, DiscoveryEnd> {
+    let discovery = tokio::time::timeout(config.discovery_timeout, backend.discover_models());
+    let catalog = tokio::select! {
+        biased;
+        result = discovery => match result {
+            Ok(Ok(catalog)) => catalog,
+            Ok(Err(error)) => return Err(DiscoveryEnd::Failed(PreInferenceFailure::for_model(
+                RootPlanningFailurePhase::ModelDiscovery,
+                RootPlanningFailureReason::BackendDiscoveryFailed,
+                role,
+                lineage,
+                error.to_string(),
+            ))),
+            Err(_) => return Err(DiscoveryEnd::Failed(PreInferenceFailure::for_model(
+                RootPlanningFailurePhase::ModelDiscovery,
+                RootPlanningFailureReason::DiscoveryTimedOut,
+                role,
+                lineage,
+                "model discovery timed out",
+            ))),
+        },
+        () = cancellation.cancelled() => return Err(DiscoveryEnd::Cancelled),
+        () = shutdown.cancelled() => return Err(DiscoveryEnd::Shutdown),
+        () = wait_for_deadline(deadline) => return Err(DiscoveryEnd::Deadline),
+    };
+    if catalog.backend_id != *backend.backend_id()
+        || catalog.backend_instance != *backend.instance_identity()
+        || catalog.models.len() > config.max_discovered_models
+    {
+        return Err(DiscoveryEnd::Failed(PreInferenceFailure::for_model(
+            RootPlanningFailurePhase::ModelDiscovery,
+            RootPlanningFailureReason::InvalidDiscoveryCatalog,
+            role,
+            lineage,
+            "semantic planning discovery returned an invalid bounded backend-instance catalog",
+        )));
+    }
+    let backend_instance =
+        protocol_backend_instance(&catalog.backend_instance).map_err(|detail| {
+            DiscoveryEnd::Failed(PreInferenceFailure::for_model(
+                RootPlanningFailurePhase::ModelDiscovery,
+                RootPlanningFailureReason::InvalidDiscoveryCatalog,
+                role,
+                lineage,
+                detail,
+            ))
+        })?;
+    resolve_semantic_lineage_model(
+        &catalog,
+        lineage,
+        required_output_tokens,
+        reasoning,
+        role,
+        backend,
+        backend_instance,
+    )
 }
 
 fn validate_semantic_selection(
     run: &Run,
     policy: &RootPlanningExecutionPolicy,
-    backend_id: &BackendId,
 ) -> Result<(), DiscoveryEnd> {
     let budgets = &policy.stage_budgets;
     let aggregate = [
@@ -3230,8 +3873,6 @@ fn validate_semantic_selection(
     if run.spec.backend.kind != BackendKind::Model
         || run.spec.backend.backend_id != policy.producer.backend_id
         || run_model != Some(policy.producer.model_id.as_str())
-        || policy.producer.backend_id != backend_id.as_str()
-        || policy.critic.backend_id != backend_id.as_str()
         || policy.producer.model_id == policy.critic.model_id
         || policy.producer.deployment_id == policy.critic.deployment_id
         || policy.producer.independence_domain_id == policy.critic.independence_domain_id
@@ -3256,6 +3897,8 @@ fn resolve_semantic_lineage_model(
     required_output_tokens: u64,
     reasoning: Option<ReasoningSetting>,
     role: RootPlanningModelRole,
+    backend: Arc<dyn ModelBackend>,
+    backend_instance: BackendInstanceIdentityV1,
 ) -> Result<ResolvedSemanticModel, DiscoveryEnd> {
     let role_name = match role {
         RootPlanningModelRole::Producer => "producer",
@@ -3311,6 +3954,8 @@ fn resolve_semantic_lineage_model(
         )));
     }
     Ok(ResolvedSemanticModel {
+        backend,
+        backend_instance,
         model_id: descriptor.id.clone(),
         total_token_budget,
         reasoning,
@@ -3319,6 +3964,7 @@ fn resolve_semantic_lineage_model(
 
 fn resolve_catalog(
     catalog: &ModelCatalog,
+    backend_instance: BackendInstanceIdentityV1,
     run: &Run,
     config: &RunSupervisorConfig,
 ) -> Result<ResolvedModel, DiscoveryEnd> {
@@ -3388,6 +4034,7 @@ fn resolve_catalog(
     let reasoning = parse_reasoning(run.spec.backend.reasoning_effort.as_deref())?;
     Ok(ResolvedModel {
         model_id: descriptor.id.clone(),
+        backend_instance,
         max_output_tokens,
         total_token_budget,
         reasoning,
@@ -3448,7 +4095,7 @@ fn parse_reasoning(value: Option<&str>) -> Result<Option<ReasoningSetting>, Disc
         .transpose()
 }
 
-fn run_deadline(run: &Run) -> Result<Option<chrono::DateTime<Utc>>, SupervisorRunError> {
+pub(crate) fn run_deadline(run: &Run) -> Result<Option<chrono::DateTime<Utc>>, SupervisorRunError> {
     let Some(seconds) = run.spec.limits.max_wall_time_seconds else {
         return Ok(None);
     };
@@ -3469,11 +4116,11 @@ fn run_deadline(run: &Run) -> Result<Option<chrono::DateTime<Utc>>, SupervisorRu
         .ok_or_else(|| SupervisorRunError::Contract("run wall deadline overflowed".to_owned()))
 }
 
-fn deadline_elapsed(deadline: Option<chrono::DateTime<Utc>>) -> bool {
+pub(crate) fn deadline_elapsed(deadline: Option<chrono::DateTime<Utc>>) -> bool {
     deadline.is_some_and(|deadline| deadline <= Utc::now())
 }
 
-async fn wait_for_deadline(deadline: Option<chrono::DateTime<Utc>>) {
+pub(crate) async fn wait_for_deadline(deadline: Option<chrono::DateTime<Utc>>) {
     let Some(deadline) = deadline else {
         std::future::pending::<()>().await;
         return;
@@ -3485,6 +4132,88 @@ async fn wait_for_deadline(deadline: Option<chrono::DateTime<Utc>>) {
 struct PreparedCall {
     event: EventEnvelope,
     request: StructuredInferenceRequest,
+}
+
+pub(crate) enum ModelCallSlotEnd {
+    Acquired(ModelCallPermit),
+    Cancelled,
+    Shutdown,
+    Deadline,
+    ClaimRenewalFailed(SupervisorRunError),
+    SchedulerClosed,
+}
+
+/// Waits for global provider capacity without consuming claim lease time
+/// silently. The backend future does not exist until this function returns an
+/// acquired permit, so any backend-owned inference timer starts after queueing.
+pub(crate) async fn await_model_call_slot(
+    paths: RuntimePaths,
+    run_id: RunId,
+    config: &RunSupervisorConfig,
+    model_calls: &ModelCallScheduler,
+    cancellation: &CancellationToken,
+    shutdown: &CancellationToken,
+    deadline: Option<chrono::DateTime<Utc>>,
+) -> Result<ModelCallSlotEnd, SupervisorRunError> {
+    let acquisition = model_calls.acquire(cancellation, shutdown);
+    tokio::pin!(acquisition);
+    let heartbeat_interval = (config.claim_lease / 3).max(Duration::from_millis(10));
+    loop {
+        let heartbeat = tokio::time::sleep(heartbeat_interval);
+        tokio::pin!(heartbeat);
+        let end = tokio::select! {
+            biased;
+            result = &mut acquisition => Some(match result {
+                Ok(permit) => ModelCallSlotEnd::Acquired(permit),
+                Err(ModelCallQueueExit::Cancelled) => ModelCallSlotEnd::Cancelled,
+                Err(ModelCallQueueExit::Shutdown) => ModelCallSlotEnd::Shutdown,
+                Err(ModelCallQueueExit::Closed) => ModelCallSlotEnd::SchedulerClosed,
+            }),
+            () = wait_for_deadline(deadline) => Some(ModelCallSlotEnd::Deadline),
+            () = &mut heartbeat => None,
+        };
+        if let Some(end) = end {
+            let ModelCallSlotEnd::Acquired(permit) = end else {
+                return Ok(end);
+            };
+            if cancellation.is_cancelled() {
+                return Ok(ModelCallSlotEnd::Cancelled);
+            }
+            if shutdown.is_cancelled() {
+                return Ok(ModelCallSlotEnd::Shutdown);
+            }
+            // A semaphore permit and the deadline timer may become ready in
+            // the same scheduler turn.  The fair-capacity branch is polled
+            // first, so recheck wall time before any provider future can be
+            // constructed.  Dropping `permit` returns the lane.
+            if deadline_elapsed(deadline) {
+                return Ok(ModelCallSlotEnd::Deadline);
+            }
+            if durable_cancellation_generation(paths.clone(), run_id, config.max_recovery_events)
+                .await?
+                > 0
+                || cancellation.is_cancelled()
+            {
+                return Ok(ModelCallSlotEnd::Cancelled);
+            }
+            if shutdown.is_cancelled() {
+                return Ok(ModelCallSlotEnd::Shutdown);
+            }
+            if deadline_elapsed(deadline) {
+                return Ok(ModelCallSlotEnd::Deadline);
+            }
+            return Ok(ModelCallSlotEnd::Acquired(permit));
+        }
+        if let Err(error) = renew_claim(paths.clone(), run_id, config.clone()).await {
+            return Ok(ModelCallSlotEnd::ClaimRenewalFailed(error));
+        }
+        if durable_cancellation_generation(paths.clone(), run_id, config.max_recovery_events)
+            .await?
+            > 0
+        {
+            return Ok(ModelCallSlotEnd::Cancelled);
+        }
+    }
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -4396,6 +5125,7 @@ async fn compile_and_prepare_semantic(
                 kind: BackendKind::Model,
                 model_id: lineage.model_id.clone(),
             },
+            backend_instance: Some(models.for_stage(stage).backend_instance.clone()),
             prompt_artifact,
             prompt_manifest_digest: compiled.prompt_manifest_sha256,
             request_artifact,
@@ -4478,6 +5208,7 @@ async fn compile_and_prepare(
     // connection, then ownership is renewed before the Prepared CAS.
     let ResolvedModel {
         model_id,
+        backend_instance,
         max_output_tokens,
         total_token_budget,
         reasoning,
@@ -4542,6 +5273,7 @@ async fn compile_and_prepare(
                 kind: BackendKind::Model,
                 model_id: compiled.inference_request.model_id().as_str().to_owned(),
             },
+            backend_instance: Some(backend_instance),
             prompt_artifact,
             prompt_manifest_digest: compiled.prompt_manifest_sha256,
             request_artifact,
@@ -4592,7 +5324,7 @@ fn current_plan_base(history: &RunHistory) -> Option<(u64, Sha256Digest)> {
         .map(|(_, revision, digest)| (revision, digest))
 }
 
-async fn ensure_durable_cancellation(
+pub(crate) async fn ensure_durable_cancellation(
     paths: RuntimePaths,
     run_id: RunId,
     config: RunSupervisorConfig,
@@ -5169,7 +5901,9 @@ fn committed_replay_failure_reason(
         SupervisorRunError::CommittedArtifact(_) => {
             Some(RootPlanningStageFailureReason::InvalidCommittedArtifact)
         }
-        SupervisorRunError::Contract(_) | SupervisorRunError::InvalidState(_) => {
+        SupervisorRunError::Contract(_)
+        | SupervisorRunError::InvalidState(_)
+        | SupervisorRunError::UnsupportedRunPurpose(_) => {
             Some(RootPlanningStageFailureReason::DurableStateConflict)
         }
         SupervisorRunError::Store(error) if error.is_retryable() => None,
@@ -5291,6 +6025,127 @@ async fn append_cancelled_before_call(
     .await
 }
 
+async fn append_not_dispatched(
+    paths: RuntimePaths,
+    run_id: RunId,
+    actor_id: ActorId,
+    prepared_call: &PreparedCall,
+    reason: PlannerV2NotDispatchedReason,
+) -> Result<ObservedPair, SupervisorRunError> {
+    let prepared_event = prepared_call.event.clone();
+    store_phase(paths, move |store| {
+        let run = store
+            .get_run(run_id)?
+            .ok_or_else(|| SupervisorRunError::InvalidState(format!("run {run_id} not found")))?;
+        let EventPayload::PlannerInferencePrepared(prepared) = &prepared_event.payload else {
+            return Err(SupervisorRunError::InvalidState(
+                "pre-dispatch rejection is not bound to Prepared".to_owned(),
+            ));
+        };
+        let retained = RetainedInferenceEvidence::NotDispatched { reason };
+        let bytes = serde_json::to_vec(&retained)
+            .map_err(|error| SupervisorRunError::Contract(error.to_string()))?;
+        let artifact = persist_new_artifact(store, &bytes, INFERENCE_MEDIA_TYPE)?;
+        let observed = store.append_event(NewEvent {
+            session_id: run.spec.session_id,
+            run_id: Some(run.id),
+            actor_id,
+            causal_parent: Some(prepared_event.id),
+            provenance: Provenance {
+                producer: SUPERVISOR_PRODUCER.to_owned(),
+                backend: Some(backend_selection_for_prepared(
+                    prepared,
+                    run.spec.backend.reasoning_effort.as_deref(),
+                )),
+                raw_artifact: Some(artifact.clone()),
+            },
+            payload: EventPayload::PlannerInferenceObserved(PlannerInferenceObserved {
+                attempt_id: prepared.attempt_id,
+                token_reservation_id: prepared.token_reservation.id,
+                prepared_event_id: prepared_event.id,
+                normalized_complete_evidence_artifact: artifact,
+                outcome: PlannerInferenceObservation::Failed {
+                    error: PlannerInferenceError {
+                        kind: PlannerInferenceErrorKind::ProtocolViolation,
+                        retry: RetryDisposition::Never,
+                    },
+                },
+            }),
+        })?;
+        Ok(ObservedPair {
+            prepared: prepared_event,
+            observed,
+        })
+    })
+    .await
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SemanticPreDispatchViolation {
+    PreparedEventPayloadMismatch,
+    LiveBackendIdentityMismatch,
+    PreparedRequestModelMismatch,
+    LiveBackendInstanceMismatch,
+    InvalidLiveBackendInstance,
+    MissingPreparedBackendInstance,
+    StageLineageBackendMismatch,
+    StageLineageModelMismatch,
+    StageLineageDeploymentMismatch,
+    MissingSemanticStageContext,
+}
+
+fn semantic_pre_dispatch_violations(
+    prepared_call: &PreparedCall,
+    backend: &dyn ModelBackend,
+) -> Vec<SemanticPreDispatchViolation> {
+    let mut violations = Vec::new();
+    let EventPayload::PlannerInferencePrepared(prepared) = &prepared_call.event.payload else {
+        violations.push(SemanticPreDispatchViolation::PreparedEventPayloadMismatch);
+        return violations;
+    };
+    if backend.backend_id().as_str().as_bytes() != prepared.backend_model.backend_id.as_bytes() {
+        violations.push(SemanticPreDispatchViolation::LiveBackendIdentityMismatch);
+    }
+    if prepared_call.request.model_id().as_str().as_bytes()
+        != prepared.backend_model.model_id.as_bytes()
+    {
+        violations.push(SemanticPreDispatchViolation::PreparedRequestModelMismatch);
+    }
+    match &prepared.backend_instance {
+        Some(expected) => match protocol_backend_instance(backend.instance_identity()) {
+            Ok(actual) if actual == *expected => {}
+            Ok(_) => violations.push(SemanticPreDispatchViolation::LiveBackendInstanceMismatch),
+            Err(_) => violations.push(SemanticPreDispatchViolation::InvalidLiveBackendInstance),
+        },
+        None => violations.push(SemanticPreDispatchViolation::MissingPreparedBackendInstance),
+    }
+    let lineage = match prepared.stage_context.as_ref() {
+        Some(
+            PlannerStageContext::InitialPlan { model_lineage, .. }
+            | PlannerStageContext::InitialReview { model_lineage, .. }
+            | PlannerStageContext::Repair { model_lineage, .. }
+            | PlannerStageContext::FinalReview { model_lineage, .. },
+        ) => Some(model_lineage),
+        None => None,
+    };
+    if let Some(lineage) = lineage {
+        if lineage.backend_id.as_bytes() != prepared.backend_model.backend_id.as_bytes() {
+            violations.push(SemanticPreDispatchViolation::StageLineageBackendMismatch);
+        }
+        if lineage.model_id.as_bytes() != prepared.backend_model.model_id.as_bytes() {
+            violations.push(SemanticPreDispatchViolation::StageLineageModelMismatch);
+        }
+        if prepared.backend_instance.as_ref().is_none_or(|instance| {
+            instance.configured_deployment_id.as_bytes() != lineage.deployment_id.as_bytes()
+        }) {
+            violations.push(SemanticPreDispatchViolation::StageLineageDeploymentMismatch);
+        }
+    } else {
+        violations.push(SemanticPreDispatchViolation::MissingSemanticStageContext);
+    }
+    violations
+}
+
 struct ObservedPair {
     prepared: EventEnvelope,
     observed: EventEnvelope,
@@ -5393,6 +6248,24 @@ fn response_contract_violations(
         != prepared.backend_model.backend_id.as_bytes()
     {
         violations.push("backend_identity_mismatch");
+    }
+    if let Some(expected_instance) = &prepared.backend_instance {
+        match response.evidence.backend_instance.as_ref() {
+            Some(actual_instance) => {
+                match protocol_backend_instance(actual_instance) {
+                    Ok(actual) if actual == *expected_instance => {}
+                    Ok(_) => violations.push("backend_instance_mismatch"),
+                    Err(_) => violations.push("invalid_backend_instance_evidence"),
+                }
+                if !actual_instance
+                    .endpoint_origin()
+                    .matches_endpoint(&response.evidence.endpoint)
+                {
+                    violations.push("backend_endpoint_origin_mismatch");
+                }
+            }
+            None => violations.push("missing_backend_instance_evidence"),
+        }
     }
     match serde_json::from_str::<serde_json::Value>(&response.raw_text) {
         Ok(value) if value != response.value => violations.push("raw_json_value_mismatch"),
@@ -5969,7 +6842,7 @@ fn append_decision_or_cancel(
     }
 }
 
-async fn durable_cancellation_generation(
+pub(crate) async fn durable_cancellation_generation(
     paths: RuntimePaths,
     run_id: RunId,
     maximum_events: usize,
@@ -6146,7 +7019,8 @@ fn encode_canonical_json(
 mod tests {
     use super::*;
     use birdcode_backends::{
-        BackendFuture, BackendOperation, CapabilityState, DiscoveryEvidence, HttpEvidence,
+        BackendDeploymentId, BackendEndpointOrigin, BackendFuture, BackendOperation,
+        BackendTransportIdentity, CapabilityState, DiscoveryEvidence, HttpEvidence,
         InferenceEvidence, LoadedInstance, ModelCapabilities, ModelDescriptor, ModelKind,
         NativeDiscoveryEvidence, NativeMatch,
     };
@@ -6171,6 +7045,62 @@ mod tests {
     const MODEL: &str = "model/多言語-exact";
     const CRITIC_MODEL: &str = "model/independent-critic-exact";
 
+    fn test_backend_instance_for(deployment_id: &str, endpoint: &str) -> BackendInstanceIdentity {
+        BackendInstanceIdentity::new(
+            BackendId::new(BACKEND).expect("test backend id is valid"),
+            BackendTransportIdentity::HttpOrigin {
+                origin: BackendEndpointOrigin::parse(endpoint).expect("test origin is canonical"),
+            },
+            BackendDeploymentId::new(deployment_id).expect("test deployment id is valid"),
+        )
+        .expect("test backend instance is valid")
+    }
+
+    fn test_backend_instance() -> BackendInstanceIdentity {
+        test_backend_instance_for("producer-deployment-test", "http://127.0.0.1:19005")
+    }
+
+    fn test_critic_backend_instance() -> BackendInstanceIdentity {
+        test_backend_instance_for("critic-deployment-test", "http://127.0.0.1:19006")
+    }
+
+    #[test]
+    fn model_call_capacity_defaults_to_four_and_fails_closed_at_zero() {
+        assert_eq!(RunSupervisorConfig::default().max_parallel_model_calls, 4);
+        assert!(matches!(
+            RunSupervisorConfig {
+                max_parallel_model_calls: 0,
+                ..RunSupervisorConfig::default()
+            }
+            .validate(),
+            Err(SupervisorStartError::InvalidConfig(
+                "max_parallel_model_calls"
+            ))
+        ));
+    }
+
+    #[test]
+    fn run_and_model_call_limits_are_orthogonal() {
+        assert!(
+            RunSupervisorConfig {
+                max_concurrent_runs: 1,
+                max_parallel_model_calls: 4,
+                ..RunSupervisorConfig::default()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            RunSupervisorConfig {
+                max_concurrent_runs: 8,
+                max_parallel_model_calls: 1,
+                ..RunSupervisorConfig::default()
+            }
+            .validate()
+            .is_ok()
+        );
+    }
+
     #[derive(Clone, Copy)]
     enum SemanticCriticMode {
         Accept,
@@ -6180,16 +7110,18 @@ mod tests {
 
     struct TestBackend {
         id: BackendId,
+        instance: BackendInstanceIdentity,
         model: ModelId,
         response: StructuredInferenceResponse,
         discovery_error: Option<BackendError>,
         inference_delay: Duration,
         discovery_delay: Duration,
-        discovery_calls: AtomicUsize,
-        inference_calls: AtomicUsize,
-        critic_calls: AtomicUsize,
+        discovery_calls: Arc<AtomicUsize>,
+        inference_calls: Arc<AtomicUsize>,
+        critic_calls: Arc<AtomicUsize>,
         semantic_critic: Option<SemanticCriticMode>,
-        prepared_at_call: AtomicBool,
+        preserve_response_transport_evidence: bool,
+        prepared_at_call: Arc<AtomicBool>,
         prepared_probe: Option<(RuntimePaths, RunId)>,
     }
 
@@ -6197,16 +7129,18 @@ mod tests {
         fn new(response: StructuredInferenceResponse) -> Self {
             Self {
                 id: BackendId::new(BACKEND).expect("test backend id is valid"),
+                instance: test_backend_instance(),
                 model: ModelId::new(MODEL).expect("test model id is valid"),
                 response,
                 discovery_error: None,
                 inference_delay: Duration::ZERO,
                 discovery_delay: Duration::ZERO,
-                discovery_calls: AtomicUsize::new(0),
-                inference_calls: AtomicUsize::new(0),
-                critic_calls: AtomicUsize::new(0),
+                discovery_calls: Arc::new(AtomicUsize::new(0)),
+                inference_calls: Arc::new(AtomicUsize::new(0)),
+                critic_calls: Arc::new(AtomicUsize::new(0)),
                 semantic_critic: None,
-                prepared_at_call: AtomicBool::new(false),
+                preserve_response_transport_evidence: false,
+                prepared_at_call: Arc::new(AtomicBool::new(false)),
                 prepared_probe: None,
             }
         }
@@ -6226,9 +7160,15 @@ mod tests {
             self
         }
 
+        fn with_instance(mut self, instance: BackendInstanceIdentity) -> Self {
+            self.instance = instance;
+            self
+        }
+
         fn with_discovery_error(mut self) -> Self {
             self.discovery_error = Some(BackendError {
                 backend_id: self.id.clone(),
+                backend_instance: Some(Box::new(self.instance.clone())),
                 operation: BackendOperation::DiscoverOpenAiModels,
                 kind: BackendErrorKind::Transport,
                 message: "typed test discovery transport failure".to_owned(),
@@ -6240,6 +7180,43 @@ mod tests {
         fn with_semantic_critic(mut self, mode: SemanticCriticMode) -> Self {
             self.semantic_critic = Some(mode);
             self
+        }
+
+        fn preserving_response_transport_evidence(mut self) -> Self {
+            self.preserve_response_transport_evidence = true;
+            self
+        }
+
+        fn critic_peer(&self) -> Self {
+            let instance = test_critic_backend_instance();
+            let discovery_error = self.discovery_error.as_ref().map(|error| BackendError {
+                backend_id: error.backend_id.clone(),
+                backend_instance: Some(Box::new(instance.clone())),
+                operation: error.operation.clone(),
+                kind: error.kind.clone(),
+                message: error.message.clone(),
+                evidence: error.evidence.clone(),
+            });
+            Self {
+                id: self.id.clone(),
+                instance,
+                model: if self.semantic_critic.is_some() {
+                    ModelId::new(CRITIC_MODEL).expect("critic model id is valid")
+                } else {
+                    self.model.clone()
+                },
+                response: self.response.clone(),
+                discovery_error,
+                inference_delay: self.inference_delay,
+                discovery_delay: self.discovery_delay,
+                discovery_calls: Arc::clone(&self.discovery_calls),
+                inference_calls: Arc::clone(&self.inference_calls),
+                critic_calls: Arc::clone(&self.critic_calls),
+                semantic_critic: self.semantic_critic,
+                preserve_response_transport_evidence: self.preserve_response_transport_evidence,
+                prepared_at_call: Arc::clone(&self.prepared_at_call),
+                prepared_probe: self.prepared_probe.clone(),
+            }
         }
 
         fn probe_prepared(mut self, paths: RuntimePaths, run_id: RunId) -> Self {
@@ -6264,6 +7241,7 @@ mod tests {
                 loaded_instances: vec![LoadedInstance {
                     id: instance_id.to_owned(),
                     context_length: Some(32_768),
+                    parallel_capacity: Some(4),
                 }],
                 maximum_context_tokens: Some(32_768),
                 quantization: None,
@@ -6279,7 +7257,7 @@ mod tests {
                 "Multilingual test model",
                 "loaded-test-instance",
             )];
-            if self.semantic_critic.is_some() {
+            if self.semantic_critic.is_some() && self.model.as_str() != CRITIC_MODEL {
                 models.push(descriptor(
                     ModelId::new(CRITIC_MODEL).expect("critic model id is valid"),
                     "Independent critic test model",
@@ -6288,6 +7266,7 @@ mod tests {
             }
             ModelCatalog {
                 backend_id: self.id.clone(),
+                backend_instance: self.instance.clone(),
                 models,
                 evidence: DiscoveryEvidence {
                     openai: evidence.clone(),
@@ -6300,6 +7279,10 @@ mod tests {
     impl ModelBackend for TestBackend {
         fn backend_id(&self) -> &BackendId {
             &self.id
+        }
+
+        fn instance_identity(&self) -> &BackendInstanceIdentity {
+            &self.instance
         }
 
         fn discover_models(&self) -> BackendFuture<'_, ModelCatalog> {
@@ -6324,7 +7307,7 @@ mod tests {
                 });
                 self.prepared_at_call.store(prepared, Ordering::SeqCst);
             }
-            let response = if request.model_id().as_str() == CRITIC_MODEL {
+            let mut response = if request.model_id().as_str() == CRITIC_MODEL {
                 let call = self.critic_calls.fetch_add(1, Ordering::SeqCst);
                 match self.semantic_critic {
                     Some(SemanticCriticMode::ReviseThenAccept) if call == 0 => {
@@ -6346,6 +7329,17 @@ mod tests {
             } else {
                 self.response.clone()
             };
+            if !self.preserve_response_transport_evidence {
+                response.evidence.backend_id = self.id.clone();
+                response.evidence.backend_instance = Some(self.instance.clone());
+                response.evidence.endpoint = format!(
+                    "{}/v1/chat/completions",
+                    self.instance
+                        .endpoint_origin()
+                        .as_str()
+                        .trim_end_matches('/')
+                );
+            }
             Box::pin(async move {
                 tokio::time::sleep(self.inference_delay).await;
                 Ok(response)
@@ -6473,6 +7467,52 @@ mod tests {
         }
     }
 
+    fn parallel_reconnaissance_fixture(input: &str) -> Fixture {
+        let directory = TempDir::new().expect("test directory is created");
+        let paths = RuntimePaths::new(directory.path());
+        paths.prepare().expect("runtime paths are prepared");
+        let store = Store::open(paths.database(), paths.artifacts()).expect("store opens");
+        let mut runtime = LocalRuntime::new(store);
+        let session = runtime
+            .create_session(CreateSessionRequest {
+                workspace_root: PathBuf::from("/tmp/BirdCode parallel reconnaissance 日本語")
+                    .into(),
+                title: Some("Parallell repositorykartläggning".to_owned()),
+            })
+            .expect("session persists");
+        let run = runtime
+            .create_run(CreateRunRequest {
+                run_id: RunId::new(),
+                spec: RunSpec {
+                    session_id: session.id,
+                    purpose: RunPurpose::ParallelRepositoryReconnaissanceV1,
+                    plan_acceptance: PlanAcceptanceContract::IndependentSemanticReviewV1,
+                    backend: BackendSelection {
+                        backend_id: BACKEND.to_owned(),
+                        kind: BackendKind::Model,
+                        model: Some(MODEL.to_owned()),
+                        reasoning_effort: None,
+                    },
+                    input: vec![InputItem::Text {
+                        text: input.to_owned(),
+                    }],
+                    limits: RunLimits {
+                        max_output_tokens: Some(
+                            birdcode_protocol::PARALLEL_RECONNAISSANCE_V1_DEFAULT_TOTAL_RESERVED_OUTPUT_TOKENS,
+                        ),
+                        max_wall_time_seconds: Some(600),
+                        max_subagents: 2,
+                    },
+                },
+            })
+            .expect("parallel reconnaissance run persists");
+        Fixture {
+            _directory: directory,
+            paths,
+            run,
+        }
+    }
+
     fn persist_plan_runs(paths: &RuntimePaths, count: usize) -> Vec<Run> {
         let store = Store::open(paths.database(), paths.artifacts()).expect("store opens");
         let mut runtime = LocalRuntime::new(store);
@@ -6535,7 +7575,11 @@ mod tests {
             rusqlite::Connection::open(paths.database()).expect("protocol-v4 test database opens");
         connection
             .execute_batch(
-                "DROP TRIGGER events_are_immutable_on_update;
+                "DROP TRIGGER events_project_identity_after_insert;
+                 DROP TRIGGER event_identity_projection_reject_update;
+                 DROP TRIGGER event_identity_projection_reject_delete;
+                 DROP TABLE event_identity_projection;
+                 DROP TRIGGER events_are_immutable_on_update;
                  DROP TRIGGER events_are_immutable_on_delete;
                  UPDATE runs
                     SET value_json = json_remove(value_json, '$.spec.plan_acceptance');
@@ -6668,7 +7712,8 @@ mod tests {
             }),
             evidence: InferenceEvidence {
                 backend_id: BackendId::new(BACKEND).expect("backend id is valid"),
-                endpoint: "test://inference".to_owned(),
+                backend_instance: Some(test_backend_instance()),
+                endpoint: "http://127.0.0.1:19005/v1/chat/completions".to_owned(),
                 status: 200,
                 completion_id: Some("completion-test".to_owned()),
                 response_body_sha256: Some("0".repeat(Sha256Digest::HEX_LENGTH)),
@@ -6737,12 +7782,15 @@ mod tests {
                 basis: "Hela den skyddade flerspråkiga inmatningen användes som grund。".to_owned(),
             }],
         };
-        response_for_value_with_usage(
+        let mut response = response_for_value_with_usage(
             serde_json::to_value(output).expect("critic output serializes"),
             CRITIC_MODEL,
             40,
             60,
-        )
+        );
+        response.evidence.backend_instance = Some(test_critic_backend_instance());
+        response.evidence.endpoint = "http://127.0.0.1:19006/v1/chat/completions".to_owned();
+        response
     }
 
     fn semantic_test_policy() -> RootPlanningExecutionPolicy {
@@ -6775,13 +7823,28 @@ mod tests {
     }
 
     fn semantic_test_models() -> ResolvedSemanticModels {
+        let producer: Arc<dyn ModelBackend> = Arc::new(TestBackend::new(response_for_value(
+            json!({"unused": true}),
+            MODEL,
+        )));
+        let critic: Arc<dyn ModelBackend> = Arc::new(
+            TestBackend::new(response_for_value(json!({"unused": true}), CRITIC_MODEL))
+                .with_catalog_model(CRITIC_MODEL)
+                .with_instance(test_critic_backend_instance()),
+        );
         ResolvedSemanticModels {
             producer: ResolvedSemanticModel {
+                backend: producer,
+                backend_instance: protocol_backend_instance(&test_backend_instance())
+                    .expect("test backend identity projects exactly"),
                 model_id: ModelId::new(MODEL).expect("producer model id is valid"),
                 total_token_budget: 32_768,
                 reasoning: None,
             },
             critic: ResolvedSemanticModel {
+                backend: critic,
+                backend_instance: protocol_backend_instance(&test_critic_backend_instance())
+                    .expect("test critic backend identity projects exactly"),
                 model_id: ModelId::new(CRITIC_MODEL).expect("critic model id is valid"),
                 total_token_budget: 32_768,
                 reasoning: None,
@@ -6800,6 +7863,56 @@ mod tests {
     fn semantic_test_config() -> RunSupervisorConfig {
         RunSupervisorConfig {
             root_planning_policy: Some(semantic_test_policy()),
+            ..test_config()
+        }
+    }
+
+    fn semantic_backend_registry(backend: &Arc<TestBackend>) -> BackendRegistry {
+        let producer: Arc<dyn ModelBackend> = backend.clone();
+        let critic: Arc<dyn ModelBackend> = Arc::new(backend.critic_peer());
+        BackendRegistry::new(
+            [producer, critic],
+            Some(BackendRouteKey::from_instance(&test_backend_instance())),
+        )
+        .expect("semantic test backend routes are exact and distinct")
+    }
+
+    fn start_semantic_test_supervisor(
+        paths: RuntimePaths,
+        backend: Arc<TestBackend>,
+        config: RunSupervisorConfig,
+    ) -> Result<RunSupervisor, SupervisorStartError> {
+        RunSupervisor::start_with_registry(paths, semantic_backend_registry(&backend), config)
+    }
+
+    fn semantic_product_budget_config() -> RunSupervisorConfig {
+        let policy = crate::model_policy::TrustedRootPlanningPolicyConfig {
+            schema_version: crate::model_policy::ROOT_PLANNING_POLICY_SCHEMA_VERSION,
+            producer: semantic_test_policy().producer,
+            critic: semantic_test_policy().critic,
+            max_model_calls: crate::model_policy::ROOT_PLANNING_MAX_MODEL_CALLS,
+            max_repairs: crate::model_policy::ROOT_PLANNING_MAX_REPAIRS,
+            max_review_rounds: crate::model_policy::ROOT_PLANNING_MAX_REVIEW_ROUNDS,
+            stage_budgets: RootPlanningStageBudgets {
+                initial_plan_output_tokens: u64::from(
+                    birdcode_protocol::ROOT_PLANNING_POLICY_V1_INITIAL_PLAN_MAX_OUTPUT_TOKENS,
+                ),
+                initial_review_output_tokens: u64::from(
+                    birdcode_protocol::ROOT_PLANNING_POLICY_V1_INITIAL_REVIEW_MAX_OUTPUT_TOKENS,
+                ),
+                repair_output_tokens: u64::from(
+                    birdcode_protocol::ROOT_PLANNING_POLICY_V1_REPAIR_MAX_OUTPUT_TOKENS,
+                ),
+                final_review_output_tokens: u64::from(
+                    birdcode_protocol::ROOT_PLANNING_POLICY_V1_FINAL_REVIEW_MAX_OUTPUT_TOKENS,
+                ),
+            },
+        }
+        .compile()
+        .expect("product root-planning budget compiles");
+        RunSupervisorConfig {
+            claim_lease: Duration::from_secs(60),
+            root_planning_policy: Some(policy),
             ..test_config()
         }
     }
@@ -7029,6 +8142,8 @@ mod tests {
                 config.clone(),
                 ResolvedModel {
                     model_id: ModelId::new(MODEL).expect("model id is valid"),
+                    backend_instance: protocol_backend_instance(&test_backend_instance())
+                        .expect("test backend identity projects exactly"),
                     max_output_tokens: 512,
                     total_token_budget: 32_768,
                     reasoning: None,
@@ -7239,6 +8354,174 @@ mod tests {
     }
 
     #[test]
+    fn supervisor_routes_on_typed_run_purpose_before_acceptance_execution() {
+        assert_eq!(
+            supervisor_run_route(
+                RunPurpose::PlanOnly,
+                PlanAcceptanceContract::IndependentSemanticReviewV1,
+            )
+            .expect("semantic PlanOnly route is supported"),
+            SupervisorRunRoute::PlanOnlyIndependentSemanticReviewV1
+        );
+        assert_eq!(
+            supervisor_run_route(
+                RunPurpose::PlanOnly,
+                PlanAcceptanceContract::LegacyMechanicalOnlyV4,
+            )
+            .expect("legacy replay route remains supported"),
+            SupervisorRunRoute::PlanOnlyLegacyMechanicalOnlyV4
+        );
+        assert_eq!(
+            supervisor_run_route(
+                RunPurpose::ParallelRepositoryReconnaissanceV1,
+                PlanAcceptanceContract::IndependentSemanticReviewV1,
+            )
+            .expect("reconnaissance has a distinct route"),
+            SupervisorRunRoute::ParallelRepositoryReconnaissanceV1
+        );
+        assert!(matches!(
+            supervisor_run_route(
+                RunPurpose::ParallelRepositoryReconnaissanceV1,
+                PlanAcceptanceContract::NotApplicable,
+            ),
+            Err(SupervisorRunError::InvalidState(_))
+        ));
+        assert!(matches!(
+            supervisor_run_route(RunPurpose::Execute, PlanAcceptanceContract::NotApplicable,),
+            Err(SupervisorRunError::UnsupportedRunPurpose(
+                RunPurpose::Execute
+            ))
+        ));
+        assert!(purpose_has_executable_supervisor(
+            RunPurpose::PlanOnly,
+            false
+        ));
+        assert!(!purpose_has_executable_supervisor(
+            RunPurpose::ParallelRepositoryReconnaissanceV1,
+            false,
+        ));
+        assert!(purpose_has_executable_supervisor(
+            RunPurpose::ParallelRepositoryReconnaissanceV1,
+            true,
+        ));
+        assert!(!purpose_has_executable_supervisor(
+            RunPurpose::Execute,
+            true
+        ));
+    }
+
+    #[test]
+    fn unavailable_parallel_reconnaissance_neither_plans_nor_calls_the_backend() {
+        let fixture = parallel_reconnaissance_fixture(
+            "Kartlägg repositoryt med exakt två isolerade utforskare på svenska och 日本語。",
+        );
+        let backend = Arc::new(TestBackend::new(valid_response(
+            &fixture.paths,
+            fixture.run.id,
+        )));
+        let runtime = RuntimeBuilder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime builds");
+
+        let completion = runtime
+            .block_on(Box::pin(supervise_run(
+                fixture.paths.clone(),
+                backend.clone(),
+                ModelCallScheduler::new(4).expect("test model-call scheduler is valid"),
+                semantic_test_config(),
+                fixture.run.id,
+                CancellationToken::new(),
+                CancellationToken::new(),
+                false,
+            )))
+            .expect("quiescent reconnaissance route is deterministic");
+
+        assert_eq!(completion, RunCompletion::Paused);
+        assert_eq!(backend.discovery_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.inference_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.critic_calls.load(Ordering::SeqCst), 0);
+        let run = Store::open(fixture.paths.database(), fixture.paths.artifacts())
+            .expect("store reopens")
+            .get_run(fixture.run.id)
+            .expect("run reads")
+            .expect("run exists");
+        assert_eq!(run.state, RunState::Queued);
+        let events = all_events(&fixture.paths, fixture.run.id);
+        assert_eq!(
+            events.len(),
+            1,
+            "dispatch must be effect-free while unavailable"
+        );
+        assert!(matches!(events[0].payload, EventPayload::RunCreated { .. }));
+    }
+
+    #[test]
+    fn available_recon_drives_root_worst_case_once_then_pauses_running() {
+        let fixture = parallel_reconnaissance_fixture(
+            "Kartlägg repositoryt efter full oberoende root-review med restart-säker budget.",
+        );
+        let plan = valid_response_with_usage(
+            &fixture.paths,
+            fixture.run.id,
+            birdcode_protocol::ROOT_PLANNING_POLICY_V1_INITIAL_PLAN_MAX_OUTPUT_TOKENS,
+            40,
+            60,
+        );
+        let backend = Arc::new(
+            TestBackend::new(plan).with_semantic_critic(SemanticCriticMode::ReviseThenAccept),
+        );
+        let config = semantic_product_budget_config();
+        let runtime = RuntimeBuilder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime builds");
+
+        for pass in 0..2 {
+            let completion = runtime
+                .block_on(Box::pin(supervise_run_with_registry(
+                    fixture.paths.clone(),
+                    semantic_backend_registry(&backend),
+                    backend.clone(),
+                    ModelCallScheduler::new(4).expect("test model-call scheduler is valid"),
+                    config.clone(),
+                    fixture.run.id,
+                    CancellationToken::new(),
+                    CancellationToken::new(),
+                    true,
+                )))
+                .expect("available recon root phase is deterministic");
+            assert_eq!(
+                completion,
+                RunCompletion::Paused,
+                "pass {pass}, events: {:#?}",
+                all_events(&fixture.paths, fixture.run.id)
+            );
+        }
+
+        let events = all_events(&fixture.paths, fixture.run.id);
+        let reservations = events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                EventPayload::PlannerInferencePrepared(prepared) => {
+                    Some(prepared.token_reservation.max_output_tokens)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reservations.len(), 4);
+        assert_eq!(reservations.into_iter().sum::<u64>(), 40_960);
+        assert_eq!(backend.inference_calls.load(Ordering::SeqCst), 4);
+        let projection = Store::open(fixture.paths.database(), fixture.paths.artifacts())
+            .expect("store reopens")
+            .recon_run_projection(fixture.run.id)
+            .expect("recon projection reads")
+            .expect("recon projection exists");
+        assert_eq!(projection.run_state, RunState::Running);
+        assert!(projection.planner.accepted_root_plan.is_some());
+    }
+
+    #[test]
     fn semantic_plan_requires_explicit_trusted_policy_before_any_provider_access() {
         let fixture = semantic_fixture(
             "Planera på svenska och 日本語 utan att härleda reviewer-identitet från text.",
@@ -7283,7 +8566,7 @@ mod tests {
             40,
             60,
         )));
-        let supervisor = RunSupervisor::start(
+        let supervisor = start_semantic_test_supervisor(
             fixture.paths.clone(),
             backend.clone(),
             semantic_test_config(),
@@ -7296,7 +8579,7 @@ mod tests {
             RunState::Failed,
             Duration::from_secs(2),
         );
-        assert_eq!(backend.discovery_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.discovery_calls.load(Ordering::SeqCst), 2);
         assert_eq!(backend.inference_calls.load(Ordering::SeqCst), 0);
         assert!(
             !all_events(&fixture.paths, fixture.run.id)
@@ -7333,6 +8616,127 @@ mod tests {
     }
 
     #[test]
+    fn missing_exact_critic_route_fails_startup_without_falling_back_to_primary() {
+        let fixture = semantic_fixture(
+            "En katalogpost med rätt modellnamn får aldrig ersätta en saknad kritikerrutt.",
+        );
+        let backend = Arc::new(
+            TestBackend::new(valid_response_with_usage(
+                &fixture.paths,
+                fixture.run.id,
+                512,
+                40,
+                60,
+            ))
+            .with_semantic_critic(SemanticCriticMode::Accept),
+        );
+        let policy = semantic_test_policy();
+        let expected_route =
+            BackendRouteKey::try_from(&policy.critic).expect("trusted critic route is well formed");
+        let error = match RunSupervisor::start(
+            fixture.paths.clone(),
+            backend.clone(),
+            RunSupervisorConfig {
+                root_planning_policy: Some(policy),
+                ..test_config()
+            },
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("singleton supervisor must reject a missing critic route"),
+        };
+        let SupervisorStartError::PolicyRouteUnavailable {
+            role: RootPlanningModelRole::IndependentCritic,
+            source: BackendRegistryError::UnknownRoute(route),
+        } = error
+        else {
+            panic!("startup failure must name the exact unavailable critic route: {error}");
+        };
+        assert_eq!(route, expected_route);
+        assert_eq!(backend.discovery_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.inference_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            Store::open(fixture.paths.database(), fixture.paths.artifacts())
+                .expect("store reopens")
+                .get_run(fixture.run.id)
+                .expect("run reads")
+                .expect("run exists")
+                .state,
+            RunState::Queued
+        );
+        assert_eq!(all_events(&fixture.paths, fixture.run.id).len(), 1);
+    }
+
+    #[test]
+    fn public_discovery_uses_only_the_explicit_primary_registry_route() {
+        let directory = TempDir::new().expect("test directory is created");
+        let paths = RuntimePaths::new(directory.path());
+        paths.prepare().expect("runtime paths are prepared");
+        drop(Store::open(paths.database(), paths.artifacts()).expect("store initializes"));
+        let backend = Arc::new(
+            TestBackend::new(response_for_value(json!({"unused": true}), MODEL))
+                .with_semantic_critic(SemanticCriticMode::Accept),
+        );
+        let supervisor =
+            start_semantic_test_supervisor(paths, backend.clone(), semantic_test_config())
+                .expect("multi-route supervisor starts");
+
+        let catalog = supervisor
+            .discover_models()
+            .expect("public discovery returns the primary catalog");
+        assert_eq!(
+            catalog.backend_instance,
+            protocol_backend_instance(&test_backend_instance())
+                .expect("producer identity projects")
+        );
+        assert_eq!(backend.discovery_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            catalog
+                .models
+                .iter()
+                .any(|model| model.identity.model_id == MODEL)
+        );
+        supervisor.shutdown().expect("multi-route supervisor joins");
+    }
+
+    #[test]
+    fn semantic_policy_requires_the_producer_as_the_explicit_primary_route() {
+        let directory = TempDir::new().expect("test directory is created");
+        let paths = RuntimePaths::new(directory.path().join("unprepared-runtime"));
+        let backend = Arc::new(
+            TestBackend::new(response_for_value(json!({"unused": true}), MODEL))
+                .with_semantic_critic(SemanticCriticMode::Accept),
+        );
+        let producer: Arc<dyn ModelBackend> = backend.clone();
+        let critic: Arc<dyn ModelBackend> = Arc::new(backend.critic_peer());
+        let producer_route = BackendRouteKey::from_instance(producer.instance_identity());
+        let critic_route = BackendRouteKey::from_instance(critic.instance_identity());
+        let registry = BackendRegistry::new([producer, critic], Some(critic_route.clone()))
+            .expect("both exact routes are registered");
+
+        let error = match RunSupervisor::start_with_registry(
+            paths.clone(),
+            registry,
+            semantic_test_config(),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("critic-primary configuration must fail before startup"),
+        };
+        assert!(matches!(
+            error,
+            SupervisorStartError::PrimaryRouteDoesNotMatchProducer {
+                primary,
+                producer,
+            } if primary == critic_route && producer == producer_route
+        ));
+        assert_eq!(backend.discovery_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.inference_calls.load(Ordering::SeqCst), 0);
+        assert!(
+            !paths.database().exists(),
+            "invalid routing must be rejected before durable state is prepared"
+        );
+    }
+
+    #[test]
     fn later_discovery_names_a_missing_producer_without_guessing_from_review_stage() {
         let fixture = semantic_fixture(
             "Behåll producentens exakta lineage när reviewstadiet återupptas efter restart.",
@@ -7345,8 +8749,9 @@ mod tests {
                 .with_catalog_model("model/other-loaded-producer")
                 .with_semantic_critic(SemanticCriticMode::Accept),
         );
-        let supervisor = RunSupervisor::start(fixture.paths.clone(), backend.clone(), config)
-            .expect("replacement semantic supervisor starts");
+        let supervisor =
+            start_semantic_test_supervisor(fixture.paths.clone(), backend.clone(), config)
+                .expect("replacement semantic supervisor starts");
 
         wait_for_state(
             &fixture.paths,
@@ -7381,7 +8786,7 @@ mod tests {
                 None,
             ))
         );
-        assert_eq!(backend.discovery_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.discovery_calls.load(Ordering::SeqCst), 2);
         assert_eq!(backend.inference_calls.load(Ordering::SeqCst), 0);
         supervisor.shutdown().expect("semantic supervisor joins");
     }
@@ -7395,8 +8800,9 @@ mod tests {
         let plan = valid_response_with_usage(&fixture.paths, fixture.run.id, 512, 40, 60);
         persist_semantic_initial_candidate(&fixture, &config, plan.clone());
         let backend = Arc::new(TestBackend::new(plan));
-        let supervisor = RunSupervisor::start(fixture.paths.clone(), backend.clone(), config)
-            .expect("replacement semantic supervisor starts");
+        let supervisor =
+            start_semantic_test_supervisor(fixture.paths.clone(), backend.clone(), config)
+                .expect("replacement semantic supervisor starts");
 
         wait_for_state(
             &fixture.paths,
@@ -7431,7 +8837,7 @@ mod tests {
                 None,
             ))
         );
-        assert_eq!(backend.discovery_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.discovery_calls.load(Ordering::SeqCst), 2);
         assert_eq!(backend.inference_calls.load(Ordering::SeqCst), 0);
         supervisor.shutdown().expect("semantic supervisor joins");
     }
@@ -7444,7 +8850,7 @@ mod tests {
         let plan = valid_response_with_usage(&fixture.paths, fixture.run.id, 512, 40, 60);
         let backend =
             Arc::new(TestBackend::new(plan).with_semantic_critic(SemanticCriticMode::Accept));
-        let supervisor = RunSupervisor::start(
+        let supervisor = start_semantic_test_supervisor(
             fixture.paths.clone(),
             backend.clone(),
             semantic_test_config(),
@@ -7477,12 +8883,30 @@ mod tests {
             stages[1],
             PlannerStageContext::InitialReview { .. }
         ));
+        let prepared_instances = events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                EventPayload::PlannerInferencePrepared(prepared) => {
+                    prepared.backend_instance.clone()
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            prepared_instances,
+            [
+                protocol_backend_instance(&test_backend_instance())
+                    .expect("producer instance projects"),
+                protocol_backend_instance(&test_critic_backend_instance())
+                    .expect("critic instance projects"),
+            ]
+        );
         assert!(
             events
                 .iter()
                 .any(|event| matches!(event.payload, EventPayload::PlanSemanticReviewAccepted(_)))
         );
-        assert_eq!(backend.discovery_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.discovery_calls.load(Ordering::SeqCst), 2);
         assert_eq!(backend.inference_calls.load(Ordering::SeqCst), 2);
         supervisor.shutdown().expect("supervisor joins");
     }
@@ -7497,7 +8921,7 @@ mod tests {
         let backend =
             Arc::new(TestBackend::new(plan).with_semantic_critic(SemanticCriticMode::Accept));
         let supervisor =
-            RunSupervisor::start(fixture.paths.clone(), backend, semantic_test_config())
+            start_semantic_test_supervisor(fixture.paths.clone(), backend, semantic_test_config())
                 .expect("high-reasoning semantic supervisor starts");
 
         wait_for_state(
@@ -7581,7 +9005,7 @@ mod tests {
         let backend = Arc::new(
             TestBackend::new(plan).with_semantic_critic(SemanticCriticMode::ReviseThenAccept),
         );
-        let supervisor = RunSupervisor::start(
+        let supervisor = start_semantic_test_supervisor(
             fixture.paths.clone(),
             backend.clone(),
             semantic_test_config(),
@@ -7592,7 +9016,7 @@ mod tests {
             &fixture.paths,
             fixture.run.id,
             RunState::Completed,
-            Duration::from_secs(3),
+            Duration::from_secs(10),
         );
         let events = all_events(&fixture.paths, fixture.run.id);
         let stage_names = events
@@ -7617,13 +9041,32 @@ mod tests {
                 RootPlanningStage::FinalReview,
             ]
         );
+        let prepared_deployments = events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                EventPayload::PlannerInferencePrepared(prepared) => prepared
+                    .backend_instance
+                    .as_ref()
+                    .map(|instance| instance.configured_deployment_id.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            prepared_deployments,
+            [
+                "producer-deployment-test",
+                "critic-deployment-test",
+                "producer-deployment-test",
+                "critic-deployment-test",
+            ]
+        );
         assert!(events.iter().any(|event| matches!(
             &event.payload,
             EventPayload::PlanSemanticReviewRejected(rejected)
                 if rejected.disposition
                     == PlanSemanticReviewRejectionDisposition::RepairOnceAuthorized
         )));
-        assert_eq!(backend.discovery_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.discovery_calls.load(Ordering::SeqCst), 2);
         assert_eq!(backend.inference_calls.load(Ordering::SeqCst), 4);
         supervisor.shutdown().expect("supervisor joins");
     }
@@ -7637,7 +9080,7 @@ mod tests {
         let backend = Arc::new(
             TestBackend::new(plan).with_semantic_critic(SemanticCriticMode::InvalidContract),
         );
-        let supervisor = RunSupervisor::start(
+        let supervisor = start_semantic_test_supervisor(
             fixture.paths.clone(),
             backend.clone(),
             semantic_test_config(),
@@ -7704,8 +9147,9 @@ mod tests {
             TestBackend::new(response_for_value(json!({}), MODEL))
                 .with_semantic_critic(SemanticCriticMode::Accept),
         );
-        let supervisor = RunSupervisor::start(fixture.paths.clone(), backend.clone(), config)
-            .expect("semantic supervisor restarts");
+        let supervisor =
+            start_semantic_test_supervisor(fixture.paths.clone(), backend.clone(), config)
+                .expect("semantic supervisor restarts");
 
         wait_for_state(
             &fixture.paths,
@@ -7796,8 +9240,9 @@ mod tests {
         });
         let backend =
             Arc::new(TestBackend::new(response).with_semantic_critic(SemanticCriticMode::Accept));
-        let supervisor = RunSupervisor::start(fixture.paths.clone(), backend.clone(), config)
-            .expect("semantic supervisor restarts");
+        let supervisor =
+            start_semantic_test_supervisor(fixture.paths.clone(), backend.clone(), config)
+                .expect("semantic supervisor restarts");
 
         wait_for_state(
             &fixture.paths,
@@ -7805,7 +9250,7 @@ mod tests {
             RunState::Completed,
             Duration::from_secs(3),
         );
-        assert_eq!(backend.discovery_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.discovery_calls.load(Ordering::SeqCst), 2);
         assert_eq!(backend.inference_calls.load(Ordering::SeqCst), 1);
         assert_eq!(backend.critic_calls.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -7872,8 +9317,9 @@ mod tests {
 
         let backend =
             Arc::new(TestBackend::new(response).with_semantic_critic(SemanticCriticMode::Accept));
-        let supervisor = RunSupervisor::start(fixture.paths.clone(), backend.clone(), config)
-            .expect("semantic supervisor restarts");
+        let supervisor =
+            start_semantic_test_supervisor(fixture.paths.clone(), backend.clone(), config)
+                .expect("semantic supervisor restarts");
         wait_for_state(
             &fixture.paths,
             fixture.run.id,
@@ -7923,7 +9369,7 @@ mod tests {
             TestBackend::new(response_for_value(json!({}), MODEL))
                 .with_semantic_critic(SemanticCriticMode::Accept),
         );
-        let replacement = RunSupervisor::start(
+        let replacement = start_semantic_test_supervisor(
             fixture.paths.clone(),
             replacement_backend.clone(),
             semantic_test_config(),
@@ -8204,7 +9650,7 @@ mod tests {
             TestBackend::new(response_for_value(json!({}), MODEL))
                 .with_semantic_critic(SemanticCriticMode::Accept),
         );
-        let replacement = RunSupervisor::start(
+        let replacement = start_semantic_test_supervisor(
             fixture.paths.clone(),
             backend.clone(),
             semantic_test_config(),
@@ -8254,9 +9700,12 @@ mod tests {
             let backend = Arc::new(
                 TestBackend::new(fallback).with_semantic_critic(SemanticCriticMode::Accept),
             );
-            let supervisor =
-                RunSupervisor::start(fixture.paths.clone(), backend.clone(), config.clone())
-                    .expect("replacement semantic supervisor starts");
+            let supervisor = start_semantic_test_supervisor(
+                fixture.paths.clone(),
+                backend.clone(),
+                config.clone(),
+            )
+            .expect("replacement semantic supervisor starts");
             wait_for_state(
                 &fixture.paths,
                 fixture.run.id,
@@ -8310,7 +9759,7 @@ mod tests {
                 TestBackend::new(response_for_value(json!({}), MODEL))
                     .with_semantic_critic(SemanticCriticMode::Accept),
             );
-            let replacement = RunSupervisor::start(
+            let replacement = start_semantic_test_supervisor(
                 fixture.paths.clone(),
                 replacement_backend.clone(),
                 semantic_test_config(),
@@ -8429,9 +9878,12 @@ mod tests {
             let backend = Arc::new(
                 TestBackend::new(fallback).with_semantic_critic(SemanticCriticMode::Accept),
             );
-            let supervisor =
-                RunSupervisor::start(fixture.paths.clone(), backend.clone(), config.clone())
-                    .expect("replacement semantic supervisor starts");
+            let supervisor = start_semantic_test_supervisor(
+                fixture.paths.clone(),
+                backend.clone(),
+                config.clone(),
+            )
+            .expect("replacement semantic supervisor starts");
             wait_for_state(
                 &fixture.paths,
                 fixture.run.id,
@@ -8466,7 +9918,7 @@ mod tests {
                 TestBackend::new(response_for_value(json!({}), MODEL))
                     .with_semantic_critic(SemanticCriticMode::Accept),
             );
-            let replacement = RunSupervisor::start(
+            let replacement = start_semantic_test_supervisor(
                 fixture.paths.clone(),
                 replacement_backend.clone(),
                 semantic_test_config(),
@@ -8526,8 +9978,9 @@ mod tests {
 
         let backend =
             Arc::new(TestBackend::new(fallback).with_semantic_critic(SemanticCriticMode::Accept));
-        let supervisor = RunSupervisor::start(fixture.paths.clone(), backend.clone(), config)
-            .expect("replacement semantic supervisor starts");
+        let supervisor =
+            start_semantic_test_supervisor(fixture.paths.clone(), backend.clone(), config)
+                .expect("replacement semantic supervisor starts");
         wait_for_state(
             &fixture.paths,
             fixture.run.id,
@@ -8578,16 +10031,18 @@ mod tests {
             .expect("semantic prepare succeeds") else {
                 panic!("expected a prepared semantic producer call");
             };
-            execute_semantic_prepared(
+            Box::pin(execute_semantic_prepared(
                 fixture.paths.clone(),
                 backend.clone(),
+                ModelCallScheduler::new(config.max_parallel_model_calls)
+                    .expect("test model-call scheduler is valid"),
                 config.clone(),
                 fixture.run.id,
                 prepared,
                 &CancellationToken::new(),
                 &CancellationToken::new(),
                 Some(Utc::now() - ChronoDuration::milliseconds(1)),
-            )
+            ))
             .await
             .expect("deadline boundary persists")
         });
@@ -8596,7 +10051,7 @@ mod tests {
             SemanticPreparedExecution::Terminal(RunCompletion::Failed)
         ));
         let events = all_events(&fixture.paths, fixture.run.id);
-        assert_eq!(backend.inference_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.inference_calls.load(Ordering::SeqCst), 0);
         assert!(events.iter().any(|event| matches!(
             event.payload,
             EventPayload::PlannerInferenceOutcomeUnknown(_)
@@ -8606,6 +10061,194 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event.payload, EventPayload::PlannerInferenceObserved(_)))
         );
+    }
+
+    #[test]
+    fn pre_dispatch_instance_mismatch_is_durable_without_a_provider_call() {
+        let fixture = semantic_fixture(
+            "Fel backend-origin vid dispatch ska stoppas före varje extern modeleffekt.",
+        );
+        let config = semantic_test_config();
+        let prepared_instance = test_backend_instance();
+        let substituted_instance = test_backend_instance_for(
+            prepared_instance.configured_deployment_id().as_str(),
+            "http://127.0.0.1:19007",
+        );
+        assert_eq!(
+            substituted_instance.backend_id(),
+            prepared_instance.backend_id()
+        );
+        assert_eq!(
+            substituted_instance.configured_deployment_id(),
+            prepared_instance.configured_deployment_id()
+        );
+        assert_ne!(substituted_instance, prepared_instance);
+        let wrong_backend = Arc::new(
+            TestBackend::new(response_for_value(json!({"unused": true}), MODEL))
+                .with_instance(substituted_instance),
+        );
+        let runtime = RuntimeBuilder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime builds");
+        let observed = runtime.block_on(async {
+            assert!(matches!(
+                begin_run(fixture.paths.clone(), fixture.run.id, config.clone())
+                    .await
+                    .expect("claim succeeds"),
+                BeginRun::Ready { .. }
+            ));
+            let PreparePhase::Prepared(prepared) = compile_and_prepare_semantic(
+                fixture.paths.clone(),
+                fixture.run.id,
+                config.clone(),
+                semantic_test_policy(),
+                semantic_test_models(),
+                RootPlanningStage::InitialPlan,
+                None,
+            )
+            .await
+            .expect("producer stage prepares") else {
+                panic!("expected producer Prepared");
+            };
+            let execution = execute_semantic_prepared(
+                fixture.paths.clone(),
+                wrong_backend.clone(),
+                ModelCallScheduler::new(config.max_parallel_model_calls)
+                    .expect("model-call scheduler is valid"),
+                config.clone(),
+                fixture.run.id,
+                prepared,
+                &CancellationToken::new(),
+                &CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("pre-dispatch mismatch is retained");
+            let SemanticPreparedExecution::Observed(observed) = execution else {
+                panic!("mismatch must become an unambiguous failed observation");
+            };
+            observed
+        });
+
+        assert_eq!(wrong_backend.inference_calls.load(Ordering::SeqCst), 0);
+        let EventPayload::PlannerInferenceObserved(observation) = &observed.observed.payload else {
+            panic!("expected failed observation");
+        };
+        assert!(matches!(
+            observation.outcome,
+            PlannerInferenceObservation::Failed {
+                error: PlannerInferenceError {
+                    kind: PlannerInferenceErrorKind::ProtocolViolation,
+                    retry: RetryDisposition::Never,
+                },
+            }
+        ));
+        let store = Store::open(fixture.paths.database(), fixture.paths.artifacts())
+            .expect("store reopens");
+        let bytes = store
+            .get_artifact(&observation.normalized_complete_evidence_artifact)
+            .expect("pre-dispatch evidence verifies");
+        let retained: RetainedInferenceEvidence =
+            serde_json::from_slice(&bytes).expect("pre-dispatch evidence decodes");
+        let RetainedInferenceEvidence::NotDispatched { reason } = retained else {
+            panic!("provider-free rejection has a distinct evidence shape");
+        };
+        assert_eq!(reason, PlannerV2NotDispatchedReason::BackendInstanceDrift);
+    }
+
+    #[test]
+    fn response_transport_substitution_is_durable_and_never_creates_a_plan_decision() {
+        #[derive(Clone, Copy)]
+        enum TransportSubstitution {
+            FullBackendInstance,
+            EndpointOrigin,
+        }
+
+        for substitution in [
+            TransportSubstitution::FullBackendInstance,
+            TransportSubstitution::EndpointOrigin,
+        ] {
+            let fixture = semantic_fixture(
+                "En providerrespons från fel transportidentitet får aldrig bli ett planbeslut.",
+            );
+            let mut response =
+                valid_response_with_usage(&fixture.paths, fixture.run.id, 512, 40, 60);
+            let substituted_instance = test_backend_instance_for(
+                test_backend_instance().configured_deployment_id().as_str(),
+                "http://127.0.0.1:19007",
+            );
+            match substitution {
+                TransportSubstitution::FullBackendInstance => {
+                    response.evidence.backend_instance = Some(substituted_instance);
+                    response.evidence.endpoint =
+                        "http://127.0.0.1:19007/v1/chat/completions".to_owned();
+                }
+                TransportSubstitution::EndpointOrigin => {
+                    response.evidence.backend_instance = Some(test_backend_instance());
+                    response.evidence.endpoint =
+                        "http://127.0.0.1:19007/v1/chat/completions".to_owned();
+                }
+            }
+            let expected_response = response.clone();
+            let backend = Arc::new(
+                TestBackend::new(response)
+                    .with_semantic_critic(SemanticCriticMode::Accept)
+                    .preserving_response_transport_evidence(),
+            );
+            let supervisor = start_semantic_test_supervisor(
+                fixture.paths.clone(),
+                backend.clone(),
+                semantic_test_config(),
+            )
+            .expect("semantic supervisor starts");
+
+            wait_for_state(
+                &fixture.paths,
+                fixture.run.id,
+                RunState::Failed,
+                Duration::from_secs(2),
+            );
+            supervisor.shutdown().expect("semantic supervisor joins");
+            assert_eq!(backend.inference_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(backend.critic_calls.load(Ordering::SeqCst), 0);
+
+            let events = all_events(&fixture.paths, fixture.run.id);
+            let observed = events
+                .iter()
+                .find_map(|event| match &event.payload {
+                    EventPayload::PlannerInferenceObserved(observed) => Some(observed),
+                    _ => None,
+                })
+                .expect("transport-substituted response is durably observed");
+            assert!(matches!(
+                observed.outcome,
+                PlannerInferenceObservation::Failed {
+                    error: PlannerInferenceError {
+                        kind: PlannerInferenceErrorKind::ProtocolViolation,
+                        retry: RetryDisposition::Never,
+                    },
+                }
+            ));
+            let store = Store::open(fixture.paths.database(), fixture.paths.artifacts())
+                .expect("store reopens");
+            let bytes = store
+                .get_artifact(&observed.normalized_complete_evidence_artifact)
+                .expect("exact response evidence verifies");
+            let retained: RetainedInferenceEvidence =
+                serde_json::from_slice(&bytes).expect("typed response evidence decodes");
+            let RetainedInferenceEvidence::Response { response } = retained else {
+                panic!("transport violation must retain the exact provider response");
+            };
+            assert_eq!(response, expected_response);
+            assert!(!events.iter().any(|event| matches!(
+                event.payload,
+                EventPayload::PlanProposalAccepted(_)
+                    | EventPayload::PlanProposalRejected(_)
+                    | EventPayload::PlanSemanticReviewAccepted(_)
+                    | EventPayload::PlanSemanticReviewRejected(_)
+            )));
+        }
     }
 
     #[test]
@@ -8649,14 +10292,14 @@ mod tests {
             .await
             .expect("observation persists before deadline check");
             assert!(matches!(
-                decide_or_fail_semantic_observed(
+                Box::pin(decide_or_fail_semantic_observed(
                     fixture.paths.clone(),
                     fixture.run.id,
                     config.clone(),
                     observed.prepared,
                     observed.observed,
                     Some(Utc::now() - ChronoDuration::milliseconds(1)),
-                )
+                ))
                 .await
                 .expect("deadline terminalizes the observed attempt"),
                 SemanticObservedDecision::Terminal(RunCompletion::Failed)
@@ -8709,6 +10352,8 @@ mod tests {
                     config.clone(),
                     ResolvedModel {
                         model_id: ModelId::new(MODEL).expect("model id is valid"),
+                        backend_instance: protocol_backend_instance(&test_backend_instance())
+                            .expect("test backend identity projects exactly"),
                         max_output_tokens: 512,
                         total_token_budget: 32_768,
                         reasoning: None,
@@ -9400,12 +11045,38 @@ mod tests {
             8_192,
         );
         let backend = TestBackend::new(response_for_value(json!({}), MODEL));
-        let Ok(resolved) = resolve_catalog(&backend.catalog(), &fixture.run, &test_config()) else {
+        let Ok(resolved) = resolve_catalog(
+            &backend.catalog(),
+            protocol_backend_instance(&test_backend_instance())
+                .expect("test backend identity projects exactly"),
+            &fixture.run,
+            &test_config(),
+        ) else {
             panic!("the exact loaded model resolves");
         };
 
         assert_eq!(resolved.max_output_tokens, 8_192);
         assert_eq!(resolved.total_token_budget, 32_768);
+    }
+
+    #[test]
+    fn active_loaded_context_wins_over_a_larger_model_maximum() {
+        let backend = TestBackend::new(response_for_value(json!({}), MODEL));
+        let mut descriptor = backend
+            .catalog()
+            .models
+            .into_iter()
+            .next()
+            .expect("test catalog contains the loaded model");
+        descriptor.loaded_instances[0].context_length = Some(32_768);
+        descriptor.maximum_context_tokens = Some(131_072);
+
+        assert_eq!(
+            resolved_total_token_budget(&descriptor, descriptor.id.as_str()),
+            Some(32_768)
+        );
+        assert_eq!(descriptor.loaded_instances[0].context_length, Some(32_768));
+        assert_eq!(descriptor.maximum_context_tokens, Some(131_072));
     }
 
     #[test]
@@ -9629,6 +11300,8 @@ mod tests {
                     config.clone(),
                     ResolvedModel {
                         model_id: ModelId::new(MODEL).expect("model id is valid"),
+                        backend_instance: protocol_backend_instance(&test_backend_instance())
+                            .expect("test backend identity projects exactly"),
                         max_output_tokens: 512,
                         total_token_budget: 32_768,
                         reasoning: None,
@@ -9686,6 +11359,8 @@ mod tests {
                 config.clone(),
                 ResolvedModel {
                     model_id: ModelId::new(MODEL).expect("model id is valid"),
+                    backend_instance: protocol_backend_instance(&test_backend_instance())
+                        .expect("test backend identity projects exactly"),
                     max_output_tokens: 512,
                     total_token_budget: 32_768,
                     reasoning: None,

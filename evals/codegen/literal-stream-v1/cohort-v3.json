@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "fixture_id": "literal-stream-v1",
+  "cohort_id": "formal-v3-2026-07-20",
+  "evaluator": {
+    "id": "birdcode.codegen-calibration/3",
+    "sha256": "0eacb431b4e5dd042f3f83b2948658f945f26d4207824571712f8275618c8afd"
+  },
+  "blind_labels_disclosed_after_scoring": true,
+  "candidates": [
+    {
+      "blind_label": "A",
+      "source": "current-root-assistant-direct-authoring",
+      "comparison_role": "non-blind development control",
+      "attempt": {
+        "candidate_path": "candidates/manual-root.json",
+        "candidate_sha256": "b44781dcf42a319e87556c326f877d0fc6fe9b5b57cdf6b353bb9cced840fa62",
+        "report_path": "reports/blind-a-v3-formal-attempt-1.json",
+        "report_sha256": "5c3ebb3dc4bd6187c097bbd8556b03f1a174566ee0fa86a6eea674c6abba2251",
+        "status": "failed"
+      },
+      "repair": {
+        "candidate_path": "candidates/manual-root-repair-1.json",
+        "candidate_sha256": "6d79c1b5aa6bcebfcfaeaee753a61b0d2fa93a756311bf345edfa9ef44a4123e",
+        "generation_path": "generation/manual-root-control-v3.json",
+        "generation_sha256": "3342ed4ad4617d5a7e27d5e23c1dfe0c543459ae3f9bae5b3a4bb27e2c0320fd",
+        "report_path": "reports/blind-a-v3-formal-repair-1.json",
+        "report_sha256": "838b880158034098608a7c09bf5eed83ec54c7ceb3366ca5c277012a0e70af0a",
+        "status": "passed"
+      }
+    },
+    {
+      "blind_label": "B",
+      "source": "birdcode-lmstudio-backend/google-gemma-4-26b-a4b-q8_0-reasoning-off",
+      "comparison_role": "fair model candidate",
+      "attempt": {
+        "candidate_path": "candidates/gemma-fair-attempt-1.json",
+        "candidate_sha256": "20f3b0477e4c17888e6d07a156fb702bb0d1bfba539c0c4284f1cdad25e8dc27",
+        "generation_path": "generation/gemma-fair-attempt-1.json",
+        "generation_sha256": "873902c6ae4f80787b6785825ac1c764a49e2e0ae2be115376a1ed7a00360ad4",
+        "report_path": "reports/blind-b-v3-formal-attempt-1.json",
+        "report_sha256": "419331a507f2c9b448fa4c25431ca92a3b6d21807040f55e0253d10ee67722c8",
+        "status": "failed"
+      },
+      "repair": {
+        "candidate_path": "candidates/gemma-v3-fair-repair-1.json",
+        "candidate_sha256": "d3f7e35c9780979dea6d56fd02c55815affa7e1a0b390c047c59ecac686aacb8",
+        "generation_path": "generation/gemma-v3-fair-repair-1.json",
+        "generation_sha256": "7652ad410fc861c57c209526ecd3bd6ae1ec9ced72b590ba87fb1e24f1dbcce9",
+        "report_path": "reports/blind-b-v3-formal-repair-1.json",
+        "report_sha256": "2e0982b051e5f88d21f1a3d1d2f82feb234bd5ec069262fff0ca347dac76dabd",
+        "status": "failed"
+      }
+    },
+    {
+      "blind_label": "C",
+      "source": "clean-room-codex-subagent-requested-gpt-5.6-sol-ultra",
+      "comparison_role": "fair model candidate; requested profile not effectively attested",
+      "attempt": {
+        "candidate_path": "candidates/codex-requested-sol-ultra-attempt-1.json",
+        "candidate_sha256": "9ac134301bf4cb81b201eb814983866fe3523ba65abb832a869aed1f842af025",
+        "generation_path": "generation/codex-requested-sol-ultra-attempt-1.json",
+        "generation_sha256": "8d721222a76a8abd4e646ee4229f1a1a856bbffd310b1ec527fbab29bd1b27cd",
+        "report_path": "reports/blind-c-v3-formal-attempt-1.json",
+        "report_sha256": "14f83e7c78b221152b26436cf0c6398d578611c8d8c0b04ffcfe13795e84fd8e",
+        "status": "failed"
+      },
+      "repair": {
+        "candidate_path": "candidates/codex-v3-fair-repair-1.json",
+        "candidate_sha256": "6134cd532ac71575bd7ce08ccca49a8bb486f2edb5fb45c083e64decb004829c",
+        "generation_path": "generation/codex-v3-fair-repair-1.json",
+        "generation_sha256": "cda27d3e685358a501b1bb69bbdd116a310d496207815bc8ffac1dc1b3278ecd",
+        "report_path": "reports/blind-c-v3-formal-repair-1.json",
+        "report_sha256": "82d94cfbf11406fe62f6643a163fc8c70546095568b35259eb541adf66c02820",
+        "status": "passed"
+      }
+    }
+  ]
+}

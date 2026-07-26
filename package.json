@@ -11,8 +11,13 @@
   ],
   "scripts": {
     "build": "npm run build --workspace @birdcode/desktop",
+    "cache:clean": "node scripts/build_cache.mjs clean",
+    "cache:clean:apply": "node scripts/build_cache.mjs clean --apply",
+    "cache:inspect": "node scripts/build_cache.mjs inspect",
+    "cargo": "node scripts/birdcode_cargo.mjs",
     "dev": "npm run tauri:dev --workspace @birdcode/desktop",
     "test": "npm run test --workspace @birdcode/desktop",
+    "test:build-cache": "node --test scripts/build_cache.test.mjs",
     "typecheck": "npm run typecheck --workspace @birdcode/desktop"
   }
 }

@@ -1,8 +1,19 @@
 use birdcode_backends::{
-    BackendFuture, BackendId, InferenceEvidence, Message, MessageRole, ModelBackend, ModelCatalog,
-    ModelId, StructuredInferenceRequest, StructuredInferenceResponse, StructuredOutputSpec,
+    BackendDeploymentId, BackendEndpointOrigin, BackendFuture, BackendId, BackendInstanceIdentity,
+    BackendTransportIdentity, InferenceEvidence, ModelBackend, ModelCatalog, ModelId,
+    ReasoningSetting, StructuredInferenceRequest, StructuredInferenceResponse,
 };
 use birdcode_orchestrator::planner::*;
+use birdcode_orchestrator::planner_prompt::{
+    PlannerReplannerInferencePolicy, PlannerReplannerRequestBuilder,
+    PreparedPlannerReplannerRequest,
+};
+use birdcode_prompting::{
+    PlannerChildExecutionBinding, PlannerChildFindingConfidence, PlannerChildHandoff,
+    PlannerChildHandoffEvidenceBinding, PlannerChildHandoffFinding,
+    PlannerChildHandoffRecommendedFollowup, PlannerChildHandoffStatus, PlannerEvidenceArtifactRef,
+    PlannerEvidenceEntry, PlannerEvidenceEntryMaterial, PlannerEvidencePacket,
+};
 use serde_json::json;
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -13,8 +24,48 @@ struct Fixture {
     obligation: ProtectedObligation,
     evidence: PlannerEvidenceId,
     context: PlannerContextCatalog,
+    evidence_packet: PlannerEvidencePacket,
     policy: PlannerPolicy,
     base: PlanSnapshot,
+}
+
+fn fixture_handoff() -> PlannerChildHandoff {
+    let uuid = |suffix: u16| format!("018f0000-0000-7000-8000-{suffix:012x}");
+    let digest = |bytes: &[u8]| PlannerDigest::of_bytes(bytes).to_string();
+    PlannerChildHandoff {
+        contract_version: 1,
+        binding: PlannerChildExecutionBinding {
+            work_order_id: uuid(10),
+            execution_id: uuid(11),
+            attempt_id: uuid(12),
+            child_actor_id: uuid(13),
+            context_id: uuid(14),
+            work_order_digest: digest(b"fixture work order"),
+            context_manifest_digest: digest(b"fixture child context"),
+        },
+        handoff_id: uuid(15),
+        status: PlannerChildHandoffStatus::Complete,
+        summary: "Child-agenten har normaliserat målet som planner-evidens.".to_owned(),
+        findings: vec![PlannerChildHandoffFinding {
+            finding_id: "goal".to_owned(),
+            statement: "Målet kräver att multilingual text bevaras.".to_owned(),
+            confidence: PlannerChildFindingConfidence::High,
+            evidence: vec![PlannerChildHandoffEvidenceBinding {
+                tool_call_id: uuid(16),
+                observed_event_id: uuid(17),
+                result_artifact: PlannerEvidenceArtifactRef {
+                    sha256: digest(b"fixture result artifact"),
+                    size_bytes: 120,
+                    media_type: "application/json".to_owned(),
+                },
+            }],
+        }],
+        unknowns: Vec::new(),
+        recommended_followups: vec![PlannerChildHandoffRecommendedFollowup {
+            followup_id: "followup-independent-review".to_owned(),
+            text: "Kör en oberoende review efter implementering.".to_owned(),
+        }],
+    }
 }
 
 fn fixture() -> Fixture {
@@ -29,8 +80,20 @@ fn fixture() -> Fixture {
     )
     .expect("protected catalog");
     let evidence = PlannerEvidenceId::new("event:user-goal:1").expect("evidence ID");
-    let context =
-        PlannerContextCatalog::new([evidence.clone()]).expect("content-bound context catalog");
+    let entry = PlannerEvidenceEntry::new(PlannerEvidenceEntryMaterial {
+        evidence_id: evidence.to_string(),
+        source_artifact_sha256: PlannerDigest::of_bytes(b"fixture source artifact").to_string(),
+        handoff: fixture_handoff(),
+    })
+    .expect("normalized evidence entry");
+    let context = PlannerContextCatalog::new([PlannerEvidenceBinding::new(
+        evidence.clone(),
+        PlannerDigest::parse(entry.normalized_content_sha256().to_owned()).expect("entry digest"),
+    )])
+    .expect("content-bound context catalog");
+    let evidence_packet =
+        PlannerEvidencePacket::new(context.manifest_sha256().to_string(), vec![entry])
+            .expect("content-bound evidence packet");
     let policy = PlannerPolicy::read_only(PlannerLimits::default()).expect("read-only policy");
     let base = PlanSnapshot::empty(PlanId::new(), &catalog);
     Fixture {
@@ -38,9 +101,15 @@ fn fixture() -> Fixture {
         obligation,
         evidence,
         context,
+        evidence_packet,
         policy,
         base,
     }
+}
+
+fn test_evidence_binding(evidence_id: PlannerEvidenceId) -> PlannerEvidenceBinding {
+    let digest = PlannerDigest::of_bytes(evidence_id.as_str().as_bytes());
+    PlannerEvidenceBinding::new(evidence_id, digest)
 }
 
 fn basis(fixture: &Fixture, rationale: &str) -> DecisionBasis {
@@ -241,7 +310,7 @@ fn required_obligation_coverage_is_mechanical_and_atomic() {
     )
     .unwrap();
     let evidence = PlannerEvidenceId::new("event:goal").unwrap();
-    let context = PlannerContextCatalog::new([evidence.clone()]).unwrap();
+    let context = PlannerContextCatalog::new([test_evidence_binding(evidence.clone())]).unwrap();
     let policy = PlannerPolicy::read_only(PlannerLimits::default()).unwrap();
     let base = PlanSnapshot::empty(PlanId::new(), &catalog);
     let mut fixture = fixture();
@@ -422,15 +491,26 @@ fn read_only_policy_rejects_model_requested_workspace_write() {
 fn context_catalog_is_canonical_bounded_and_rejects_digest_substitution() {
     let first = PlannerEvidenceId::new("event:z").unwrap();
     let second = PlannerEvidenceId::new("event:a").unwrap();
-    let left = PlannerContextCatalog::new([first.clone(), second.clone()]).unwrap();
-    let right = PlannerContextCatalog::new([second.clone(), first.clone()]).unwrap();
+    let left = PlannerContextCatalog::new([
+        test_evidence_binding(first.clone()),
+        test_evidence_binding(second.clone()),
+    ])
+    .unwrap();
+    let right = PlannerContextCatalog::new([
+        test_evidence_binding(second.clone()),
+        test_evidence_binding(first.clone()),
+    ])
+    .unwrap();
     assert_eq!(
         left, right,
         "input ordering cannot change canonical evidence"
     );
-    assert_eq!(left.evidence_ids().len(), 2);
+    assert_eq!(left.evidence_bindings().len(), 2);
     assert!(matches!(
-        PlannerContextCatalog::new([first.clone(), first]),
+        PlannerContextCatalog::new([
+            test_evidence_binding(first.clone()),
+            test_evidence_binding(first),
+        ]),
         Err(PlannerContractError::DuplicateContextEvidenceId(_))
     ));
 
@@ -455,10 +535,11 @@ fn context_catalog_is_canonical_bounded_and_rejects_digest_substitution() {
         Err(PlannerContractError::TooManyObligations)
     ));
 
-    let oversized_context =
-        PlannerContextCatalog::new((0..4_096).map(|index| {
-            PlannerEvidenceId::new(format!("{index:04}{}", "e".repeat(507))).unwrap()
-        }));
+    let oversized_context = PlannerContextCatalog::new((0..4_096).map(|index| {
+        test_evidence_binding(
+            PlannerEvidenceId::new(format!("{index:04}{}", "e".repeat(507))).unwrap(),
+        )
+    }));
     assert!(matches!(
         oversized_context,
         Err(PlannerContractError::ContextCatalogTooLarge)
@@ -755,22 +836,128 @@ fn backend_id() -> BackendId {
     BackendId::new("planner-test").unwrap()
 }
 
+fn backend_instance() -> BackendInstanceIdentity {
+    backend_instance_for("planner-test", "planner-test-deployment", 19003)
+}
+
+fn backend_instance_for(
+    backend_id: &str,
+    deployment_id: &str,
+    port: u16,
+) -> BackendInstanceIdentity {
+    BackendInstanceIdentity::new(
+        BackendId::new(backend_id).expect("backend ID"),
+        BackendTransportIdentity::HttpOrigin {
+            origin: BackendEndpointOrigin::parse(format!("http://127.0.0.1:{port}"))
+                .expect("canonical test origin"),
+        },
+        BackendDeploymentId::new(deployment_id).expect("deployment ID"),
+    )
+    .expect("backend instance identity")
+}
+
 fn model_id() -> ModelId {
     ModelId::new("planner/test-model").unwrap()
 }
 
-fn inference_request() -> StructuredInferenceRequest {
-    StructuredInferenceRequest::new(
+fn inference_policy() -> PlannerReplannerInferencePolicy {
+    PlannerReplannerInferencePolicy::new(
+        backend_instance(),
         model_id(),
-        vec![Message::new(MessageRole::User, "typed planner invocation")],
-        StructuredOutputSpec::new("planner_turn", json!({"type": "object"})).unwrap(),
+        Some(ReasoningSetting::High),
         4_096,
     )
-    .unwrap()
+    .expect("trusted planner inference policy")
+}
+
+fn prepared_request(fixture: &Fixture) -> PreparedPlannerReplannerRequest {
+    PlannerReplannerRequestBuilder::new(inference_policy())
+        .build(
+            &fixture.base,
+            &fixture.catalog,
+            &fixture.context,
+            &fixture.policy,
+            &fixture.evidence_packet,
+        )
+        .expect("stable planner prompt compiles")
+}
+
+fn substituted_prompt_requests(
+    fixture: &Fixture,
+) -> Vec<(&'static str, PreparedPlannerReplannerRequest)> {
+    let original = serde_json::to_value(prepared_request(fixture)).expect("prepared serializes");
+    let mut candidates = Vec::new();
+
+    let mut model = original.clone();
+    model["inference"]["model_id"] = json!("planner/substituted-model");
+    candidates.push(("model_id", model));
+
+    let mut reasoning = original.clone();
+    reasoning["inference"]["reasoning"] = json!("low");
+    candidates.push(("reasoning", reasoning));
+
+    let mut tokens = original.clone();
+    tokens["inference"]["max_output_tokens"] = json!(2_048);
+    candidates.push(("max_output_tokens", tokens));
+
+    let mut output_schema = original.clone();
+    output_schema["inference"]["output"]["validation_schema"]["title"] =
+        json!("substituted but valid schema");
+    candidates.push(("output_schema", output_schema));
+
+    let mut message = original;
+    message["inference"]["messages"][0]["content"] = json!("substituted application policy");
+    candidates.push(("message", message));
+
+    candidates
+        .into_iter()
+        .map(|(name, value)| {
+            (
+                name,
+                serde_json::from_value(value).expect("shape-valid substituted request"),
+            )
+        })
+        .collect()
+}
+
+fn durable_preparation(
+    fixture: &Fixture,
+    prompt_bundle: PreparedPlannerReplannerRequest,
+    retained_inference_policy: &PlannerReplannerInferencePolicy,
+) -> PlannerAttemptPrepared {
+    let prompt_bundle_sha256 =
+        PlannerDigest::of_bytes(&serde_json::to_vec(&prompt_bundle).expect("bundle serializes"));
+    PlannerAttemptPrepared {
+        execution_id: PlannerExecutionId::new(),
+        attempt_id: PlannerAttemptId::new(),
+        parent_attempt_id: None,
+        budget_reservation_id: BudgetReservationId::new(),
+        backend_id: retained_inference_policy.backend_id().clone(),
+        backend_instance: retained_inference_policy.backend_instance().clone(),
+        model_id: retained_inference_policy.model_id().clone(),
+        max_output_tokens: retained_inference_policy.max_output_tokens(),
+        base_plan_sha256: fixture.base.sha256().unwrap(),
+        obligation_snapshot_sha256: fixture.catalog.snapshot_sha256().clone(),
+        acceptance_policy_sha256: fixture.catalog.acceptance_policy_sha256().clone(),
+        context_manifest_sha256: fixture.context.manifest_sha256().clone(),
+        planner_policy_sha256: fixture.policy.policy_sha256().clone(),
+        inference_policy_sha256: retained_inference_policy.policy_sha256().clone(),
+        inference_policy: Box::new(retained_inference_policy.clone()),
+        prompt_bundle_sha256,
+        prompt_bundle: Box::new(prompt_bundle),
+        base_plan: Box::new(fixture.base.clone()),
+        obligations: Box::new(fixture.catalog.clone()),
+        context: Box::new(fixture.context.clone()),
+        policy: Box::new(fixture.policy.clone()),
+    }
 }
 
 fn response(proposal: &PlannerTurnProposal) -> StructuredInferenceResponse {
     let value = serde_json::to_value(proposal).unwrap();
+    response_value(value)
+}
+
+fn response_value(value: serde_json::Value) -> StructuredInferenceResponse {
     StructuredInferenceResponse {
         model_id: model_id(),
         raw_text: serde_json::to_string(&value).unwrap(),
@@ -779,7 +966,8 @@ fn response(proposal: &PlannerTurnProposal) -> StructuredInferenceResponse {
         usage: None,
         evidence: InferenceEvidence {
             backend_id: backend_id(),
-            endpoint: "fake://planner".to_owned(),
+            backend_instance: Some(backend_instance()),
+            endpoint: "http://127.0.0.1:19003/v1/chat/completions".to_owned(),
             status: 200,
             completion_id: Some("planner-completion-1".to_owned()),
             response_body_sha256: Some("0".repeat(64)),
@@ -790,6 +978,7 @@ fn response(proposal: &PlannerTurnProposal) -> StructuredInferenceResponse {
 
 struct OrderingBackend {
     id: BackendId,
+    instance: BackendInstanceIdentity,
     prepared_seen: Arc<AtomicBool>,
     calls: AtomicUsize,
     replies: Mutex<VecDeque<StructuredInferenceResponse>>,
@@ -799,6 +988,7 @@ impl OrderingBackend {
     fn new(prepared_seen: Arc<AtomicBool>, response: StructuredInferenceResponse) -> Self {
         Self {
             id: backend_id(),
+            instance: backend_instance(),
             prepared_seen,
             calls: AtomicUsize::new(0),
             replies: Mutex::new(VecDeque::from([response])),
@@ -809,6 +999,10 @@ impl OrderingBackend {
 impl ModelBackend for OrderingBackend {
     fn backend_id(&self) -> &BackendId {
         &self.id
+    }
+
+    fn instance_identity(&self) -> &BackendInstanceIdentity {
+        &self.instance
     }
 
     fn discover_models(&self) -> BackendFuture<'_, ModelCatalog> {
@@ -841,8 +1035,12 @@ struct OrderingJournal {
 }
 
 impl PlannerJournal for OrderingJournal {
-    fn retain(&self, record: &PlannerJournalRecord) -> Result<(), PlannerJournalError> {
-        self.inner.retain(record)?;
+    fn retain(
+        &self,
+        record: &PlannerJournalRecord,
+        expected_inference_policy: &PlannerReplannerInferencePolicy,
+    ) -> Result<(), PlannerJournalError> {
+        self.inner.retain(record, expected_inference_policy)?;
         if matches!(record, PlannerJournalRecord::Prepared(_)) {
             self.prepared_seen.store(true, Ordering::SeqCst);
         }
@@ -860,9 +1058,9 @@ async fn executor_acknowledges_prepared_before_calling_backend() {
         inner: InMemoryPlannerJournal::default(),
         prepared_seen,
     };
-    let execution = PlannerExecutor::new(&backend, &journal)
+    let execution = PlannerExecutor::new(&backend, &journal, &inference_policy())
         .execute(PlannerExecutionRequest::new(
-            inference_request(),
+            prepared_request(&fixture),
             fixture.base,
             fixture.catalog,
             fixture.context,
@@ -884,15 +1082,281 @@ async fn executor_acknowledges_prepared_before_calling_backend() {
     let decoded: Vec<PlannerJournalRecord> =
         serde_json::from_slice(&encoded).expect("durable journal deserialization");
     assert_eq!(decoded, records);
-    PlannerJournalProjection::replay(&decoded).expect("round-tripped journal replay");
+    PlannerJournalProjection::replay(&decoded, &inference_policy())
+        .expect("round-tripped journal replay");
     assert!(matches!(
         journal
             .inner
-            .projection()
+            .projection(&inference_policy())
             .unwrap()
             .attempts
             .get(&execution.prepared.attempt_id),
         Some(PlannerAttemptProjection::Accepted { .. })
+    ));
+}
+
+#[tokio::test]
+async fn executor_and_replay_reject_shape_valid_substituted_prompt_bundles() {
+    let fixture = fixture();
+    let proposal = initial_proposal(&fixture);
+    let prepared_seen = Arc::new(AtomicBool::new(false));
+    let backend = OrderingBackend::new(Arc::clone(&prepared_seen), response(&proposal));
+    let journal = OrderingJournal {
+        inner: InMemoryPlannerJournal::default(),
+        prepared_seen,
+    };
+    for (field, substituted) in substituted_prompt_requests(&fixture) {
+        let error = PlannerExecutor::new(&backend, &journal, &inference_policy())
+            .execute(PlannerExecutionRequest::new(
+                substituted.clone(),
+                fixture.base.clone(),
+                fixture.catalog.clone(),
+                fixture.context.clone(),
+                fixture.policy.clone(),
+            ))
+            .await
+            .expect_err("executor must attest the trusted inference policy before journaling");
+        assert!(
+            matches!(error, PlannerExecutionError::PromptBoundary { .. }),
+            "shape-valid {field} substitution reached executor"
+        );
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 0, "field: {field}");
+        assert!(
+            journal.inner.snapshot().unwrap().is_empty(),
+            "field: {field}"
+        );
+
+        let prepared = durable_preparation(&fixture, substituted, &inference_policy());
+        let error = PlannerJournalProjection::replay(
+            &[PlannerJournalRecord::Prepared(prepared)],
+            &inference_policy(),
+        )
+        .expect_err("replay must attest against the independently supplied inference policy");
+        assert!(error.message.contains("does not bind"), "field: {field}");
+    }
+}
+
+#[tokio::test]
+async fn self_consistent_stored_inference_policy_cannot_replace_external_policy() {
+    let fixture = fixture();
+    let proposal = initial_proposal(&fixture);
+    let prepared_seen = Arc::new(AtomicBool::new(false));
+    let backend = OrderingBackend::new(Arc::clone(&prepared_seen), response(&proposal));
+    let journal = OrderingJournal {
+        inner: InMemoryPlannerJournal::default(),
+        prepared_seen,
+    };
+    let substituted_policy = PlannerReplannerInferencePolicy::new(
+        backend_instance(),
+        ModelId::new("planner/self-consistent-substitution").unwrap(),
+        Some(ReasoningSetting::Low),
+        2_048,
+    )
+    .expect("shape-valid substituted policy");
+    let substituted_bundle = PlannerReplannerRequestBuilder::new(substituted_policy.clone())
+        .build(
+            &fixture.base,
+            &fixture.catalog,
+            &fixture.context,
+            &fixture.policy,
+            &fixture.evidence_packet,
+        )
+        .expect("self-consistent substituted bundle");
+    let rewritten_record =
+        durable_preparation(&fixture, substituted_bundle.clone(), &substituted_policy);
+    PlannerJournalProjection::replay(
+        &[PlannerJournalRecord::Prepared(rewritten_record)],
+        &inference_policy(),
+    )
+    .expect_err("a self-consistent stored policy cannot replace the external expected policy");
+
+    let error = PlannerExecutor::new(&backend, &journal, &inference_policy())
+        .execute(PlannerExecutionRequest::new(
+            substituted_bundle,
+            fixture.base.clone(),
+            fixture.catalog.clone(),
+            fixture.context.clone(),
+            fixture.policy.clone(),
+        ))
+        .await
+        .expect_err("self-consistent model policy substitution must fail before inference");
+    assert!(matches!(
+        error,
+        PlannerExecutionError::PromptBoundary { .. }
+    ));
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn trusted_backend_identity_mismatch_stops_before_journal_or_inference() {
+    let fixture = fixture();
+    let proposal = initial_proposal(&fixture);
+    let prepared_seen = Arc::new(AtomicBool::new(false));
+    let backend = OrderingBackend::new(Arc::clone(&prepared_seen), response(&proposal));
+    let journal = OrderingJournal {
+        inner: InMemoryPlannerJournal::default(),
+        prepared_seen,
+    };
+    let foreign_backend_policy = PlannerReplannerInferencePolicy::new(
+        backend_instance_for("substituted-backend", "foreign-deployment", 19004),
+        model_id(),
+        Some(ReasoningSetting::High),
+        4_096,
+    )
+    .expect("foreign backend policy");
+    let foreign_bundle = PlannerReplannerRequestBuilder::new(foreign_backend_policy.clone())
+        .build(
+            &fixture.base,
+            &fixture.catalog,
+            &fixture.context,
+            &fixture.policy,
+            &fixture.evidence_packet,
+        )
+        .expect("foreign backend bundle");
+    let error = PlannerExecutor::new(&backend, &journal, &foreign_backend_policy)
+        .execute(PlannerExecutionRequest::new(
+            foreign_bundle,
+            fixture.base.clone(),
+            fixture.catalog.clone(),
+            fixture.context.clone(),
+            fixture.policy.clone(),
+        ))
+        .await
+        .expect_err("backend identity is controlled by the trusted inference policy");
+    assert!(matches!(
+        error,
+        PlannerExecutionError::BackendPolicyMismatch
+    ));
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn same_provider_model_and_deployment_at_another_origin_stops_before_prepared_or_future() {
+    let fixture = fixture();
+    let proposal = initial_proposal(&fixture);
+    let prepared_seen = Arc::new(AtomicBool::new(false));
+    let mut backend = OrderingBackend::new(Arc::clone(&prepared_seen), response(&proposal));
+    backend.instance = backend_instance_for(
+        backend_id().as_str(),
+        backend_instance().configured_deployment_id().as_str(),
+        19004,
+    );
+    let journal = OrderingJournal {
+        inner: InMemoryPlannerJournal::default(),
+        prepared_seen: Arc::clone(&prepared_seen),
+    };
+    let trusted_policy = inference_policy();
+
+    let error = PlannerExecutor::new(&backend, &journal, &trusted_policy)
+        .execute(PlannerExecutionRequest::new(
+            prepared_request(&fixture),
+            fixture.base,
+            fixture.catalog,
+            fixture.context,
+            fixture.policy,
+        ))
+        .await
+        .expect_err("origin B must not satisfy origin A's prepared authority");
+
+    assert!(matches!(
+        error,
+        PlannerExecutionError::BackendPolicyMismatch
+    ));
+    assert_eq!(backend.backend_id(), trusted_policy.backend_id());
+    assert_eq!(
+        backend.instance_identity().configured_deployment_id(),
+        trusted_policy.backend_instance().configured_deployment_id()
+    );
+    assert_ne!(
+        backend.instance_identity(),
+        trusted_policy.backend_instance()
+    );
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
+    assert!(!prepared_seen.load(Ordering::SeqCst));
+    assert!(journal.inner.snapshot().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn cross_origin_response_evidence_is_durably_rejected_and_replay_agrees() {
+    let fixture = fixture();
+    let proposal = initial_proposal(&fixture);
+    let mut cross_origin_response = response(&proposal);
+    cross_origin_response.evidence.endpoint =
+        "http://127.0.0.1:19004/v1/chat/completions".to_owned();
+    let prepared_seen = Arc::new(AtomicBool::new(false));
+    let backend = OrderingBackend::new(Arc::clone(&prepared_seen), cross_origin_response);
+    let journal = OrderingJournal {
+        inner: InMemoryPlannerJournal::default(),
+        prepared_seen,
+    };
+    let trusted_policy = inference_policy();
+
+    let execution = PlannerExecutor::new(&backend, &journal, &trusted_policy)
+        .execute(PlannerExecutionRequest::new(
+            prepared_request(&fixture),
+            fixture.base,
+            fixture.catalog,
+            fixture.context,
+            fixture.policy,
+        ))
+        .await
+        .expect("response contract violations are durably terminalized");
+
+    assert!(matches!(
+        execution.status,
+        PlannerExecutionStatus::Rejected {
+            rejection: PlannerRejection::ResponseContract { ref violations }
+        } if violations.contains(&PlannerResponseViolation::EndpointOriginMismatch)
+    ));
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+    let records = journal.inner.snapshot().unwrap();
+    let replay = PlannerJournalProjection::replay(&records, &trusted_policy)
+        .expect("replay must preserve the same cross-origin rejection");
+    assert!(matches!(
+        replay.attempts.values().next(),
+        Some(PlannerAttemptProjection::Rejected { rejected, .. })
+            if matches!(
+                &rejected.rejection,
+                PlannerRejection::ResponseContract { violations }
+                    if violations.contains(&PlannerResponseViolation::EndpointOriginMismatch)
+            )
+    ));
+}
+
+#[tokio::test]
+async fn replay_reapplies_prompt_output_invariants_before_domain_validation() {
+    let fixture = fixture();
+    let mut stale = serde_json::to_value(initial_proposal(&fixture)).expect("proposal serializes");
+    stale["bindings"]["base_revision"] = json!(fixture.base.revision + 1);
+    let prepared_seen = Arc::new(AtomicBool::new(false));
+    let backend = OrderingBackend::new(Arc::clone(&prepared_seen), response_value(stale));
+    let journal = OrderingJournal {
+        inner: InMemoryPlannerJournal::default(),
+        prepared_seen,
+    };
+    let execution = PlannerExecutor::new(&backend, &journal, &inference_policy())
+        .execute(PlannerExecutionRequest::new(
+            prepared_request(&fixture),
+            fixture.base,
+            fixture.catalog,
+            fixture.context,
+            fixture.policy,
+        ))
+        .await
+        .expect("prompt-invalid model output is durably rejected");
+    assert!(matches!(
+        execution.status,
+        PlannerExecutionStatus::Rejected {
+            rejection: PlannerRejection::PromptContract { .. }
+        }
+    ));
+    let records = journal.inner.snapshot().expect("journal snapshot");
+    let projection = PlannerJournalProjection::replay(&records, &inference_policy())
+        .expect("replay reaches the same prompt-contract rejection");
+    assert!(matches!(
+        projection.attempts.values().next(),
+        Some(PlannerAttemptProjection::Rejected { rejected, .. })
+            if matches!(rejected.rejection, PlannerRejection::PromptContract { .. })
     ));
 }
 
@@ -906,9 +1370,9 @@ async fn replay_recomputes_acceptance_and_rejects_fabricated_result_or_authority
         inner: InMemoryPlannerJournal::default(),
         prepared_seen,
     };
-    PlannerExecutor::new(&backend, &journal)
+    PlannerExecutor::new(&backend, &journal, &inference_policy())
         .execute(PlannerExecutionRequest::new(
-            inference_request(),
+            prepared_request(&fixture),
             fixture.base,
             fixture.catalog,
             fixture.context,
@@ -927,7 +1391,7 @@ async fn replay_recomputes_acceptance_and_rejects_fabricated_result_or_authority
         .plan
         .strategy_summary
         .push_str(" fabricated");
-    let error = PlannerJournalProjection::replay(&fabricated_result)
+    let error = PlannerJournalProjection::replay(&fabricated_result, &inference_policy())
         .expect_err("result must be recomputed from observed proposal and authority");
     assert!(error.message.contains("fabricated"));
 
@@ -937,7 +1401,7 @@ async fn replay_recomputes_acceptance_and_rejects_fabricated_result_or_authority
         panic!("terminal acceptance");
     };
     accepted.proposal_sha256 = PlannerDigest::of_bytes(b"substituted proposal");
-    let error = PlannerJournalProjection::replay(&fabricated_proposal_digest)
+    let error = PlannerJournalProjection::replay(&fabricated_proposal_digest, &inference_policy())
         .expect_err("proposal digest must bind the exact observed JSON");
     assert!(error.message.contains("fabricated"));
 
@@ -946,7 +1410,7 @@ async fn replay_recomputes_acceptance_and_rejects_fabricated_result_or_authority
         panic!("preparation");
     };
     prepared.base_plan.strategy_summary = "substituted authority".to_owned();
-    let error = PlannerJournalProjection::replay(&substituted_authority)
+    let error = PlannerJournalProjection::replay(&substituted_authority, &inference_policy())
         .expect_err("prepared authority snapshot must bind its repeated digest");
     assert!(error.message.contains("authority snapshots"));
 }
@@ -961,9 +1425,9 @@ async fn replay_rejects_second_root_after_prepared_observed_or_accepted() {
         inner: InMemoryPlannerJournal::default(),
         prepared_seen,
     };
-    PlannerExecutor::new(&backend, &journal)
+    PlannerExecutor::new(&backend, &journal, &inference_policy())
         .execute(PlannerExecutionRequest::new(
-            inference_request(),
+            prepared_request(&fixture),
             fixture.base,
             fixture.catalog,
             fixture.context,
@@ -983,7 +1447,7 @@ async fn replay_rejects_second_root_after_prepared_observed_or_accepted() {
     for prefix_len in [1, 2, 3] {
         let mut candidate = records[..prefix_len].to_vec();
         candidate.push(PlannerJournalRecord::Prepared(second.clone()));
-        let error = PlannerJournalProjection::replay(&candidate)
+        let error = PlannerJournalProjection::replay(&candidate, &inference_policy())
             .expect_err("one execution may never gain a second root attempt");
         assert!(error.message.contains("exactly one root"));
     }
@@ -992,7 +1456,11 @@ async fn replay_rejects_second_root_after_prepared_observed_or_accepted() {
 struct RejectPreparationJournal;
 
 impl PlannerJournal for RejectPreparationJournal {
-    fn retain(&self, record: &PlannerJournalRecord) -> Result<(), PlannerJournalError> {
+    fn retain(
+        &self,
+        record: &PlannerJournalRecord,
+        _expected_inference_policy: &PlannerReplannerInferencePolicy,
+    ) -> Result<(), PlannerJournalError> {
         if matches!(record, PlannerJournalRecord::Prepared(_)) {
             Err(PlannerJournalError::new("budget reservation failed"))
         } else {
@@ -1008,9 +1476,9 @@ async fn rejected_preparation_prevents_backend_call() {
     let prepared_seen = Arc::new(AtomicBool::new(false));
     let backend = OrderingBackend::new(prepared_seen, response(&proposal));
 
-    let error = PlannerExecutor::new(&backend, &RejectPreparationJournal)
+    let error = PlannerExecutor::new(&backend, &RejectPreparationJournal, &inference_policy())
         .execute(PlannerExecutionRequest::new(
-            inference_request(),
+            prepared_request(&fixture),
             fixture.base,
             fixture.catalog,
             fixture.context,
@@ -1032,7 +1500,11 @@ struct DropObservationJournal {
 }
 
 impl PlannerJournal for DropObservationJournal {
-    fn retain(&self, record: &PlannerJournalRecord) -> Result<(), PlannerJournalError> {
+    fn retain(
+        &self,
+        record: &PlannerJournalRecord,
+        _expected_inference_policy: &PlannerReplannerInferencePolicy,
+    ) -> Result<(), PlannerJournalError> {
         match record {
             PlannerJournalRecord::Prepared(_) => {
                 self.records.lock().unwrap().push(record.clone());
@@ -1060,9 +1532,9 @@ async fn unobserved_preparation_replays_as_reconciliation_required() {
         prepared_seen,
     };
 
-    let error = PlannerExecutor::new(&backend, &journal)
+    let error = PlannerExecutor::new(&backend, &journal, &inference_policy())
         .execute(PlannerExecutionRequest::new(
-            inference_request(),
+            prepared_request(&fixture),
             fixture.base,
             fixture.catalog,
             fixture.context,
@@ -1076,7 +1548,7 @@ async fn unobserved_preparation_replays_as_reconciliation_required() {
     ));
     let records = journal.records.lock().unwrap().clone();
     assert_eq!(records.len(), 1);
-    let projection = PlannerJournalProjection::replay(&records).unwrap();
+    let projection = PlannerJournalProjection::replay(&records, &inference_policy()).unwrap();
     assert!(matches!(
         projection.attempts.values().next(),
         Some(PlannerAttemptProjection::ReconciliationRequired { .. })
@@ -1087,22 +1559,25 @@ async fn unobserved_preparation_replays_as_reconciliation_required() {
 #[test]
 fn replay_rejects_reused_budget_reservation_and_unauthorized_retry_parent() {
     let fixture = fixture();
-    let request = inference_request();
+    let prompt_bundle = prepared_request(&fixture);
     let first = PlannerAttemptPrepared {
         execution_id: PlannerExecutionId::new(),
         attempt_id: PlannerAttemptId::new(),
         parent_attempt_id: None,
         budget_reservation_id: BudgetReservationId::new(),
         backend_id: backend_id(),
+        backend_instance: backend_instance(),
         model_id: model_id(),
-        max_output_tokens: request.max_output_tokens(),
+        max_output_tokens: prompt_bundle.inference().max_output_tokens(),
         base_plan_sha256: fixture.base.sha256().unwrap(),
         obligation_snapshot_sha256: fixture.catalog.snapshot_sha256().clone(),
         acceptance_policy_sha256: fixture.catalog.acceptance_policy_sha256().clone(),
         context_manifest_sha256: fixture.context.manifest_sha256().clone(),
         planner_policy_sha256: fixture.policy.policy_sha256().clone(),
-        request_sha256: PlannerDigest::of_bytes(&serde_json::to_vec(&request).unwrap()),
-        request: request.clone(),
+        inference_policy_sha256: inference_policy().policy_sha256().clone(),
+        inference_policy: Box::new(inference_policy()),
+        prompt_bundle_sha256: PlannerDigest::of_bytes(&serde_json::to_vec(&prompt_bundle).unwrap()),
+        prompt_bundle: Box::new(prompt_bundle),
         base_plan: Box::new(fixture.base.clone()),
         obligations: Box::new(fixture.catalog.clone()),
         context: Box::new(fixture.context.clone()),
@@ -1110,10 +1585,13 @@ fn replay_rejects_reused_budget_reservation_and_unauthorized_retry_parent() {
     };
     let mut reused = first.clone();
     reused.attempt_id = PlannerAttemptId::new();
-    let error = PlannerJournalProjection::replay(&[
-        PlannerJournalRecord::Prepared(first.clone()),
-        PlannerJournalRecord::Prepared(reused),
-    ])
+    let error = PlannerJournalProjection::replay(
+        &[
+            PlannerJournalRecord::Prepared(first.clone()),
+            PlannerJournalRecord::Prepared(reused),
+        ],
+        &inference_policy(),
+    )
     .expect_err("one reservation cannot fund two attempts");
     assert!(error.message.contains("reservation"));
 
@@ -1122,10 +1600,13 @@ fn replay_rejects_reused_budget_reservation_and_unauthorized_retry_parent() {
     wrong_parent.parent_attempt_id = Some(first.attempt_id);
     wrong_parent.execution_id = PlannerExecutionId::new();
     wrong_parent.budget_reservation_id = BudgetReservationId::new();
-    let error = PlannerJournalProjection::replay(&[
-        PlannerJournalRecord::Prepared(first),
-        PlannerJournalRecord::Prepared(wrong_parent),
-    ])
+    let error = PlannerJournalProjection::replay(
+        &[
+            PlannerJournalRecord::Prepared(first),
+            PlannerJournalRecord::Prepared(wrong_parent),
+        ],
+        &inference_policy(),
+    )
     .expect_err("parent links are not retry authority");
     assert!(error.message.contains("retry authorization"));
 }

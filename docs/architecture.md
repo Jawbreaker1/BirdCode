@@ -32,9 +32,11 @@ behavior belongs behind platform adapters in the runtime.
 Protocol v5 currently connects both desktop and CLI to a durable daemon-owned
 `PlanOnly` supervisor. An explicit trusted policy pins exact producer and
 critic lineages plus the bundled planner, critic, and repair contracts before
-inference. The backend reports the exact discovered model IDs; deployment and
-independence-domain separation are currently trusted operator declarations,
-not backend attestations, and both roles use one configured backend instance.
+inference. A strict backend manifest maps each policy lineage to an exact
+configured deployment and full transport-bound backend identity; public
+discovery is restricted to the explicit producer-primary route and semantic
+resolution never falls back. Independence-domain separation remains a trusted
+operator declaration rather than a provider attestation.
 The supervisor executes `InitialPlan → InitialReview → optional
 Repair → FinalReview`, with exactly two calls for direct acceptance and at most
 four calls when one complete replacement plan is authorized. It persists each

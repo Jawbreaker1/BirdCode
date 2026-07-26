@@ -21,7 +21,7 @@ use std::time::Duration;
 use thiserror::Error;
 use uuid::Uuid;
 
-const ACTOR_GRAPH_SCHEMA_VERSION: u32 = 1;
+const ACTOR_GRAPH_SCHEMA_VERSION: u32 = 2;
 const HARD_MAX_WORK_ORDERS: usize = 1_024;
 const HARD_MAX_POLICY_LEASES: usize = 2_048;
 const HARD_MAX_MODEL_PROFILES: usize = 1_024;
@@ -182,12 +182,40 @@ impl WorkspaceAccess {
     }
 }
 
-/// A pre-provisioned workspace lease at one immutable source snapshot.
+/// Exact source material backing a broker-attested workspace lease.
+///
+/// The variants are deliberately closed. A plan-input snapshot identifies the
+/// evidence used to author an actor graph; it is not interchangeable with
+/// either a brokered repository snapshot or a Git baseline used for execution.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkspaceSourceBinding {
+    BrokeredRepositorySnapshotV1 { snapshot_sha256: String },
+    GitCleanCommittedHeadV1 { git_baseline_sha256: String },
+}
+
+impl WorkspaceSourceBinding {
+    #[must_use]
+    pub fn digest_sha256(&self) -> &str {
+        match self {
+            Self::BrokeredRepositorySnapshotV1 { snapshot_sha256 } => snapshot_sha256,
+            Self::GitCleanCommittedHeadV1 {
+                git_baseline_sha256,
+            } => git_baseline_sha256,
+        }
+    }
+
+    const fn supports_write(&self) -> bool {
+        matches!(self, Self::GitCleanCommittedHeadV1 { .. })
+    }
+}
+
+/// A pre-provisioned workspace lease at one immutable source binding.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceGrant {
     pub lease_id: WorkspaceLeaseId,
-    pub base_snapshot_sha256: String,
+    pub source: WorkspaceSourceBinding,
     pub access: WorkspaceAccess,
 }
 
@@ -195,7 +223,7 @@ pub struct WorkspaceGrant {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceLeasePolicy {
-    pub base_snapshot_sha256: String,
+    pub source: WorkspaceSourceBinding,
     pub access: WorkspaceAccess,
 }
 
@@ -227,7 +255,7 @@ pub struct ActorGraphLimits {
 #[serde(deny_unknown_fields)]
 pub struct ActorGraphPolicy {
     pub policy_version: String,
-    pub root_snapshot_sha256: String,
+    pub plan_input_snapshot_sha256: String,
     pub root_permissions: PermissionGrant,
     pub limits: ActorGraphLimits,
     /// Whether successful workers must supply provider-reported output usage.
@@ -263,7 +291,7 @@ pub struct WorkOrder {
 #[serde(deny_unknown_fields)]
 pub struct ActorGraph {
     pub schema_version: u32,
-    pub root_snapshot_sha256: String,
+    pub plan_input_snapshot_sha256: String,
     pub work_orders: Vec<WorkOrder>,
 }
 
@@ -398,14 +426,17 @@ pub enum ActorGraphViolation {
         work_order_id: WorkOrderId,
         lease_id: WorkspaceLeaseId,
     },
-    SnapshotMismatch {
+    InvalidWorkspaceSourceDigest {
         work_order_id: WorkOrderId,
     },
     SharedWriterLease {
         lease_id: WorkspaceLeaseId,
     },
-    WriteWorkspaceExecutionUnsupported {
+    WorkspaceExecutionProfileUnsupported {
         work_order_id: WorkOrderId,
+        source: WorkspaceSourceBinding,
+        access: WorkspaceAccess,
+        max_attempts: u32,
     },
     CandidateSnapshotMismatch {
         candidate_group_id: CandidateGroupId,
@@ -439,6 +470,21 @@ pub enum ActorGraphViolation {
     },
     ReviewerLineageConflict {
         reviewer_id: WorkOrderId,
+        target_id: WorkOrderId,
+    },
+    /// A review work order is a terminal evidence producer until a typed
+    /// verdict controller has committed a route. Scheduler `Completed` only
+    /// means that the review work itself finished; it is not approval.
+    UngatedReviewDependency {
+        downstream_id: WorkOrderId,
+        reviewer_id: WorkOrderId,
+    },
+    /// A reviewed producer cannot also feed another consumer in the same
+    /// graph. Such a fork would let the consumer run before the review verdict
+    /// is typed and committed. The reviewer itself is the sole allowed direct
+    /// consumer until a later controller creates a new gated graph.
+    UngatedReviewedTargetDependency {
+        downstream_id: WorkOrderId,
         target_id: WorkOrderId,
     },
     BudgetOverflow,
@@ -613,6 +659,8 @@ pub struct AgentDispatch {
     pub execution_id: ExecutionId,
     pub attempt_id: AttemptId,
     pub parent_attempt_id: Option<AttemptId>,
+    /// Durable root identifying this exact execution of the validated graph.
+    pub graph_accepted_event_id: SchedulerEventId,
     pub graph_sha256: String,
     pub attestation: DispatchAttestation,
     pub work_order: Arc<WorkOrder>,
@@ -786,7 +834,7 @@ pub enum SchedulerEvent {
     GraphAccepted {
         graph_sha256: String,
         policy_version: String,
-        root_snapshot_sha256: String,
+        plan_input_snapshot_sha256: String,
     },
     AttemptDispatched {
         work_order_id: WorkOrderId,
@@ -794,6 +842,7 @@ pub enum SchedulerEvent {
         execution_id: ExecutionId,
         attempt_id: AttemptId,
         parent_attempt_id: Option<AttemptId>,
+        graph_accepted_event_id: SchedulerEventId,
         attestation: Box<DispatchAttestation>,
         dependency_handoff_event_ids: BTreeMap<WorkOrderId, SchedulerEventId>,
     },
@@ -857,6 +906,139 @@ pub trait SchedulerJournal: Send + Sync {
     fn retain(&self, record: &SchedulerRecord) -> Result<(), SchedulerJournalError>;
 }
 
+/// Typed failure returned when a worker dispatch cannot be proven to be the
+/// exact scheduler-journal subject it claims to be.
+///
+/// Verification compares only identities, typed records, canonical hashes, and
+/// causal references. It never interprets handoff prose or artifact contents.
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum SchedulerDispatchVerificationError {
+    #[error(transparent)]
+    Journal(#[from] SchedulerJournalError),
+    #[error("dispatch attestation does not match its exact graph and work order")]
+    AttestationMismatch,
+    #[error("dispatch dependency handoff keys do not equal the work-order dependency set")]
+    DependencyHandoffKeySetMismatch,
+    #[error("dispatch dependency event keys do not equal the work-order dependency set")]
+    DependencyEventKeySetMismatch,
+    #[error("dependency {dependency_id} is bound to handoff work order {handoff_work_order_id}")]
+    DependencyHandoffWorkOrderMismatch {
+        dependency_id: WorkOrderId,
+        handoff_work_order_id: WorkOrderId,
+    },
+    #[error(
+        "dependency {dependency_id} maps event {mapped_event_id}, but its handoff was retained by {handoff_event_id}"
+    )]
+    DependencyHandoffEventMismatch {
+        dependency_id: WorkOrderId,
+        mapped_event_id: SchedulerEventId,
+        handoff_event_id: SchedulerEventId,
+    },
+    #[error("dependency {dependency_id} handoff is not completed: {outcome:?}")]
+    DependencyHandoffIncomplete {
+        dependency_id: WorkOrderId,
+        outcome: HandoffOutcome,
+    },
+    #[error("no retained dispatch record exists for attempt {attempt_id}")]
+    DispatchRecordNotFound { attempt_id: AttemptId },
+    #[error("multiple retained dispatch records exist for attempt {attempt_id}")]
+    DispatchRecordAmbiguous { attempt_id: AttemptId },
+    #[error("retained dispatch work-order identity does not match")]
+    DispatchWorkOrderMismatch,
+    #[error("retained dispatch actor identity does not match")]
+    DispatchActorMismatch,
+    #[error("retained dispatch execution identity does not match")]
+    DispatchExecutionMismatch,
+    #[error("retained dispatch parent-attempt identity does not match")]
+    DispatchParentAttemptMismatch,
+    #[error("retained dispatch graph-run root does not match")]
+    DispatchGraphRootMismatch,
+    #[error("retained dispatch attestation does not match")]
+    DispatchAttestationMismatch,
+    #[error("retained dispatch dependency event bindings do not match")]
+    DispatchDependencyEventsMismatch,
+    #[error("retained dispatch causal parent does not match its dependency chain")]
+    DispatchCausalParentMismatch,
+    #[error("dependency {dependency_id} references missing journal event {event_id}")]
+    DependencyRecordNotFound {
+        dependency_id: WorkOrderId,
+        event_id: SchedulerEventId,
+    },
+    #[error("dependency {dependency_id} references ambiguous journal event {event_id}")]
+    DependencyRecordAmbiguous {
+        dependency_id: WorkOrderId,
+        event_id: SchedulerEventId,
+    },
+    #[error("dependency {dependency_id} does not reference a retained handoff event")]
+    DependencyRecordTypeMismatch { dependency_id: WorkOrderId },
+    #[error("dependency {dependency_id} does not equal its exact retained handoff record")]
+    DependencyRetainedHandoffMismatch { dependency_id: WorkOrderId },
+    #[error("dependency {dependency_id} retained handoff has no causal producer dispatch")]
+    DependencyProducerDispatchMissing { dependency_id: WorkOrderId },
+    #[error("dependency {dependency_id} retained handoff has an ambiguous causal parent")]
+    DependencyProducerDispatchAmbiguous { dependency_id: WorkOrderId },
+    #[error("dependency {dependency_id} retained handoff parent is not a dispatch")]
+    DependencyProducerRecordTypeMismatch { dependency_id: WorkOrderId },
+    #[error("dependency {dependency_id} producer dispatch identity does not match its handoff")]
+    DependencyProducerIdentityMismatch { dependency_id: WorkOrderId },
+    #[error("dependency {dependency_id} producer dispatch belongs to another actor graph")]
+    DependencyProducerGraphMismatch { dependency_id: WorkOrderId },
+    #[error("root dispatch causal parent is missing")]
+    RootRecordNotFound,
+    #[error("root dispatch causal parent is ambiguous")]
+    RootRecordAmbiguous,
+    #[error("root dispatch causal parent is not the matching accepted graph")]
+    RootRecordMismatch,
+}
+
+/// Exact producer dispatch recovered for one dependency by a trusted scheduler
+/// verifier.
+///
+/// This is typed verification evidence, not a standalone capability. Callers
+/// must consume it directly from the configured [`SchedulerDispatchVerifier`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedSchedulerDependencyV1 {
+    pub dependency_id: WorkOrderId,
+    pub graph_accepted_event_id: SchedulerEventId,
+    pub handoff_event_id: SchedulerEventId,
+    pub producer_dispatch_event_id: SchedulerEventId,
+    pub actor_id: ActorId,
+    pub execution_id: ExecutionId,
+    pub attempt_id: AttemptId,
+    pub dispatch_attestation: DispatchAttestation,
+}
+
+/// Journal-derived identity and dependency evidence for one exact scheduler
+/// dispatch.
+///
+/// Implementations of [`SchedulerDispatchVerifier`] are trusted to construct
+/// this only after validating the complete retained causal chain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedSchedulerDispatchV1 {
+    pub dispatch_event_id: SchedulerEventId,
+    pub graph_accepted_event_id: SchedulerEventId,
+    pub dependencies: BTreeMap<WorkOrderId, VerifiedSchedulerDependencyV1>,
+}
+
+/// Read-only authority boundary proving that an [`AgentDispatch`] is exactly
+/// backed by the scheduler's retained dispatch and dependency-handoff chain.
+///
+/// This is deliberately separate from [`SchedulerJournal`] so append-only
+/// journal implementations are not forced to expose reads. Durable journals
+/// can implement this trait with indexed transactional reads or sealed proofs.
+pub trait SchedulerDispatchVerifier: Send + Sync {
+    /// Verifies the complete typed dispatch subject without interpreting prose.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error unless the dispatch, its attestation, every
+    /// dependency handoff, and every causal journal edge match exactly.
+    fn verify_dispatch(
+        &self,
+        dispatch: &AgentDispatch,
+    ) -> Result<VerifiedSchedulerDispatchV1, SchedulerDispatchVerificationError>;
+}
+
 #[derive(Debug, Default)]
 pub struct InMemorySchedulerJournal {
     records: Mutex<Vec<SchedulerRecord>>,
@@ -884,6 +1066,515 @@ impl SchedulerJournal for InMemorySchedulerJournal {
             .push(record.clone());
         Ok(())
     }
+}
+
+impl SchedulerDispatchVerifier for InMemorySchedulerJournal {
+    fn verify_dispatch(
+        &self,
+        dispatch: &AgentDispatch,
+    ) -> Result<VerifiedSchedulerDispatchV1, SchedulerDispatchVerificationError> {
+        verify_dispatch_shape(dispatch)?;
+
+        let records = self.snapshot()?;
+        let dispatch_record = unique_dispatch_record_for_attempt(&records, dispatch.attempt_id)?;
+        let SchedulerEvent::AttemptDispatched {
+            work_order_id,
+            actor_id,
+            execution_id,
+            parent_attempt_id,
+            graph_accepted_event_id,
+            attestation,
+            dependency_handoff_event_ids,
+            ..
+        } = &dispatch_record.event
+        else {
+            unreachable!("dispatch lookup only returns AttemptDispatched records")
+        };
+        if *work_order_id != dispatch.work_order.id {
+            return Err(SchedulerDispatchVerificationError::DispatchWorkOrderMismatch);
+        }
+        if *actor_id != dispatch.actor_id {
+            return Err(SchedulerDispatchVerificationError::DispatchActorMismatch);
+        }
+        if *execution_id != dispatch.execution_id {
+            return Err(SchedulerDispatchVerificationError::DispatchExecutionMismatch);
+        }
+        if *parent_attempt_id != dispatch.parent_attempt_id {
+            return Err(SchedulerDispatchVerificationError::DispatchParentAttemptMismatch);
+        }
+        if *graph_accepted_event_id != dispatch.graph_accepted_event_id {
+            return Err(SchedulerDispatchVerificationError::DispatchGraphRootMismatch);
+        }
+        if attestation.as_ref() != &dispatch.attestation {
+            return Err(SchedulerDispatchVerificationError::DispatchAttestationMismatch);
+        }
+        if dependency_handoff_event_ids != &dispatch.dependency_handoff_event_ids {
+            return Err(SchedulerDispatchVerificationError::DispatchDependencyEventsMismatch);
+        }
+
+        verify_graph_root_record(
+            &records,
+            dispatch.graph_accepted_event_id,
+            &dispatch.graph_sha256,
+        )?;
+        verify_dispatch_causal_parent(&records, dispatch_record, dispatch)?;
+
+        let mut verified_dependencies = BTreeMap::new();
+        for (dependency_id, handoff) in &dispatch.dependency_handoffs {
+            let retained_record =
+                unique_dependency_record(&records, *dependency_id, handoff.retained_event_id)?;
+            let SchedulerEvent::HandoffRetained {
+                handoff: retained_handoff,
+            } = &retained_record.event
+            else {
+                return Err(
+                    SchedulerDispatchVerificationError::DependencyRecordTypeMismatch {
+                        dependency_id: *dependency_id,
+                    },
+                );
+            };
+            if retained_handoff != handoff.as_ref() {
+                return Err(
+                    SchedulerDispatchVerificationError::DependencyRetainedHandoffMismatch {
+                        dependency_id: *dependency_id,
+                    },
+                );
+            }
+            let verified_dependency = verify_dependency_producer(
+                &records,
+                *dependency_id,
+                retained_record,
+                retained_handoff,
+                &dispatch.graph_sha256,
+                dispatch.graph_accepted_event_id,
+            )?;
+            verified_dependencies.insert(*dependency_id, verified_dependency);
+        }
+
+        Ok(VerifiedSchedulerDispatchV1 {
+            dispatch_event_id: dispatch_record.id,
+            graph_accepted_event_id: dispatch.graph_accepted_event_id,
+            dependencies: verified_dependencies,
+        })
+    }
+}
+
+fn verify_dispatch_shape(
+    dispatch: &AgentDispatch,
+) -> Result<(), SchedulerDispatchVerificationError> {
+    let expected_attestation =
+        dispatch_attestation(&dispatch.graph_sha256, dispatch.work_order.as_ref())?;
+    if dispatch.attestation != expected_attestation {
+        return Err(SchedulerDispatchVerificationError::AttestationMismatch);
+    }
+
+    let dependency_ids = &dispatch.work_order.dependencies;
+    if !map_keys_equal_set(&dispatch.dependency_handoffs, dependency_ids) {
+        return Err(SchedulerDispatchVerificationError::DependencyHandoffKeySetMismatch);
+    }
+    if !map_keys_equal_set(&dispatch.dependency_handoff_event_ids, dependency_ids) {
+        return Err(SchedulerDispatchVerificationError::DependencyEventKeySetMismatch);
+    }
+    for (dependency_id, handoff) in &dispatch.dependency_handoffs {
+        if handoff.work_order_id != *dependency_id {
+            return Err(
+                SchedulerDispatchVerificationError::DependencyHandoffWorkOrderMismatch {
+                    dependency_id: *dependency_id,
+                    handoff_work_order_id: handoff.work_order_id,
+                },
+            );
+        }
+        let mapped_event_id = dispatch.dependency_handoff_event_ids[dependency_id];
+        if handoff.retained_event_id != mapped_event_id {
+            return Err(
+                SchedulerDispatchVerificationError::DependencyHandoffEventMismatch {
+                    dependency_id: *dependency_id,
+                    mapped_event_id,
+                    handoff_event_id: handoff.retained_event_id,
+                },
+            );
+        }
+        if handoff.outcome != HandoffOutcome::Completed {
+            return Err(
+                SchedulerDispatchVerificationError::DependencyHandoffIncomplete {
+                    dependency_id: *dependency_id,
+                    outcome: handoff.outcome,
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
+fn map_keys_equal_set<K: Ord, V>(map: &BTreeMap<K, V>, set: &BTreeSet<K>) -> bool {
+    map.len() == set.len() && map.keys().eq(set.iter())
+}
+
+fn unique_dispatch_record_for_attempt(
+    records: &[SchedulerRecord],
+    attempt_id: AttemptId,
+) -> Result<&SchedulerRecord, SchedulerDispatchVerificationError> {
+    let mut matches = records.iter().filter(|record| {
+        matches!(
+            record.event,
+            SchedulerEvent::AttemptDispatched {
+                attempt_id: retained_attempt_id,
+                ..
+            } if retained_attempt_id == attempt_id
+        )
+    });
+    let Some(record) = matches.next() else {
+        return Err(SchedulerDispatchVerificationError::DispatchRecordNotFound { attempt_id });
+    };
+    if matches.next().is_some() {
+        return Err(SchedulerDispatchVerificationError::DispatchRecordAmbiguous { attempt_id });
+    }
+    Ok(record)
+}
+
+fn unique_dependency_record(
+    records: &[SchedulerRecord],
+    dependency_id: WorkOrderId,
+    event_id: SchedulerEventId,
+) -> Result<&SchedulerRecord, SchedulerDispatchVerificationError> {
+    let mut matches = records.iter().filter(|record| record.id == event_id);
+    let Some(record) = matches.next() else {
+        return Err(
+            SchedulerDispatchVerificationError::DependencyRecordNotFound {
+                dependency_id,
+                event_id,
+            },
+        );
+    };
+    if matches.next().is_some() {
+        return Err(
+            SchedulerDispatchVerificationError::DependencyRecordAmbiguous {
+                dependency_id,
+                event_id,
+            },
+        );
+    }
+    Ok(record)
+}
+
+fn verify_dependency_producer(
+    records: &[SchedulerRecord],
+    dependency_id: WorkOrderId,
+    handoff_record: &SchedulerRecord,
+    handoff: &Handoff,
+    graph_sha256: &str,
+    graph_accepted_event_id: SchedulerEventId,
+) -> Result<VerifiedSchedulerDependencyV1, SchedulerDispatchVerificationError> {
+    let Some(parent_event_id) = handoff_record.causal_parent else {
+        return Err(
+            SchedulerDispatchVerificationError::DependencyProducerDispatchMissing { dependency_id },
+        );
+    };
+    let mut matches = records.iter().filter(|record| record.id == parent_event_id);
+    let Some(parent) = matches.next() else {
+        return Err(
+            SchedulerDispatchVerificationError::DependencyProducerDispatchMissing { dependency_id },
+        );
+    };
+    if matches.next().is_some() {
+        return Err(
+            SchedulerDispatchVerificationError::DependencyProducerDispatchAmbiguous {
+                dependency_id,
+            },
+        );
+    }
+    let SchedulerEvent::AttemptDispatched {
+        work_order_id,
+        actor_id,
+        execution_id,
+        attempt_id,
+        graph_accepted_event_id: producer_graph_accepted_event_id,
+        attestation,
+        ..
+    } = &parent.event
+    else {
+        return Err(
+            SchedulerDispatchVerificationError::DependencyProducerRecordTypeMismatch {
+                dependency_id,
+            },
+        );
+    };
+    if *work_order_id != handoff.work_order_id
+        || *actor_id != handoff.actor_id
+        || *execution_id != handoff.execution_id
+        || *attempt_id != handoff.attempt_id
+    {
+        return Err(
+            SchedulerDispatchVerificationError::DependencyProducerIdentityMismatch {
+                dependency_id,
+            },
+        );
+    }
+    if attestation.graph_sha256 != graph_sha256 {
+        return Err(
+            SchedulerDispatchVerificationError::DependencyProducerGraphMismatch { dependency_id },
+        );
+    }
+    if *producer_graph_accepted_event_id != graph_accepted_event_id {
+        return Err(SchedulerDispatchVerificationError::DispatchGraphRootMismatch);
+    }
+    Ok(VerifiedSchedulerDependencyV1 {
+        dependency_id,
+        graph_accepted_event_id,
+        handoff_event_id: handoff_record.id,
+        producer_dispatch_event_id: parent.id,
+        actor_id: *actor_id,
+        execution_id: *execution_id,
+        attempt_id: *attempt_id,
+        dispatch_attestation: attestation.as_ref().clone(),
+    })
+}
+
+fn verify_dispatch_causal_parent(
+    records: &[SchedulerRecord],
+    dispatch_record: &SchedulerRecord,
+    dispatch: &AgentDispatch,
+) -> Result<(), SchedulerDispatchVerificationError> {
+    verify_full_dispatch_ancestry(
+        records,
+        dispatch_record,
+        dispatch.graph_accepted_event_id,
+        &dispatch.graph_sha256,
+    )
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the iterative walk keeps every retry and dependency edge auditable without recursion"
+)]
+fn verify_full_dispatch_ancestry(
+    records: &[SchedulerRecord],
+    dispatch_record: &SchedulerRecord,
+    graph_accepted_event_id: SchedulerEventId,
+    graph_sha256: &str,
+) -> Result<(), SchedulerDispatchVerificationError> {
+    let mut index = BTreeMap::new();
+    for (position, record) in records.iter().enumerate() {
+        if index.insert(record.id, (position, record)).is_some() {
+            return Err(SchedulerDispatchVerificationError::DispatchCausalParentMismatch);
+        }
+    }
+    verify_graph_root_record(records, graph_accepted_event_id, graph_sha256)?;
+
+    let mut pending = vec![dispatch_record.id];
+    let mut verified = BTreeSet::new();
+    while let Some(dispatch_event_id) = pending.pop() {
+        if !verified.insert(dispatch_event_id) {
+            continue;
+        }
+        let Some((dispatch_position, current)) = index.get(&dispatch_event_id).copied() else {
+            return Err(SchedulerDispatchVerificationError::DispatchCausalParentMismatch);
+        };
+        let SchedulerEvent::AttemptDispatched {
+            work_order_id,
+            actor_id,
+            execution_id,
+            parent_attempt_id,
+            graph_accepted_event_id: retained_root,
+            attestation,
+            dependency_handoff_event_ids,
+            ..
+        } = &current.event
+        else {
+            return Err(SchedulerDispatchVerificationError::DispatchCausalParentMismatch);
+        };
+        if *retained_root != graph_accepted_event_id || attestation.graph_sha256 != graph_sha256 {
+            return Err(SchedulerDispatchVerificationError::DispatchGraphRootMismatch);
+        }
+
+        if let Some(parent_attempt_id) = parent_attempt_id {
+            let Some(failed_event_id) = current.causal_parent else {
+                return Err(SchedulerDispatchVerificationError::DispatchCausalParentMismatch);
+            };
+            let failed = preceding_record(&index, failed_event_id, dispatch_position)?;
+            let SchedulerEvent::AttemptFailed {
+                work_order_id: failed_work_order_id,
+                execution_id: failed_execution_id,
+                attempt_id: failed_attempt_id,
+                will_retry,
+                ..
+            } = &failed.event
+            else {
+                return Err(SchedulerDispatchVerificationError::DispatchCausalParentMismatch);
+            };
+            if failed_work_order_id != work_order_id
+                || failed_execution_id != execution_id
+                || failed_attempt_id != parent_attempt_id
+                || !will_retry
+            {
+                return Err(SchedulerDispatchVerificationError::DispatchCausalParentMismatch);
+            }
+            let Some(parent_dispatch_event_id) = failed.causal_parent else {
+                return Err(SchedulerDispatchVerificationError::DispatchCausalParentMismatch);
+            };
+            let failed_position = index[&failed.id].0;
+            let parent_dispatch =
+                preceding_record(&index, parent_dispatch_event_id, failed_position)?;
+            let SchedulerEvent::AttemptDispatched {
+                work_order_id: parent_work_order_id,
+                actor_id: parent_actor_id,
+                execution_id: parent_execution_id,
+                attempt_id: retained_parent_attempt_id,
+                graph_accepted_event_id: parent_root,
+                attestation: parent_attestation,
+                dependency_handoff_event_ids: parent_dependencies,
+                ..
+            } = &parent_dispatch.event
+            else {
+                return Err(SchedulerDispatchVerificationError::DispatchCausalParentMismatch);
+            };
+            if parent_work_order_id != work_order_id
+                || parent_actor_id != actor_id
+                || parent_execution_id != execution_id
+                || retained_parent_attempt_id != parent_attempt_id
+                || *parent_root != graph_accepted_event_id
+                || parent_attestation != attestation
+                || parent_dependencies != dependency_handoff_event_ids
+            {
+                return Err(SchedulerDispatchVerificationError::DispatchCausalParentMismatch);
+            }
+            pending.push(parent_dispatch.id);
+            continue;
+        }
+
+        let Some(first_dependency_event_id) = dependency_handoff_event_ids.values().next().copied()
+        else {
+            if current.causal_parent != Some(graph_accepted_event_id) {
+                return Err(SchedulerDispatchVerificationError::RootRecordMismatch);
+            }
+            let root_position = index
+                .get(&graph_accepted_event_id)
+                .map(|(position, _)| *position)
+                .ok_or(SchedulerDispatchVerificationError::RootRecordNotFound)?;
+            if root_position >= dispatch_position {
+                return Err(SchedulerDispatchVerificationError::RootRecordMismatch);
+            }
+            continue;
+        };
+        if current.causal_parent != Some(first_dependency_event_id) {
+            return Err(SchedulerDispatchVerificationError::DispatchCausalParentMismatch);
+        }
+
+        let mut unique_dependency_events = BTreeSet::new();
+        for (dependency_id, handoff_event_id) in dependency_handoff_event_ids {
+            if !unique_dependency_events.insert(*handoff_event_id) {
+                return Err(SchedulerDispatchVerificationError::DispatchCausalParentMismatch);
+            }
+            let handoff_record = preceding_record(&index, *handoff_event_id, dispatch_position)?;
+            let SchedulerEvent::HandoffRetained { handoff } = &handoff_record.event else {
+                return Err(
+                    SchedulerDispatchVerificationError::DependencyRecordTypeMismatch {
+                        dependency_id: *dependency_id,
+                    },
+                );
+            };
+            if handoff.retained_event_id != *handoff_event_id
+                || handoff.work_order_id != *dependency_id
+            {
+                return Err(
+                    SchedulerDispatchVerificationError::DependencyRetainedHandoffMismatch {
+                        dependency_id: *dependency_id,
+                    },
+                );
+            }
+            if handoff.outcome != HandoffOutcome::Completed {
+                return Err(
+                    SchedulerDispatchVerificationError::DependencyHandoffIncomplete {
+                        dependency_id: *dependency_id,
+                        outcome: handoff.outcome,
+                    },
+                );
+            }
+            let Some(producer_dispatch_event_id) = handoff_record.causal_parent else {
+                return Err(
+                    SchedulerDispatchVerificationError::DependencyProducerDispatchMissing {
+                        dependency_id: *dependency_id,
+                    },
+                );
+            };
+            let handoff_position = index[&handoff_record.id].0;
+            let producer_dispatch =
+                preceding_record(&index, producer_dispatch_event_id, handoff_position)?;
+            let SchedulerEvent::AttemptDispatched {
+                work_order_id: producer_work_order_id,
+                actor_id: producer_actor_id,
+                execution_id: producer_execution_id,
+                attempt_id: producer_attempt_id,
+                graph_accepted_event_id: producer_root,
+                attestation: producer_attestation,
+                ..
+            } = &producer_dispatch.event
+            else {
+                return Err(
+                    SchedulerDispatchVerificationError::DependencyProducerRecordTypeMismatch {
+                        dependency_id: *dependency_id,
+                    },
+                );
+            };
+            if *producer_work_order_id != handoff.work_order_id
+                || *producer_actor_id != handoff.actor_id
+                || *producer_execution_id != handoff.execution_id
+                || *producer_attempt_id != handoff.attempt_id
+                || *producer_root != graph_accepted_event_id
+                || producer_attestation.graph_sha256 != graph_sha256
+            {
+                return Err(
+                    SchedulerDispatchVerificationError::DependencyProducerIdentityMismatch {
+                        dependency_id: *dependency_id,
+                    },
+                );
+            }
+            pending.push(producer_dispatch.id);
+        }
+    }
+    Ok(())
+}
+
+fn preceding_record<'a>(
+    index: &BTreeMap<SchedulerEventId, (usize, &'a SchedulerRecord)>,
+    event_id: SchedulerEventId,
+    child_position: usize,
+) -> Result<&'a SchedulerRecord, SchedulerDispatchVerificationError> {
+    let Some((position, record)) = index.get(&event_id).copied() else {
+        return Err(SchedulerDispatchVerificationError::DispatchCausalParentMismatch);
+    };
+    if position >= child_position {
+        return Err(SchedulerDispatchVerificationError::DispatchCausalParentMismatch);
+    }
+    Ok(record)
+}
+
+fn verify_graph_root_record(
+    records: &[SchedulerRecord],
+    graph_accepted_event_id: SchedulerEventId,
+    graph_sha256: &str,
+) -> Result<(), SchedulerDispatchVerificationError> {
+    let mut matches = records
+        .iter()
+        .filter(|record| record.id == graph_accepted_event_id);
+    let Some(parent) = matches.next() else {
+        return Err(SchedulerDispatchVerificationError::RootRecordNotFound);
+    };
+    if matches.next().is_some() {
+        return Err(SchedulerDispatchVerificationError::RootRecordAmbiguous);
+    }
+    if parent.causal_parent.is_some()
+        || !matches!(
+            &parent.event,
+            SchedulerEvent::GraphAccepted {
+                graph_sha256: retained_graph_sha256,
+                ..
+            } if retained_graph_sha256 == graph_sha256
+        )
+    {
+        return Err(SchedulerDispatchVerificationError::RootRecordMismatch);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Error)]
@@ -938,7 +1629,7 @@ where
             SchedulerEvent::GraphAccepted {
                 graph_sha256: graph.digest_sha256.clone(),
                 policy_version: graph.policy.policy_version.clone(),
-                root_snapshot_sha256: graph.policy.root_snapshot_sha256.clone(),
+                plan_input_snapshot_sha256: graph.policy.plan_input_snapshot_sha256.clone(),
             },
         )?;
         let orders = graph
@@ -1220,6 +1911,7 @@ where
                 execution_id,
                 attempt_id,
                 parent_attempt_id,
+                graph_accepted_event_id: root_event,
                 attestation: Box::new(attestation.clone()),
                 dependency_handoff_event_ids: dependency_handoff_event_ids.clone(),
             },
@@ -1229,6 +1921,7 @@ where
             execution_id,
             attempt_id,
             parent_attempt_id,
+            graph_accepted_event_id: root_event,
             graph_sha256: graph_sha256.clone(),
             attestation: attestation.clone(),
             work_order: Arc::clone(&work_order),
@@ -1712,8 +2405,8 @@ fn graph_violations(graph: &ActorGraph, policy: &ActorGraphPolicy) -> Vec<ActorG
         });
     }
     for (lease_id, lease) in &policy.workspace_leases {
-        if !valid_sha256(&lease.base_snapshot_sha256)
-            || lease.base_snapshot_sha256 != policy.root_snapshot_sha256
+        if !valid_sha256(lease.source.digest_sha256())
+            || (lease.access == WorkspaceAccess::Write && !lease.source.supports_write())
         {
             violations.push(ActorGraphViolation::InvalidWorkspaceLeasePolicy {
                 lease_id: lease_id.clone(),
@@ -1727,13 +2420,13 @@ fn graph_violations(graph: &ActorGraph, policy: &ActorGraphPolicy) -> Vec<ActorG
             });
         }
     }
-    if !valid_sha256(&policy.root_snapshot_sha256) {
+    if !valid_sha256(&policy.plan_input_snapshot_sha256) {
         violations.push(ActorGraphViolation::InvalidPolicySnapshotDigest);
     }
-    if !valid_sha256(&graph.root_snapshot_sha256) {
+    if !valid_sha256(&graph.plan_input_snapshot_sha256) {
         violations.push(ActorGraphViolation::InvalidSnapshotDigest);
     }
-    if graph.root_snapshot_sha256 != policy.root_snapshot_sha256 {
+    if graph.plan_input_snapshot_sha256 != policy.plan_input_snapshot_sha256 {
         violations.push(ActorGraphViolation::RootSnapshotMismatch);
     }
     if graph.work_orders.is_empty() {
@@ -1886,8 +2579,9 @@ fn graph_violations(graph: &ActorGraph, policy: &ActorGraphPolicy) -> Vec<ActorG
                 work_order_id: order.id,
             });
         }
-        if order.workspace.base_snapshot_sha256 != policy.root_snapshot_sha256 {
-            violations.push(ActorGraphViolation::SnapshotMismatch {
+        let workspace_source_is_valid = valid_sha256(order.workspace.source.digest_sha256());
+        if !workspace_source_is_valid {
+            violations.push(ActorGraphViolation::InvalidWorkspaceSourceDigest {
                 work_order_id: order.id,
             });
         }
@@ -1897,7 +2591,7 @@ fn graph_violations(graph: &ActorGraph, policy: &ActorGraphPolicy) -> Vec<ActorG
                 lease_id: order.workspace.lease_id.clone(),
             }),
             Some(lease)
-                if lease.base_snapshot_sha256 != order.workspace.base_snapshot_sha256
+                if lease.source != order.workspace.source
                     || !lease.access.permits(order.workspace.access) =>
             {
                 violations.push(ActorGraphViolation::WorkspaceLeaseMismatch {
@@ -1912,9 +2606,15 @@ fn graph_violations(graph: &ActorGraph, policy: &ActorGraphPolicy) -> Vec<ActorG
             .or_insert((0, false));
         lease_use.0 += 1;
         lease_use.1 |= order.workspace.access == WorkspaceAccess::Write;
-        if order.workspace.access == WorkspaceAccess::Write {
-            violations.push(ActorGraphViolation::WriteWorkspaceExecutionUnsupported {
+        if workspace_source_is_valid
+            && order.workspace.access == WorkspaceAccess::Write
+            && (!order.workspace.source.supports_write() || order.budget.max_attempts != 1)
+        {
+            violations.push(ActorGraphViolation::WorkspaceExecutionProfileUnsupported {
                 work_order_id: order.id,
+                source: order.workspace.source.clone(),
+                access: order.workspace.access,
+                max_attempts: order.budget.max_attempts,
             });
         }
         if !order.reviews.is_empty() && order.workspace.access == WorkspaceAccess::Write {
@@ -1991,17 +2691,37 @@ fn graph_violations(graph: &ActorGraph, policy: &ActorGraphPolicy) -> Vec<ActorG
         });
     }
 
+    let reviewed_targets = graph
+        .work_orders
+        .iter()
+        .flat_map(|order| order.reviews.iter().copied())
+        .collect::<BTreeSet<_>>();
     for order in &graph.work_orders {
         for dependency in &order.dependencies {
             if *dependency == order.id {
                 violations.push(ActorGraphViolation::SelfDependency {
                     work_order_id: order.id,
                 });
-            } else if !orders.contains_key(dependency) {
-                violations.push(ActorGraphViolation::UnknownDependency {
-                    work_order_id: order.id,
-                    dependency_id: *dependency,
-                });
+            } else {
+                match orders.get(dependency) {
+                    None => violations.push(ActorGraphViolation::UnknownDependency {
+                        work_order_id: order.id,
+                        dependency_id: *dependency,
+                    }),
+                    Some(review_order) if !review_order.reviews.is_empty() => {
+                        violations.push(ActorGraphViolation::UngatedReviewDependency {
+                            downstream_id: order.id,
+                            reviewer_id: *dependency,
+                        });
+                    }
+                    Some(_) => {}
+                }
+                if reviewed_targets.contains(dependency) && !order.reviews.contains(dependency) {
+                    violations.push(ActorGraphViolation::UngatedReviewedTargetDependency {
+                        downstream_id: order.id,
+                        target_id: *dependency,
+                    });
+                }
             }
         }
         for target in &order.reviews {
@@ -2060,7 +2780,7 @@ fn graph_violations(graph: &ActorGraph, policy: &ActorGraphPolicy) -> Vec<ActorG
                     });
                 }
             }
-            if candidate.workspace.base_snapshot_sha256 != first.workspace.base_snapshot_sha256 {
+            if candidate.workspace.source != first.workspace.source {
                 violations.push(ActorGraphViolation::CandidateSnapshotMismatch {
                     candidate_group_id: group.clone(),
                 });

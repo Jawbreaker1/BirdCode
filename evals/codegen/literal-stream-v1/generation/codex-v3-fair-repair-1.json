@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "fixture_id": "literal-stream-v1",
+  "generator": "clean-room-codex-subagent",
+  "requested_profile": {
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "ultra"
+  },
+  "effective_profile_attested": false,
+  "context_policy": "fork_none; the exact task, complete previous candidate, and complete evaluator-v3 mechanical report were copied into dispatch; no repository reads, hidden tests, tools, browsing, execution, or delegation were authorized",
+  "repair_budget": {
+    "repair_ordinal": 1,
+    "max_repairs": 1,
+    "diagnostic_report": "evals/codegen/literal-stream-v1/reports/blind-c-v3-formal-attempt-1.json"
+  },
+  "candidate_path": "evals/codegen/literal-stream-v1/candidates/codex-v3-fair-repair-1.json",
+  "candidate_payload_preserved_without_code_edits": true,
+  "byte_identity_attested": false
+}

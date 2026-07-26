@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 birdcode-backends = { path = "../backends" }
+birdcode-orchestrator = { path = "../orchestrator" }
 birdcode-prompting = { path = "../prompting" }
 birdcode-protocol = { path = "../protocol" }
 chrono = "0.4.42"
@@ -23,4 +24,5 @@ tempfile = "3.23.0"
 thiserror = "2.0.17"
 
 [dev-dependencies]
+birdcode-tooling = { path = "../tooling" }
 uuid = { version = "1.18.1", features = ["v7"] }

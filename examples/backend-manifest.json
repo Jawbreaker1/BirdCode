@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "default_route": {
+    "backend_id": "lmstudio",
+    "deployment_id": "REPLACE_WITH_TRUSTED_PRODUCER_DEPLOYMENT_ID"
+  },
+  "backends": [
+    {
+      "adapter": "lmstudio",
+      "deployment_id": "REPLACE_WITH_TRUSTED_PRODUCER_DEPLOYMENT_ID",
+      "base_url": "http://127.0.0.1:1234/"
+    },
+    {
+      "adapter": "lmstudio",
+      "deployment_id": "REPLACE_WITH_TRUSTED_CRITIC_DEPLOYMENT_ID",
+      "base_url": "http://127.0.0.1:1235/"
+    }
+  ]
+}

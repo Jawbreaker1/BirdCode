@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "fixture_id": "literal-stream-v1",
+  "generator": "current-root-assistant-direct-authoring",
+  "effective_profile_attested": false,
+  "comparison_role": "non-blind development control",
+  "disclosure": "The root assistant authored the fixture and therefore had seen the acceptance tests. This control validates the evaluator and repair mechanics; it is not a fair provider-superiority candidate.",
+  "attempt_1": {
+    "candidate_path": "evals/codegen/literal-stream-v1/candidates/manual-root.json",
+    "formal_report_path": "evals/codegen/literal-stream-v1/reports/blind-a-formal-attempt-1.json",
+    "outcome": "tests_passed_but_strict_clippy_rejected_similar_names"
+  },
+  "repair_1": {
+    "candidate_path": "evals/codegen/literal-stream-v1/candidates/manual-root-repair-1.json",
+    "formal_report_path": "evals/codegen/literal-stream-v1/reports/blind-a-formal-repair-1.json",
+    "repair_basis": "the exact retained Clippy diagnostic",
+    "outcome": "passed"
+  }
+}

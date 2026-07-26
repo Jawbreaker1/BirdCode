@@ -48,6 +48,7 @@ pub struct Options {
     pub command: Command,
     pub daemon: Option<PathBuf>,
     pub data_dir: Option<PathBuf>,
+    pub backend_config: Option<PathBuf>,
     pub model_policy: Option<PathBuf>,
 }
 
@@ -67,6 +68,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, ArgsEr
     let mut command = parse_command(args.next())?;
     let mut daemon = None;
     let mut data_dir = None;
+    let mut backend_config = None;
     let mut model_policy = None;
     let mut model_seen = false;
     let mut goal_seen = false;
@@ -91,6 +93,13 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, ArgsEr
                     &mut model_policy,
                     PathBuf::from(required_value(&mut args, "--model-policy")?),
                     "--model-policy",
+                )?;
+            }
+            Some("--backend-config") => {
+                set_once(
+                    &mut backend_config,
+                    PathBuf::from(required_value(&mut args, "--backend-config")?),
+                    "--backend-config",
                 )?;
             }
             Some("--model") => set_plan_string(
@@ -146,11 +155,18 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, ArgsEr
                 .to_owned(),
         ));
     }
+    if matches!(command, Command::Plan(_)) && backend_config.is_none() {
+        return Err(ArgsError(
+            "plan requires an explicit --backend-config PATH with exact producer and critic routes"
+                .to_owned(),
+        ));
+    }
 
     Ok(Options {
         command,
         daemon,
         data_dir,
+        backend_config,
         model_policy,
     })
 }
@@ -314,6 +330,7 @@ mod tests {
                 command: Command::SessionSmoke,
                 daemon: Some(PathBuf::from("/opt/birdcode-daemon")),
                 data_dir: Some(PathBuf::from("/tmp/birdcode-state")),
+                backend_config: None,
                 model_policy: None,
             }
         );
@@ -348,6 +365,8 @@ mod tests {
                 "/tmp/bird-state",
                 "--model-policy",
                 "/tmp/BirdCode policy.json",
+                "--backend-config",
+                "/tmp/BirdCode backends.json",
             ]
             .map(OsString::from),
         )
@@ -366,6 +385,7 @@ mod tests {
                 }),
                 daemon: None,
                 data_dir: Some(PathBuf::from("/tmp/bird-state")),
+                backend_config: Some(PathBuf::from("/tmp/BirdCode backends.json")),
                 model_policy: Some(PathBuf::from("/tmp/BirdCode policy.json")),
             }
         );
@@ -403,6 +423,24 @@ mod tests {
         assert_eq!(
             missing_policy.to_string(),
             "plan requires an explicit --model-policy PATH for policy-separated semantic review"
+        );
+
+        let missing_backends = parse(
+            [
+                "plan",
+                "--model",
+                "m",
+                "--goal",
+                "goal",
+                "--model-policy",
+                "/tmp/policy.json",
+            ]
+            .map(OsString::from),
+        )
+        .expect_err("exact producer and critic routes must be explicit");
+        assert_eq!(
+            missing_backends.to_string(),
+            "plan requires an explicit --backend-config PATH with exact producer and critic routes"
         );
     }
 

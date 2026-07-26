@@ -4,9 +4,11 @@ use birdcode_orchestrator::{
     AgentCleanupFuture, AgentCompletion, AgentDispatch, AgentFailure, AgentFailureKind,
     AgentFailureViolation, AgentFuture, AgentWorker, CandidateGroupId, CapabilityId,
     CleanupReceipt, HandoffOutcome, InMemorySchedulerJournal, ModelLineage, ModelProfileId,
-    PermissionGrant, RoleId, SchedulerEvent, SchedulerJournal, SchedulerJournalError,
-    SchedulerRecord, TimedOutAttempt, Usage, ValidatedActorGraph, WorkOrder, WorkOrderFailure,
-    WorkOrderId, WorkspaceAccess, WorkspaceGrant, WorkspaceLeaseId, WorkspaceLeasePolicy,
+    PermissionGrant, RoleId, SchedulerDispatchVerificationError, SchedulerDispatchVerifier,
+    SchedulerEvent, SchedulerEventId, SchedulerJournal, SchedulerJournalError, SchedulerRecord,
+    TimedOutAttempt, Usage, ValidatedActorGraph, WorkOrder, WorkOrderFailure, WorkOrderId,
+    WorkspaceAccess, WorkspaceGrant, WorkspaceLeaseId, WorkspaceLeasePolicy,
+    WorkspaceSourceBinding,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -14,7 +16,23 @@ use std::sync::{Arc, Barrier as ThreadBarrier, Mutex};
 use std::time::Duration;
 use tokio::sync::Barrier;
 
-const SNAPSHOT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const PLAN_INPUT_SNAPSHOT: &str =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const BROKERED_REPOSITORY_SNAPSHOT: &str =
+    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const GIT_BASELINE: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
+fn brokered_source() -> WorkspaceSourceBinding {
+    WorkspaceSourceBinding::BrokeredRepositorySnapshotV1 {
+        snapshot_sha256: BROKERED_REPOSITORY_SNAPSHOT.to_owned(),
+    }
+}
+
+fn git_source() -> WorkspaceSourceBinding {
+    WorkspaceSourceBinding::GitCleanCommittedHeadV1 {
+        git_baseline_sha256: GIT_BASELINE.to_owned(),
+    }
+}
 
 fn capability(value: &str) -> CapabilityId {
     CapabilityId::new(value).expect("valid capability")
@@ -54,7 +72,7 @@ fn order(id: WorkOrderId, lease: &str, lineage: &str) -> WorkOrder {
         permissions: permissions(&["repo:read"]),
         workspace: WorkspaceGrant {
             lease_id: WorkspaceLeaseId::new(lease).expect("valid lease"),
-            base_snapshot_sha256: SNAPSHOT.to_owned(),
+            source: brokered_source(),
             access: WorkspaceAccess::ReadOnly,
         },
         budget: AgentBudget {
@@ -78,7 +96,7 @@ fn graph_and_policy(
             (
                 order.workspace.lease_id.clone(),
                 WorkspaceLeasePolicy {
-                    base_snapshot_sha256: order.workspace.base_snapshot_sha256.clone(),
+                    source: order.workspace.source.clone(),
                     access: order.workspace.access,
                 },
             )
@@ -94,13 +112,13 @@ fn graph_and_policy(
         })
         .collect();
     let graph = ActorGraph {
-        schema_version: 1,
-        root_snapshot_sha256: SNAPSHOT.to_owned(),
+        schema_version: 2,
+        plan_input_snapshot_sha256: PLAN_INPUT_SNAPSHOT.to_owned(),
         work_orders,
     };
     let policy = ActorGraphPolicy {
         policy_version: "test-policy/1".to_owned(),
-        root_snapshot_sha256: SNAPSHOT.to_owned(),
+        plan_input_snapshot_sha256: PLAN_INPUT_SNAPSHOT.to_owned(),
         root_permissions: permissions(&["repo:read", "repo:write"]),
         limits: ActorGraphLimits {
             max_work_orders: 32,
@@ -137,6 +155,217 @@ fn completion(summary: impl Into<String>) -> AgentCompletion {
             tool_calls: 1,
         },
     }
+}
+
+#[test]
+fn schema_v2_keeps_plan_input_and_brokered_execution_snapshots_distinct() {
+    let id = WorkOrderId::new();
+    let proposed = order(id, "lease/distinct-digests", "producer");
+    assert_eq!(
+        proposed.workspace.source.digest_sha256(),
+        BROKERED_REPOSITORY_SNAPSHOT
+    );
+    assert_ne!(
+        proposed.workspace.source.digest_sha256(),
+        PLAN_INPUT_SNAPSHOT
+    );
+
+    validate_graph(vec![proposed], 1)
+        .expect("the plan input is not the execution workspace source");
+}
+
+#[test]
+fn schema_v1_is_rejected_after_the_source_binding_split() {
+    let id = WorkOrderId::new();
+    let (mut graph, policy) = graph_and_policy(vec![order(id, "lease/schema-v1", "producer")], 1);
+    graph.schema_version = 1;
+
+    let ActorGraphValidationError::Violations { violations } = graph
+        .validate_against(&policy)
+        .expect_err("v1 cannot express the split source-binding contract")
+    else {
+        panic!("expected a version violation")
+    };
+    assert!(violations.contains(&ActorGraphViolation::UnsupportedSchemaVersion { actual: 1 }));
+}
+
+#[test]
+fn v1_json_fields_are_not_aliased_or_defaulted_into_schema_v2() {
+    let legacy_graph = serde_json::json!({
+        "schema_version": 1,
+        "root_snapshot_sha256": PLAN_INPUT_SNAPSHOT,
+        "work_orders": [],
+    });
+    assert!(serde_json::from_value::<ActorGraph>(legacy_graph).is_err());
+
+    let id = WorkOrderId::new();
+    let (_, policy) = graph_and_policy(vec![order(id, "lease/legacy-policy", "producer")], 1);
+    let mut legacy_policy = serde_json::to_value(policy).expect("policy must serialize");
+    let legacy_policy_object = legacy_policy
+        .as_object_mut()
+        .expect("policy wire value must be an object");
+    legacy_policy_object.remove("plan_input_snapshot_sha256");
+    legacy_policy_object.insert(
+        "root_snapshot_sha256".to_owned(),
+        serde_json::Value::String(PLAN_INPUT_SNAPSHOT.to_owned()),
+    );
+    assert!(serde_json::from_value::<ActorGraphPolicy>(legacy_policy).is_err());
+
+    let legacy_grant = serde_json::json!({
+        "lease_id": "lease/legacy-grant",
+        "base_snapshot_sha256": BROKERED_REPOSITORY_SNAPSHOT,
+        "access": "read_only",
+    });
+    assert!(serde_json::from_value::<WorkspaceGrant>(legacy_grant).is_err());
+
+    let legacy_lease = serde_json::json!({
+        "base_snapshot_sha256": BROKERED_REPOSITORY_SNAPSHOT,
+        "access": "read_only",
+    });
+    assert!(serde_json::from_value::<WorkspaceLeasePolicy>(legacy_lease).is_err());
+}
+
+#[test]
+fn every_workspace_source_digest_is_validated_and_grants_match_leases_exactly() {
+    let invalid_policy_id = WorkOrderId::new();
+    let (graph, mut policy) = graph_and_policy(
+        vec![order(
+            invalid_policy_id,
+            "lease/invalid-policy-source",
+            "producer",
+        )],
+        1,
+    );
+    let invalid_policy_lease = graph.work_orders[0].workspace.lease_id.clone();
+    policy
+        .workspace_leases
+        .get_mut(&invalid_policy_lease)
+        .unwrap()
+        .source = WorkspaceSourceBinding::GitCleanCommittedHeadV1 {
+        git_baseline_sha256: "invalid".to_owned(),
+    };
+    let ActorGraphValidationError::Violations { violations } = graph
+        .validate_against(&policy)
+        .expect_err("an invalid policy source digest must fail closed")
+    else {
+        panic!("expected invalid policy source")
+    };
+    assert!(
+        violations.contains(&ActorGraphViolation::InvalidWorkspaceLeasePolicy {
+            lease_id: invalid_policy_lease,
+        })
+    );
+
+    let invalid_grant_id = WorkOrderId::new();
+    let (mut graph, policy) = graph_and_policy(
+        vec![order(
+            invalid_grant_id,
+            "lease/invalid-grant-source",
+            "producer",
+        )],
+        1,
+    );
+    graph.work_orders[0].workspace.source = WorkspaceSourceBinding::BrokeredRepositorySnapshotV1 {
+        snapshot_sha256: "invalid".to_owned(),
+    };
+    let ActorGraphValidationError::Violations { violations } = graph
+        .validate_against(&policy)
+        .expect_err("an invalid grant source digest must fail closed")
+    else {
+        panic!("expected invalid grant source")
+    };
+    assert!(
+        violations.contains(&ActorGraphViolation::InvalidWorkspaceSourceDigest {
+            work_order_id: invalid_grant_id,
+        })
+    );
+
+    let mismatch_id = WorkOrderId::new();
+    let (mut graph, policy) = graph_and_policy(
+        vec![order(mismatch_id, "lease/source-mismatch", "producer")],
+        1,
+    );
+    let mismatch_lease = graph.work_orders[0].workspace.lease_id.clone();
+    graph.work_orders[0].workspace.source = git_source();
+    let ActorGraphValidationError::Violations { violations } = graph
+        .validate_against(&policy)
+        .expect_err("a grant cannot substitute another valid source kind or digest")
+    else {
+        panic!("expected exact source mismatch")
+    };
+    assert!(
+        violations.contains(&ActorGraphViolation::WorkspaceLeaseMismatch {
+            work_order_id: mismatch_id,
+            lease_id: mismatch_lease,
+        })
+    );
+}
+
+#[test]
+fn trusted_policy_cannot_offer_write_access_to_a_brokered_snapshot() {
+    let id = WorkOrderId::new();
+    let (graph, mut policy) =
+        graph_and_policy(vec![order(id, "lease/brokered-policy-write", "reader")], 1);
+    let lease_id = graph.work_orders[0].workspace.lease_id.clone();
+    policy.workspace_leases.get_mut(&lease_id).unwrap().access = WorkspaceAccess::Write;
+
+    let ActorGraphValidationError::Violations { violations } = graph
+        .validate_against(&policy)
+        .expect_err("an impossible trusted write profile must not pass via access downgrade")
+    else {
+        panic!("expected invalid trusted lease profile")
+    };
+    assert!(violations.contains(&ActorGraphViolation::InvalidWorkspaceLeasePolicy { lease_id }));
+}
+
+#[test]
+fn write_execution_requires_git_clean_head_and_exactly_one_attempt() {
+    let accepted_id = WorkOrderId::new();
+    let mut accepted = order(accepted_id, "lease/write-accepted", "writer");
+    accepted.workspace.source = git_source();
+    accepted.workspace.access = WorkspaceAccess::Write;
+    accepted.budget.max_attempts = 1;
+    validate_graph(vec![accepted], 1)
+        .expect("a single-attempt clean committed HEAD write is supported");
+
+    let brokered_id = WorkOrderId::new();
+    let mut brokered = order(brokered_id, "lease/write-brokered", "writer");
+    brokered.workspace.access = WorkspaceAccess::Write;
+    brokered.budget.max_attempts = 1;
+    let brokered_source = brokered.workspace.source.clone();
+    let ActorGraphValidationError::Violations { violations } =
+        validate_graph(vec![brokered], 1).expect_err("brokered snapshots are not write profiles")
+    else {
+        panic!("expected unsupported brokered write profile")
+    };
+    assert!(
+        violations.contains(&ActorGraphViolation::WorkspaceExecutionProfileUnsupported {
+            work_order_id: brokered_id,
+            source: brokered_source,
+            access: WorkspaceAccess::Write,
+            max_attempts: 1,
+        })
+    );
+
+    let retried_id = WorkOrderId::new();
+    let mut retried = order(retried_id, "lease/write-retried", "writer");
+    retried.workspace.source = git_source();
+    retried.workspace.access = WorkspaceAccess::Write;
+    retried.budget.max_attempts = 2;
+    let retried_source = retried.workspace.source.clone();
+    let ActorGraphValidationError::Violations { violations } = validate_graph(vec![retried], 1)
+        .expect_err("write execution cannot be replayed against the same mutable lease")
+    else {
+        panic!("expected unsupported retried write profile")
+    };
+    assert!(
+        violations.contains(&ActorGraphViolation::WorkspaceExecutionProfileUnsupported {
+            work_order_id: retried_id,
+            source: retried_source,
+            access: WorkspaceAccess::Write,
+            max_attempts: 2,
+        })
+    );
 }
 
 struct ParallelWorker {
@@ -224,14 +453,14 @@ async fn independent_children_overlap_and_review_waits_for_both_handoffs() {
     let SchedulerEvent::GraphAccepted {
         graph_sha256,
         policy_version,
-        root_snapshot_sha256,
+        plan_input_snapshot_sha256,
     } = &records[0].event
     else {
         panic!("first event must accept the graph")
     };
     assert_eq!(graph_sha256, run.graph_sha256.as_str());
     assert_eq!(policy_version, "test-policy/1");
-    assert_eq!(root_snapshot_sha256, SNAPSHOT);
+    assert_eq!(plan_input_snapshot_sha256, PLAN_INPUT_SNAPSHOT);
     let review_dispatch = records
         .iter()
         .position(|record| {
@@ -543,17 +772,90 @@ fn reviewer_on_another_deployment_is_rejected_inside_the_same_independence_domai
 }
 
 #[test]
+fn review_work_order_cannot_unlock_a_descendant_without_a_typed_verdict_gate() {
+    let producer_id = WorkOrderId::new();
+    let reviewer_id = WorkOrderId::new();
+    let downstream_id = WorkOrderId::new();
+    let producer = order(producer_id, "lease/gated-producer", "gated-producer");
+    let mut reviewer = order(
+        reviewer_id,
+        "lease/gated-reviewer",
+        "independent-gated-reviewer",
+    );
+    reviewer.dependencies.insert(producer_id);
+    reviewer.reviews.insert(producer_id);
+    let mut downstream = order(
+        downstream_id,
+        "lease/ungated-downstream",
+        "ungated-downstream",
+    );
+    downstream.dependencies.insert(reviewer_id);
+
+    let (graph, policy) = graph_and_policy(vec![producer, reviewer, downstream], 1);
+    let ActorGraphValidationError::Violations { violations } = graph
+        .validate_against(&policy)
+        .expect_err("review completion must not be interpreted as approval")
+    else {
+        panic!("expected an ungated review dependency violation")
+    };
+
+    assert!(violations.iter().any(|violation| matches!(
+        violation,
+        ActorGraphViolation::UngatedReviewDependency {
+            downstream_id: actual_downstream,
+            reviewer_id: actual_reviewer,
+        } if *actual_downstream == downstream_id && *actual_reviewer == reviewer_id
+    )));
+}
+
+#[test]
+fn reviewed_producer_cannot_fork_to_an_ungated_consumer() {
+    let producer_id = WorkOrderId::new();
+    let reviewer_id = WorkOrderId::new();
+    let downstream_id = WorkOrderId::new();
+    let producer = order(producer_id, "lease/fork-producer", "fork-producer");
+    let mut reviewer = order(
+        reviewer_id,
+        "lease/fork-reviewer",
+        "independent-fork-reviewer",
+    );
+    reviewer.dependencies.insert(producer_id);
+    reviewer.reviews.insert(producer_id);
+    let mut downstream = order(downstream_id, "lease/fork-downstream", "fork-downstream");
+    downstream.dependencies.insert(producer_id);
+
+    let (graph, policy) = graph_and_policy(vec![producer, reviewer, downstream], 2);
+    let ActorGraphValidationError::Violations { violations } = graph
+        .validate_against(&policy)
+        .expect_err("a reviewed producer cannot bypass the typed verdict gate")
+    else {
+        panic!("expected an ungated reviewed-target dependency violation")
+    };
+
+    assert!(violations.iter().any(|violation| matches!(
+        violation,
+        ActorGraphViolation::UngatedReviewedTargetDependency {
+            downstream_id: actual_downstream,
+            target_id,
+        } if *actual_downstream == downstream_id && *target_id == producer_id
+    )));
+}
+
+#[test]
 fn reader_cannot_share_a_workspace_lease_with_a_writer() {
     let writer_id = WorkOrderId::new();
     let reader_id = WorkOrderId::new();
     let mut writer = order(writer_id, "lease/aliased", "writer");
+    writer.workspace.source = git_source();
     writer.workspace.access = WorkspaceAccess::Write;
-    let reader = order(reader_id, "lease/aliased", "reader");
+    writer.budget.max_attempts = 1;
+    let mut reader = order(reader_id, "lease/aliased", "reader");
+    reader.workspace.source = git_source();
     let (graph, mut policy) = graph_and_policy(vec![reader, writer], 2);
     policy.workspace_leases.insert(
         WorkspaceLeaseId::new("lease/aliased").unwrap(),
         WorkspaceLeasePolicy {
-            base_snapshot_sha256: SNAPSHOT.to_owned(),
+            source: git_source(),
             access: WorkspaceAccess::Write,
         },
     );
@@ -569,9 +871,9 @@ fn reader_cannot_share_a_workspace_lease_with_a_writer() {
         ActorGraphViolation::SharedWriterLease { lease_id }
             if lease_id.as_str() == "lease/aliased"
     )));
-    assert!(violations.iter().any(|violation| matches!(
+    assert!(!violations.iter().any(|violation| matches!(
         violation,
-        ActorGraphViolation::WriteWorkspaceExecutionUnsupported { work_order_id }
+        ActorGraphViolation::WorkspaceExecutionProfileUnsupported { work_order_id, .. }
             if *work_order_id == writer_id
     )));
 }
@@ -717,10 +1019,15 @@ async fn repeated_graph_executions_have_distinct_durable_roots_and_terminals() {
 
 struct RetryWorker {
     calls: AtomicUsize,
+    dispatches: Mutex<Vec<AgentDispatch>>,
 }
 
 impl AgentWorker for RetryWorker {
-    fn execute(&self, _dispatch: AgentDispatch) -> AgentFuture<'_> {
+    fn execute(&self, dispatch: AgentDispatch) -> AgentFuture<'_> {
+        self.dispatches
+            .lock()
+            .expect("retry dispatch lock")
+            .push(dispatch);
         Box::pin(async move {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
             if call == 0 {
@@ -745,6 +1052,7 @@ async fn retry_is_bounded_and_causally_linked_without_message_parsing() {
         .expect("graph should validate");
     let worker = RetryWorker {
         calls: AtomicUsize::new(0),
+        dispatches: Mutex::new(Vec::new()),
     };
     let journal = InMemorySchedulerJournal::default();
 
@@ -770,6 +1078,7 @@ async fn retry_is_bounded_and_causally_linked_without_message_parsing() {
     assert_eq!(dispatches.len(), 2);
     assert_eq!(dispatches[0].2, None);
     assert_eq!(dispatches[1].2, Some(dispatches[0].1));
+    let first_attempt_id = dispatches[0].1;
     let first_failure = records
         .iter()
         .find(|record| {
@@ -783,6 +1092,55 @@ async fn retry_is_bounded_and_causally_linked_without_message_parsing() {
         })
         .expect("retryable failure should be retained");
     assert_eq!(dispatches[1].0.causal_parent, Some(first_failure.id));
+    let captured_dispatches = worker.dispatches.lock().expect("retry dispatch lock");
+    assert_eq!(captured_dispatches.len(), 2);
+    journal
+        .verify_dispatch(&captured_dispatches[0])
+        .expect("initial retry dispatch should verify");
+    journal
+        .verify_dispatch(&captured_dispatches[1])
+        .expect("causally linked retry dispatch should verify");
+
+    let mut substituted_parent_records = records.clone();
+    let SchedulerEvent::AttemptDispatched {
+        dependency_handoff_event_ids,
+        ..
+    } = &mut substituted_parent_records
+        .iter_mut()
+        .find(|record| {
+            matches!(
+                record.event,
+                SchedulerEvent::AttemptDispatched { attempt_id, .. }
+                    if attempt_id == first_attempt_id
+            )
+        })
+        .expect("initial retry dispatch")
+        .event
+    else {
+        unreachable!("matched an attempt dispatch");
+    };
+    dependency_handoff_event_ids.insert(WorkOrderId::new(), SchedulerEventId::new());
+    assert_eq!(
+        replay_journal(&substituted_parent_records).verify_dispatch(&captured_dispatches[1]),
+        Err(SchedulerDispatchVerificationError::DispatchCausalParentMismatch)
+    );
+
+    let mut detached_parent_records = records;
+    detached_parent_records
+        .iter_mut()
+        .find(|record| {
+            matches!(
+                record.event,
+                SchedulerEvent::AttemptDispatched { attempt_id, .. }
+                    if attempt_id == first_attempt_id
+            )
+        })
+        .expect("initial retry dispatch")
+        .causal_parent = Some(SchedulerEventId::new());
+    assert_eq!(
+        replay_journal(&detached_parent_records).verify_dispatch(&captured_dispatches[1]),
+        Err(SchedulerDispatchVerificationError::RootRecordMismatch)
+    );
 }
 
 struct UnreceiptedRetryWorker(AtomicUsize);
@@ -1299,4 +1657,221 @@ async fn journal_must_acknowledge_dispatch_before_worker_is_called() {
             .contains("injected durable dispatch failure")
     );
     assert_eq!(worker.0.load(Ordering::SeqCst), 0);
+}
+
+#[derive(Default)]
+struct DispatchCaptureWorker {
+    dispatches: Mutex<Vec<AgentDispatch>>,
+}
+
+impl AgentWorker for DispatchCaptureWorker {
+    fn execute(&self, dispatch: AgentDispatch) -> AgentFuture<'_> {
+        self.dispatches
+            .lock()
+            .expect("dispatch capture lock")
+            .push(dispatch.clone());
+        Box::pin(async move { Ok(completion(dispatch.work_order.objective.clone())) })
+    }
+}
+
+fn replay_journal(records: &[SchedulerRecord]) -> InMemorySchedulerJournal {
+    let journal = InMemorySchedulerJournal::default();
+    for record in records {
+        journal
+            .retain(record)
+            .expect("fixture record should replay");
+    }
+    journal
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn dispatch_verifier_binds_exact_dispatch_and_dependency_causal_chain() {
+    let producer_id = WorkOrderId::new();
+    let review_id = WorkOrderId::new();
+    let producer = order(producer_id, "lease/verifier-producer", "producer");
+    let mut reviewer = order(review_id, "lease/verifier-review", "independent-reviewer");
+    reviewer.dependencies = BTreeSet::from([producer_id]);
+    reviewer.reviews = BTreeSet::from([producer_id]);
+    let validated =
+        validate_graph(vec![reviewer, producer], 1).expect("review graph should validate");
+    let worker = DispatchCaptureWorker::default();
+    let journal = InMemorySchedulerJournal::default();
+
+    ActorGraphExecutor::new(&worker, &journal)
+        .execute(&validated)
+        .await
+        .expect("first graph execution should complete");
+    ActorGraphExecutor::new(&worker, &journal)
+        .execute(&validated)
+        .await
+        .expect("second graph execution should complete");
+
+    let dispatches = worker
+        .dispatches
+        .lock()
+        .expect("dispatch capture lock")
+        .clone();
+    let producer_dispatches = dispatches
+        .iter()
+        .filter(|dispatch| dispatch.work_order.id == producer_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    let review_dispatches = dispatches
+        .iter()
+        .filter(|dispatch| dispatch.work_order.id == review_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(producer_dispatches.len(), 2);
+    assert_eq!(review_dispatches.len(), 2);
+
+    journal
+        .verify_dispatch(&producer_dispatches[0])
+        .expect("root dispatch should bind to its accepted graph");
+    let verified_review = journal
+        .verify_dispatch(&review_dispatches[0])
+        .expect("review dispatch should bind to its exact dependency chain");
+    let verified_producer = verified_review
+        .dependencies
+        .get(&producer_id)
+        .expect("verified producer dependency");
+    assert_eq!(
+        verified_producer.dispatch_attestation,
+        producer_dispatches[0].attestation
+    );
+    assert_eq!(
+        verified_producer.handoff_event_id,
+        review_dispatches[0].dependency_handoff_event_ids[&producer_id]
+    );
+    journal
+        .verify_dispatch(&review_dispatches[1])
+        .expect("second review dispatch should independently verify");
+
+    let mut wrong_actor = review_dispatches[0].clone();
+    wrong_actor.actor_id = review_dispatches[1].actor_id;
+    assert_eq!(
+        journal.verify_dispatch(&wrong_actor),
+        Err(SchedulerDispatchVerificationError::DispatchActorMismatch)
+    );
+
+    let mut changed_work_order = review_dispatches[0].clone();
+    let mut work_order = changed_work_order.work_order.as_ref().clone();
+    work_order.objective.push_str(" changed after attestation");
+    changed_work_order.work_order = Arc::new(work_order);
+    assert_eq!(
+        journal.verify_dispatch(&changed_work_order),
+        Err(SchedulerDispatchVerificationError::AttestationMismatch)
+    );
+
+    let mut missing_handoff = review_dispatches[0].clone();
+    missing_handoff.dependency_handoffs.clear();
+    assert_eq!(
+        journal.verify_dispatch(&missing_handoff),
+        Err(SchedulerDispatchVerificationError::DependencyHandoffKeySetMismatch)
+    );
+
+    let mut cross_run_substitution = review_dispatches[0].clone();
+    cross_run_substitution.dependency_handoffs = review_dispatches[1].dependency_handoffs.clone();
+    cross_run_substitution.dependency_handoff_event_ids =
+        review_dispatches[1].dependency_handoff_event_ids.clone();
+    assert_eq!(
+        journal.verify_dispatch(&cross_run_substitution),
+        Err(SchedulerDispatchVerificationError::DispatchDependencyEventsMismatch)
+    );
+
+    let mut changed_handoff = review_dispatches[0].clone();
+    let original_handoff = changed_handoff.dependency_handoffs[&producer_id]
+        .as_ref()
+        .clone();
+    let mut substituted_handoff = original_handoff;
+    substituted_handoff
+        .summary
+        .push_str(" changed after retention");
+    changed_handoff
+        .dependency_handoffs
+        .insert(producer_id, Arc::new(substituted_handoff));
+    assert_eq!(
+        journal.verify_dispatch(&changed_handoff),
+        Err(
+            SchedulerDispatchVerificationError::DependencyRetainedHandoffMismatch {
+                dependency_id: producer_id,
+            }
+        )
+    );
+
+    let records = journal.snapshot().expect("journal snapshot");
+    let mut retained_cross_run_records = records.clone();
+    let second_dependency_events = review_dispatches[1].dependency_handoff_event_ids.clone();
+    let second_dependency_parent = second_dependency_events
+        .values()
+        .next()
+        .copied()
+        .expect("second review dependency");
+    let retained_first_review = retained_cross_run_records
+        .iter_mut()
+        .find(|record| {
+            matches!(
+                record.event,
+                SchedulerEvent::AttemptDispatched { attempt_id, .. }
+                    if attempt_id == review_dispatches[0].attempt_id
+            )
+        })
+        .expect("first retained review dispatch");
+    let SchedulerEvent::AttemptDispatched {
+        dependency_handoff_event_ids,
+        ..
+    } = &mut retained_first_review.event
+    else {
+        unreachable!("matched an attempt dispatch");
+    };
+    *dependency_handoff_event_ids = second_dependency_events.clone();
+    retained_first_review.causal_parent = Some(second_dependency_parent);
+    let mut retained_cross_run_dispatch = review_dispatches[0].clone();
+    retained_cross_run_dispatch.dependency_handoffs =
+        review_dispatches[1].dependency_handoffs.clone();
+    retained_cross_run_dispatch.dependency_handoff_event_ids = second_dependency_events;
+    assert_eq!(
+        replay_journal(&retained_cross_run_records).verify_dispatch(&retained_cross_run_dispatch),
+        Err(SchedulerDispatchVerificationError::DispatchCausalParentMismatch)
+    );
+
+    let graph_root_id = records
+        .iter()
+        .find_map(|record| {
+            matches!(record.event, SchedulerEvent::GraphAccepted { .. }).then_some(record.id)
+        })
+        .expect("accepted graph");
+    let dependency_event_id = review_dispatches[0].dependency_handoff_event_ids[&producer_id];
+
+    let mut wrong_producer_parent_records = records.clone();
+    wrong_producer_parent_records
+        .iter_mut()
+        .find(|record| record.id == dependency_event_id)
+        .expect("dependency handoff record")
+        .causal_parent = Some(graph_root_id);
+    assert_eq!(
+        replay_journal(&wrong_producer_parent_records).verify_dispatch(&review_dispatches[0]),
+        Err(
+            SchedulerDispatchVerificationError::DependencyProducerRecordTypeMismatch {
+                dependency_id: producer_id,
+            }
+        )
+    );
+
+    let mut wrong_dispatch_parent_records = records;
+    wrong_dispatch_parent_records
+        .iter_mut()
+        .find(|record| {
+            matches!(
+                record.event,
+                SchedulerEvent::AttemptDispatched { attempt_id, .. }
+                    if attempt_id == review_dispatches[0].attempt_id
+            )
+        })
+        .expect("review dispatch record")
+        .causal_parent = Some(graph_root_id);
+    assert_eq!(
+        replay_journal(&wrong_dispatch_parent_records).verify_dispatch(&review_dispatches[0]),
+        Err(SchedulerDispatchVerificationError::DispatchCausalParentMismatch)
+    );
 }

@@ -424,16 +424,13 @@ where
         if !matches!(
             (request.spec.purpose, request.spec.plan_acceptance),
             (
-                RunPurpose::PlanOnly,
+                RunPurpose::PlanOnly | RunPurpose::ParallelRepositoryReconnaissanceV1,
                 PlanAcceptanceContract::IndependentSemanticReviewV1
             ) | (RunPurpose::Execute, PlanAcceptanceContract::NotApplicable)
         ) {
             return Err(RuntimeError::InvalidRunSpec(
                 "run purpose and plan_acceptance contract are inconsistent",
             ));
-        }
-        if request.spec.purpose != RunPurpose::PlanOnly {
-            return Err(RuntimeError::UnsupportedRunPurpose(request.spec.purpose));
         }
         if self
             .repository
@@ -442,7 +439,13 @@ where
         {
             return Err(RuntimeError::SessionNotFound(request.spec.session_id));
         }
-        validate_plan_only_spec(&request)?;
+        match request.spec.purpose {
+            RunPurpose::PlanOnly => validate_plan_only_spec(&request)?,
+            RunPurpose::ParallelRepositoryReconnaissanceV1 => {
+                validate_parallel_repository_reconnaissance_v1_spec(&request)?;
+            }
+            RunPurpose::Execute => validate_execute_read_only_repository_agent_v1_spec(&request)?,
+        }
         if let Some(existing) = self.repository.get_run(request.run_id)? {
             return if existing.spec == request.spec {
                 Ok(existing)
@@ -747,6 +750,178 @@ fn validate_plan_only_spec(request: &CreateRunRequest) -> Result<(), RuntimeErro
     Ok(())
 }
 
+fn validate_parallel_repository_reconnaissance_v1_spec(
+    request: &CreateRunRequest,
+) -> Result<(), RuntimeError> {
+    if request.spec.plan_acceptance != PlanAcceptanceContract::IndependentSemanticReviewV1 {
+        return Err(RuntimeError::InvalidRunSpec(
+            "parallel repository reconnaissance requires independent semantic review",
+        ));
+    }
+    if request.spec.backend.kind != BackendKind::Model {
+        return Err(RuntimeError::InvalidRunSpec(
+            "parallel repository reconnaissance requires a model backend",
+        ));
+    }
+    let backend_id = request.spec.backend.backend_id.as_str();
+    if backend_id.is_empty() || backend_id.trim() != backend_id {
+        return Err(RuntimeError::InvalidRunSpec(
+            "backend_id must be an exact nonblank identifier",
+        ));
+    }
+    let Some(model) = request.spec.backend.model.as_deref() else {
+        return Err(RuntimeError::InvalidRunSpec(
+            "parallel repository reconnaissance requires an explicit model",
+        ));
+    };
+    if model.is_empty() || model.trim() != model {
+        return Err(RuntimeError::InvalidRunSpec(
+            "model must be an exact nonblank identifier",
+        ));
+    }
+    match request.spec.input.as_slice() {
+        [InputItem::Text { text }] if !text.trim().is_empty() => {}
+        [InputItem::Text { .. }] => {
+            return Err(RuntimeError::InvalidRunSpec(
+                "parallel repository reconnaissance text input must not be blank",
+            ));
+        }
+        [InputItem::Artifact { .. }] => {
+            return Err(RuntimeError::InvalidRunSpec(
+                "artifact input is not implemented for parallel repository reconnaissance",
+            ));
+        }
+        _ => {
+            return Err(RuntimeError::InvalidRunSpec(
+                "parallel repository reconnaissance requires exactly one text input",
+            ));
+        }
+    }
+    if request.spec.limits.max_output_tokens == Some(0) {
+        return Err(RuntimeError::InvalidRunSpec(
+            "max_output_tokens must be greater than zero",
+        ));
+    }
+    if request.spec.limits.max_output_tokens.is_some_and(|limit| {
+        limit > birdcode_protocol::PARALLEL_RECONNAISSANCE_V1_MAX_TOTAL_RESERVED_OUTPUT_TOKENS
+    }) {
+        return Err(RuntimeError::InvalidRunSpec(
+            "max_output_tokens exceeds the parallel reconnaissance v1 aggregate reservation limit",
+        ));
+    }
+    if request.spec.limits.max_output_tokens.is_some_and(|limit| {
+        limit < birdcode_protocol::PARALLEL_RECONNAISSANCE_V1_MIN_TOTAL_RESERVED_OUTPUT_TOKENS
+    }) {
+        return Err(RuntimeError::InvalidRunSpec(
+            "max_output_tokens cannot fund the complete parallel reconnaissance v1 call shape",
+        ));
+    }
+    if request.spec.limits.max_wall_time_seconds == Some(0) {
+        return Err(RuntimeError::InvalidRunSpec(
+            "max_wall_time_seconds must be greater than zero",
+        ));
+    }
+    if request.spec.limits.max_subagents != 2 {
+        return Err(RuntimeError::InvalidRunSpec(
+            "parallel repository reconnaissance v1 requires authority for exactly two subagents",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_execute_read_only_repository_agent_v1_spec(
+    request: &CreateRunRequest,
+) -> Result<(), RuntimeError> {
+    if request.spec.plan_acceptance != PlanAcceptanceContract::NotApplicable {
+        return Err(RuntimeError::InvalidRunSpec(
+            "the read-only Execute v1 profile requires plan_acceptance not_applicable",
+        ));
+    }
+    if request.spec.backend.kind != BackendKind::Model {
+        return Err(RuntimeError::InvalidRunSpec(
+            "the read-only Execute v1 profile requires a model backend",
+        ));
+    }
+    let backend_id = request.spec.backend.backend_id.as_str();
+    if backend_id.is_empty() || backend_id.trim() != backend_id {
+        return Err(RuntimeError::InvalidRunSpec(
+            "backend_id must be an exact nonblank identifier",
+        ));
+    }
+    let Some(model) = request.spec.backend.model.as_deref() else {
+        return Err(RuntimeError::InvalidRunSpec(
+            "the read-only Execute v1 profile requires an explicit model",
+        ));
+    };
+    if model.is_empty() || model.trim() != model {
+        return Err(RuntimeError::InvalidRunSpec(
+            "model must be an exact nonblank identifier",
+        ));
+    }
+    if request
+        .spec
+        .backend
+        .reasoning_effort
+        .as_deref()
+        .is_some_and(|reasoning| !matches!(reasoning, "off" | "on" | "low" | "medium" | "high"))
+    {
+        return Err(RuntimeError::InvalidRunSpec(
+            "the read-only Execute v1 reasoning setting is unsupported",
+        ));
+    }
+    let goal = match request.spec.input.as_slice() {
+        [InputItem::Text { text }] if !text.trim().is_empty() => text,
+        [InputItem::Text { .. }] => {
+            return Err(RuntimeError::InvalidRunSpec(
+                "the read-only Execute v1 goal must not be blank",
+            ));
+        }
+        [InputItem::Artifact { .. }] => {
+            return Err(RuntimeError::InvalidRunSpec(
+                "artifact input is not implemented for the read-only Execute v1 profile",
+            ));
+        }
+        _ => {
+            return Err(RuntimeError::InvalidRunSpec(
+                "the read-only Execute v1 profile requires exactly one text goal",
+            ));
+        }
+    };
+    if goal.len() > birdcode_protocol::CHILD_RECONNAISSANCE_MAX_TEXT_BYTES
+        || goal.chars().count() > birdcode_protocol::CHILD_RECONNAISSANCE_MAX_TEXT_UNICODE_SCALARS
+    {
+        return Err(RuntimeError::InvalidRunSpec(
+            "the read-only Execute v1 goal exceeds the bounded model-visible text contract",
+        ));
+    }
+    if request.spec.limits.max_output_tokens
+        != Some(birdcode_protocol::READ_ONLY_REPOSITORY_AGENT_V1_TOTAL_RESERVED_OUTPUT_TOKENS)
+    {
+        return Err(RuntimeError::InvalidRunSpec(
+            "the read-only Execute v1 profile requires its exact aggregate output reservation",
+        ));
+    }
+    let Some(max_wall_time_seconds) = request.spec.limits.max_wall_time_seconds else {
+        return Err(RuntimeError::InvalidRunSpec(
+            "the read-only Execute v1 profile requires finite wall-time authority",
+        ));
+    };
+    if max_wall_time_seconds == 0
+        || max_wall_time_seconds
+            > birdcode_protocol::READ_ONLY_REPOSITORY_AGENT_V1_MAX_WALL_TIME_SECONDS
+    {
+        return Err(RuntimeError::InvalidRunSpec(
+            "the read-only Execute v1 wall-time authority is outside its closed bound",
+        ));
+    }
+    if request.spec.limits.max_subagents != 0 {
+        return Err(RuntimeError::InvalidRunSpec(
+            "the single-agent read-only Execute v1 profile grants no delegation authority",
+        ));
+    }
+    Ok(())
+}
+
 fn latest_cancellation(
     events: &[EventEnvelope],
 ) -> Option<(&EventEnvelope, &CancellationRequested)> {
@@ -778,9 +953,9 @@ mod tests {
         repository_error, runtime_provenance,
     };
     use birdcode_protocol::{
-        BackendKind, BackendSelection, CancellationDisposition, ClientIdentity, CreateRunRequest,
-        CreateSessionRequest, EventEnvelope, EventPage as ProtocolEventPage, EventPayload,
-        GetArtifactRequest, InitializeRequest, InputItem, NewEvent, PROTOCOL_VERSION,
+        ArtifactRef, BackendKind, BackendSelection, CancellationDisposition, ClientIdentity,
+        CreateRunRequest, CreateSessionRequest, EventEnvelope, EventPage as ProtocolEventPage,
+        EventPayload, GetArtifactRequest, InitializeRequest, InputItem, NewEvent, PROTOCOL_VERSION,
         PlanAcceptanceContract, Run, RunId, RunLimits, RunPurpose, RunSpec, RunState, Session,
         SessionId,
     };
@@ -897,6 +1072,64 @@ mod tests {
         }
     }
 
+    fn reconnaissance_request(session_id: SessionId) -> CreateRunRequest {
+        CreateRunRequest {
+            run_id: RunId::new(),
+            spec: RunSpec {
+                session_id,
+                purpose: RunPurpose::ParallelRepositoryReconnaissanceV1,
+                plan_acceptance: PlanAcceptanceContract::IndependentSemanticReviewV1,
+                backend: BackendSelection {
+                    backend_id: "lmstudio-local".to_owned(),
+                    kind: BackendKind::Model,
+                    model: Some("google/gemma-4-26b-a4b".to_owned()),
+                    reasoning_effort: Some("high".to_owned()),
+                },
+                input: vec![InputItem::Text {
+                    text: "Kartlägg repositoryt med två isolerade specialistagenter 日本語."
+                        .to_owned(),
+                }],
+                limits: RunLimits {
+                    max_output_tokens: Some(
+                        birdcode_protocol::PARALLEL_RECONNAISSANCE_V1_DEFAULT_TOTAL_RESERVED_OUTPUT_TOKENS,
+                    ),
+                    max_wall_time_seconds: Some(600),
+                    max_subagents: 2,
+                },
+            },
+        }
+    }
+
+    fn read_only_execute_request(session_id: SessionId) -> CreateRunRequest {
+        CreateRunRequest {
+            run_id: RunId::new(),
+            spec: RunSpec {
+                session_id,
+                purpose: RunPurpose::Execute,
+                plan_acceptance: PlanAcceptanceContract::NotApplicable,
+                backend: BackendSelection {
+                    backend_id: "lmstudio-local".to_owned(),
+                    kind: BackendKind::Model,
+                    model: Some("google/gemma-4-26b-a4b".to_owned()),
+                    reasoning_effort: Some("off".to_owned()),
+                },
+                input: vec![InputItem::Text {
+                    text: "Läs repositoryt och identifiera den efterfrågade implementationen 日本語."
+                        .to_owned(),
+                }],
+                limits: RunLimits {
+                    max_output_tokens: Some(
+                        birdcode_protocol::READ_ONLY_REPOSITORY_AGENT_V1_TOTAL_RESERVED_OUTPUT_TOKENS,
+                    ),
+                    max_wall_time_seconds: Some(
+                        birdcode_protocol::READ_ONLY_REPOSITORY_AGENT_V1_MAX_WALL_TIME_SECONDS,
+                    ),
+                    max_subagents: 0,
+                },
+            },
+        }
+    }
+
     #[test]
     fn rejects_incompatible_protocol_versions() {
         let runtime = LocalRuntime::new(MemoryRepository::default());
@@ -954,6 +1187,134 @@ mod tests {
                 .capabilities
                 .supports(birdcode_protocol::RuntimeCapability::DurableRootPlanning)
         );
+        assert!(
+            !initialized
+                .capabilities
+                .supports(birdcode_protocol::RuntimeCapability::ParallelRepositoryReconnaissanceV1),
+            "admission alone is not an end-to-end runtime capability"
+        );
+    }
+
+    #[test]
+    fn admits_the_exact_parallel_repository_reconnaissance_v1_contract() {
+        let mut runtime = LocalRuntime::new(MemoryRepository::default());
+        let session = runtime
+            .create_session(CreateSessionRequest {
+                workspace_root: PathBuf::from("/tmp/recon-admission").into(),
+                title: Some("Agentisk repositoryanalys".to_owned()),
+            })
+            .expect("session");
+        let request = reconnaissance_request(session.id);
+        let run = runtime
+            .create_run(request.clone())
+            .expect("typed reconnaissance run is admitted");
+        assert_eq!(run.id, request.run_id);
+        assert_eq!(
+            run.spec.purpose,
+            RunPurpose::ParallelRepositoryReconnaissanceV1
+        );
+        assert_eq!(run.spec.limits.max_subagents, 2);
+        assert_eq!(run.state, RunState::Queued);
+        assert_eq!(
+            runtime
+                .create_run(request)
+                .expect("identical request is idempotent"),
+            run
+        );
+
+        let mut aggregate_ceiling = reconnaissance_request(session.id);
+        aggregate_ceiling.spec.limits.max_output_tokens =
+            Some(birdcode_protocol::PARALLEL_RECONNAISSANCE_V1_MAX_TOTAL_RESERVED_OUTPUT_TOKENS);
+        runtime
+            .create_run(aggregate_ceiling)
+            .expect("the exact aggregate reservation ceiling is admissible");
+    }
+
+    #[test]
+    fn reconnaissance_admission_rejects_authority_input_model_and_budget_drift() {
+        let mut runtime = LocalRuntime::new(MemoryRepository::default());
+        let session = runtime
+            .create_session(CreateSessionRequest {
+                workspace_root: PathBuf::from("/tmp/recon-adversarial-admission").into(),
+                title: None,
+            })
+            .expect("session");
+        let valid = reconnaissance_request(session.id);
+        let mut invalid = Vec::new();
+
+        let mut wrong_acceptance = valid.clone();
+        wrong_acceptance.run_id = RunId::new();
+        wrong_acceptance.spec.plan_acceptance = PlanAcceptanceContract::NotApplicable;
+        invalid.push(wrong_acceptance);
+
+        let mut agent_backend = valid.clone();
+        agent_backend.run_id = RunId::new();
+        agent_backend.spec.backend.kind = BackendKind::Agent;
+        invalid.push(agent_backend);
+
+        let mut missing_model = valid.clone();
+        missing_model.run_id = RunId::new();
+        missing_model.spec.backend.model = None;
+        invalid.push(missing_model);
+
+        let mut padded_model = valid.clone();
+        padded_model.run_id = RunId::new();
+        padded_model.spec.backend.model = Some(" google/gemma-4-26b-a4b".to_owned());
+        invalid.push(padded_model);
+
+        let mut multiple_inputs = valid.clone();
+        multiple_inputs.run_id = RunId::new();
+        multiple_inputs.spec.input.push(InputItem::Text {
+            text: "ett oauktoriserat andra mål".to_owned(),
+        });
+        invalid.push(multiple_inputs);
+
+        let mut blank_input = valid.clone();
+        blank_input.run_id = RunId::new();
+        blank_input.spec.input = vec![InputItem::Text {
+            text: " \n\t".to_owned(),
+        }];
+        invalid.push(blank_input);
+
+        for max_subagents in [0, 1, 3] {
+            let mut wrong_child_authority = valid.clone();
+            wrong_child_authority.run_id = RunId::new();
+            wrong_child_authority.spec.limits.max_subagents = max_subagents;
+            invalid.push(wrong_child_authority);
+        }
+
+        let mut zero_output = valid.clone();
+        zero_output.run_id = RunId::new();
+        zero_output.spec.limits.max_output_tokens = Some(0);
+        invalid.push(zero_output);
+
+        let mut incomplete_call_shape = valid.clone();
+        incomplete_call_shape.run_id = RunId::new();
+        incomplete_call_shape.spec.limits.max_output_tokens = Some(
+            birdcode_protocol::PARALLEL_RECONNAISSANCE_V1_MIN_TOTAL_RESERVED_OUTPUT_TOKENS - 1,
+        );
+        invalid.push(incomplete_call_shape);
+
+        let mut excessive_output = valid.clone();
+        excessive_output.run_id = RunId::new();
+        excessive_output.spec.limits.max_output_tokens = Some(
+            birdcode_protocol::PARALLEL_RECONNAISSANCE_V1_MAX_TOTAL_RESERVED_OUTPUT_TOKENS + 1,
+        );
+        invalid.push(excessive_output);
+
+        let mut zero_wall_time = valid;
+        zero_wall_time.run_id = RunId::new();
+        zero_wall_time.spec.limits.max_wall_time_seconds = Some(0);
+        invalid.push(zero_wall_time);
+
+        for request in invalid {
+            let run_id = request.run_id;
+            assert!(matches!(
+                runtime.create_run(request),
+                Err(RuntimeError::InvalidRunSpec(_))
+            ));
+            assert!(runtime.get_run(run_id).is_err());
+        }
     }
 
     #[test]
@@ -1065,42 +1426,132 @@ mod tests {
     }
 
     #[test]
-    fn rejects_reserved_execute_purpose_before_persisting_a_run() {
+    fn admits_the_exact_single_agent_read_only_execute_v1_contract() {
         let mut runtime = LocalRuntime::new(MemoryRepository::default());
         let session = runtime
             .create_session(CreateSessionRequest {
-                workspace_root: PathBuf::from("/tmp/plan-only-runtime").into(),
+                workspace_root: PathBuf::from("/tmp/read-only-execute-runtime").into(),
                 title: None,
             })
             .expect("session should be created");
-        let run_id = RunId::new();
+        let request = read_only_execute_request(session.id);
+        let run = runtime
+            .create_run(request.clone())
+            .expect("the exact read-only Execute profile is admitted");
 
-        let error = runtime
-            .create_run(CreateRunRequest {
-                run_id,
-                spec: RunSpec {
-                    session_id: session.id,
-                    purpose: RunPurpose::Execute,
-                    plan_acceptance: PlanAcceptanceContract::NotApplicable,
-                    backend: BackendSelection {
-                        backend_id: "lmstudio".to_owned(),
-                        kind: BackendKind::Model,
-                        model: Some("local-model".to_owned()),
-                        reasoning_effort: None,
-                    },
-                    input: vec![InputItem::Text {
-                        text: "Implement this".to_owned(),
-                    }],
-                    limits: plan_limits(),
-                },
+        assert_eq!(run.id, request.run_id);
+        assert_eq!(run.spec, request.spec);
+        assert_eq!(run.state, RunState::Queued);
+        assert_eq!(
+            runtime
+                .create_run(request)
+                .expect("identical Execute submission is idempotent"),
+            run
+        );
+
+        let mut minimum_wall_time = read_only_execute_request(session.id);
+        minimum_wall_time.spec.limits.max_wall_time_seconds = Some(1);
+        runtime
+            .create_run(minimum_wall_time)
+            .expect("the positive wall-time lower boundary is admitted");
+    }
+
+    #[test]
+    fn read_only_execute_v1_admission_rejects_authority_model_input_and_budget_drift() {
+        let mut runtime = LocalRuntime::new(MemoryRepository::default());
+        let session = runtime
+            .create_session(CreateSessionRequest {
+                workspace_root: PathBuf::from("/tmp/read-only-execute-adversarial").into(),
+                title: None,
             })
-            .expect_err("execute is reserved but not implemented");
+            .expect("session should be created");
+        let valid = read_only_execute_request(session.id);
+        let mut invalid = Vec::new();
 
-        assert!(matches!(
-            error,
-            RuntimeError::UnsupportedRunPurpose(RunPurpose::Execute)
-        ));
-        assert!(runtime.get_run(run_id).is_err());
+        let mut agent_backend = valid.clone();
+        agent_backend.spec.backend.kind = BackendKind::Agent;
+        invalid.push(agent_backend);
+
+        let mut padded_backend = valid.clone();
+        padded_backend.spec.backend.backend_id = " lmstudio-local".to_owned();
+        invalid.push(padded_backend);
+
+        let mut missing_model = valid.clone();
+        missing_model.spec.backend.model = None;
+        invalid.push(missing_model);
+
+        let mut padded_model = valid.clone();
+        padded_model.spec.backend.model = Some("google/gemma-4-26b-a4b ".to_owned());
+        invalid.push(padded_model);
+
+        for reasoning_effort in [Some("ultra".to_owned()), Some(" off".to_owned())] {
+            let mut invalid_reasoning = valid.clone();
+            invalid_reasoning.spec.backend.reasoning_effort = reasoning_effort;
+            invalid.push(invalid_reasoning);
+        }
+
+        let mut blank_goal = valid.clone();
+        blank_goal.spec.input = vec![InputItem::Text {
+            text: " \n\t".to_owned(),
+        }];
+        invalid.push(blank_goal);
+
+        let mut multiple_goals = valid.clone();
+        multiple_goals.spec.input.push(InputItem::Text {
+            text: "oauktoriserat andra mål".to_owned(),
+        });
+        invalid.push(multiple_goals);
+
+        let mut artifact_goal = valid.clone();
+        artifact_goal.spec.input = vec![InputItem::Artifact {
+            artifact: ArtifactRef {
+                sha256: "a".repeat(64),
+                size_bytes: 1,
+                media_type: "application/octet-stream".to_owned(),
+            },
+        }];
+        invalid.push(artifact_goal);
+
+        let mut oversized_goal = valid.clone();
+        oversized_goal.spec.input = vec![InputItem::Text {
+            text: "x".repeat(birdcode_protocol::CHILD_RECONNAISSANCE_MAX_TEXT_BYTES + 1),
+        }];
+        invalid.push(oversized_goal);
+
+        for output_tokens in [
+            None,
+            Some(0),
+            Some(birdcode_protocol::READ_ONLY_REPOSITORY_AGENT_V1_TOTAL_RESERVED_OUTPUT_TOKENS - 1),
+            Some(birdcode_protocol::READ_ONLY_REPOSITORY_AGENT_V1_TOTAL_RESERVED_OUTPUT_TOKENS + 1),
+        ] {
+            let mut wrong_output = valid.clone();
+            wrong_output.spec.limits.max_output_tokens = output_tokens;
+            invalid.push(wrong_output);
+        }
+
+        for wall_time in [
+            None,
+            Some(0),
+            Some(birdcode_protocol::READ_ONLY_REPOSITORY_AGENT_V1_MAX_WALL_TIME_SECONDS + 1),
+        ] {
+            let mut wrong_wall_time = valid.clone();
+            wrong_wall_time.spec.limits.max_wall_time_seconds = wall_time;
+            invalid.push(wrong_wall_time);
+        }
+
+        let mut delegated = valid;
+        delegated.spec.limits.max_subagents = 1;
+        invalid.push(delegated);
+
+        for mut request in invalid {
+            request.run_id = RunId::new();
+            let run_id = request.run_id;
+            assert!(matches!(
+                runtime.create_run(request),
+                Err(RuntimeError::InvalidRunSpec(_))
+            ));
+            assert!(runtime.get_run(run_id).is_err());
+        }
     }
 
     #[test]
