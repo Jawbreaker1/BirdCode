@@ -29,7 +29,7 @@
     },
     {
       "path": "apps/daemon/src/supervisor.rs",
-      "ceiling_lines": 11456
+      "ceiling_lines": 10970
     },
     {
       "path": "apps/daemon/src/worktree_write_lane.rs",
