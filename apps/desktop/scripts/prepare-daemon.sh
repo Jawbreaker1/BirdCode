@@ -13,11 +13,15 @@ esac
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 desktop_dir=$(dirname "$script_dir")
 repository_root=$(CDPATH= cd -- "$desktop_dir/../.." && pwd)
+
+if [ "${BIRDCODE_BUILD_CACHE_WRAPPED:-}" != "1" ]; then
+  exec node "$repository_root/scripts/birdcode_cached_command.mjs" -- sh "$0" "$@"
+fi
+
 target_triple=$(rustc --print host-tuple)
-target_dir=$(node "$repository_root/scripts/build_cache.mjs" path)
+target_dir="${CARGO_TARGET_DIR:?BirdCode cache runner did not set CARGO_TARGET_DIR}"
 
 node "$repository_root/scripts/repository_health.mjs" >/dev/null
-node "$repository_root/scripts/build_cache.mjs" prepare >/dev/null
 export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
 export CARGO_TARGET_DIR="$target_dir"
 

@@ -671,7 +671,8 @@ npm run cargo -- test --workspace --all-targets
 npm run cargo -- clippy --workspace --all-targets
 npm test
 npm run build
-node --test scripts/build_cache.test.mjs scripts/codegen_calibration.test.mjs
+npm run test:build-cache
+node --test scripts/codegen_calibration.test.mjs
 ```
 
 All repository Cargo commands go through the checked-in wrapper. It shares one
@@ -679,9 +680,12 @@ marked cache across worktrees and refuses a new build when less than 20 GiB is
 free. The first wrapper invocation
 safely upgrades a legacy BirdCode-marked cache with Cargo's cache tag before
 inspection. `npm run cache:clean` is a dry-run inspection;
-`npm run cache:clean:apply` removes only a stale cache whose BirdCode marker and
-Cargo cache tag both validate. Cache deletion is always explicit and never runs
-implicitly while preparing a build.
+`npm run cache:clean:apply` removes only a cache that is at least 30 GiB or has
+been inactive for 72 hours, and whose BirdCode marker and Cargo cache tag both
+validate. The portable size scan does not follow symlinks. Cargo, sidecar, and
+Tauri commands hold a shared lease for their complete foreground lifetime, so
+cleanup refuses to race an active or unknown build. Cache deletion is always
+explicit and never runs implicitly while preparing a build.
 
 Create a native bundle for the current host with:
 

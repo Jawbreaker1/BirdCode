@@ -18,7 +18,7 @@
     "dev": "npm run tauri:dev --workspace @birdcode/desktop",
     "repo:health": "node scripts/repository_health.mjs",
     "test": "npm run test --workspace @birdcode/desktop",
-    "test:build-cache": "node --test scripts/build_cache.test.mjs",
+    "test:build-cache": "node --test scripts/build_cache.test.mjs scripts/birdcode_cached_command.test.mjs",
     "test:repo-health": "node --test scripts/repository_health.test.mjs",
     "typecheck": "npm run typecheck --workspace @birdcode/desktop"
   }

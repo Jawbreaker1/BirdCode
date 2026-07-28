@@ -7,11 +7,19 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   CARGO_CACHE_TAG,
+  CONTROL_CLEANUP_GATE_NAME,
+  CONTROL_LEASES_NAME,
   MARKER_NAME,
+  acquireBuildCacheLease,
   cleanStaleCache,
   inspectCache,
+  inspectCacheLogicalSize,
   prepareCache,
+  releaseBuildCacheLease,
+  resolveCacheControlPath,
   resolveCachePath,
+  validateBuildCacheLease,
+  withBuildCacheLease,
 } from "./build_cache.mjs";
 
 const HOUR_MS = 3_600_000;
@@ -128,6 +136,136 @@ test("preparing a stale cache reuses it and never performs implicit deletion", a
   assert.equal(await readFile(path.join(cachePath, "compiled-artifact"), "utf8"), "preserved");
 });
 
+test("logical size is bounded, counts file length, and never follows symbolic links", async (context) => {
+  const root = await temporaryRoot(context);
+  const cachePath = path.join(root, "shared-target");
+  const foreign = path.join(root, "foreign");
+  await prepareCache({ cachePath, minFreeBytes: 0 });
+  await mkdir(foreign);
+  await writeFile(path.join(cachePath, "local"), "local-bytes");
+  await writeFile(path.join(foreign, "large"), "x".repeat(10_000));
+  const beforeLink = await inspectCacheLogicalSize({ cachePath });
+  await symlink(foreign, path.join(cachePath, "foreign-link"));
+  const afterLink = await inspectCacheLogicalSize({ cachePath });
+
+  assert.equal(beforeLink.complete, true);
+  assert.equal(afterLink.complete, true);
+  assert.equal(afterLink.logical_size_bytes, beforeLink.logical_size_bytes);
+  const bounded = await inspectCacheLogicalSize({ cachePath, maxEntries: 1 });
+  assert.equal(bounded.complete, false);
+  assert.equal(bounded.incomplete_reason, "entry_limit");
+});
+
+test("size alone makes a fresh cache a dry-run cleanup candidate", async (context) => {
+  const root = await temporaryRoot(context);
+  const cachePath = path.join(root, "shared-target");
+  const nowUnixMs = 1_000_000_000_000;
+  await prepareCache({ cachePath, minFreeBytes: 0, nowUnixMs });
+
+  const result = await cleanStaleCache({
+    cachePath,
+    maxCacheBytes: 1n,
+    nowUnixMs,
+    staleHours: 72,
+  });
+  assert.equal(result.stale, false);
+  assert.equal(result.oversized, true);
+  assert.equal(result.candidate, true);
+  assert.equal(result.action, "would_delete");
+  assert.equal((await inspectCache({ cachePath })).exists, true);
+});
+
+test("apply fails closed when the logical-size scan is incomplete", async (context) => {
+  const root = await temporaryRoot(context);
+  const cachePath = path.join(root, "shared-target");
+  await prepareCache({ cachePath, minFreeBytes: 0 });
+
+  await assert.rejects(
+    cleanStaleCache({
+      apply: true,
+      cachePath,
+      maxCacheBytes: 1n,
+      scanMaxEntries: 1,
+    }),
+    /size scan is incomplete/,
+  );
+  assert.equal((await inspectCache({ cachePath })).exists, true);
+});
+
+test("lease entries block cleanup and gate entries block new leases", async (context) => {
+  const root = await temporaryRoot(context);
+  const cachePath = path.join(root, "shared-target");
+  const createdAt = 1_000_000_000_000;
+  await prepareCache({ cachePath, minFreeBytes: 0, nowUnixMs: createdAt });
+  const lease = await acquireBuildCacheLease({ cachePath });
+  assert.deepEqual(
+    await validateBuildCacheLease({ cachePath, leaseId: lease.lease_id }),
+    lease,
+  );
+  await assert.rejects(
+    cleanStaleCache({
+      apply: true,
+      cachePath,
+      staleHours: 0,
+      nowUnixMs: createdAt,
+    }),
+    /any lease entry exists/,
+  );
+  await releaseBuildCacheLease(lease);
+
+  const gatePath = path.join(resolveCacheControlPath(cachePath), CONTROL_CLEANUP_GATE_NAME);
+  await writeFile(gatePath, "occupied", { flag: "wx" });
+  await assert.rejects(acquireBuildCacheLease({ cachePath }), /cleanup is active/);
+  await rm(gatePath);
+});
+
+test("parallel first leases see only an atomically initialized control directory", async (context) => {
+  const root = await temporaryRoot(context);
+  const cachePath = path.join(root, "shared-target");
+  const leases = await Promise.all(
+    Array.from({ length: 8 }, () => acquireBuildCacheLease({ cachePath })),
+  );
+  await Promise.all(leases.map((lease) => validateBuildCacheLease({
+    cachePath,
+    leaseId: lease.lease_id,
+  })));
+  await Promise.all(leases.map(releaseBuildCacheLease));
+});
+
+test("withBuildCacheLease always releases its exact UUID lease", async (context) => {
+  const root = await temporaryRoot(context);
+  const cachePath = path.join(root, "shared-target");
+  let retained;
+  await assert.rejects(
+    withBuildCacheLease({ cachePath }, async (lease) => {
+      retained = lease;
+      await validateBuildCacheLease({ cachePath, leaseId: lease.lease_id });
+      throw new Error("operation failed");
+    }),
+    /operation failed/,
+  );
+  await assert.rejects(
+    validateBuildCacheLease({ cachePath, leaseId: retained.lease_id }),
+    /ENOENT/,
+  );
+});
+
+test("every entry in the lease directory blocks deletion, even if it is not a lease", async (context) => {
+  const root = await temporaryRoot(context);
+  const cachePath = path.join(root, "shared-target");
+  await prepareCache({ cachePath, minFreeBytes: 0 });
+  const lease = await acquireBuildCacheLease({ cachePath });
+  await releaseBuildCacheLease(lease);
+  const leasesPath = path.join(resolveCacheControlPath(cachePath), CONTROL_LEASES_NAME);
+  await mkdir(path.join(leasesPath, "unexpected-entry"));
+
+  await assert.rejects(
+    cleanStaleCache({ apply: true, cachePath, staleHours: 0 }),
+    /any lease entry exists/,
+  );
+  assert.equal((await inspectCache({ cachePath })).exists, true);
+});
+
 test("unmarked directories and symbolic links are never adopted or removed", async (context) => {
   const root = await temporaryRoot(context);
   const unmarked = path.join(root, "unmarked");
@@ -195,6 +333,6 @@ test("desktop build scripts never allocate a repository-local Cargo target", asy
   for (const relativePath of desktopScripts) {
     const source = await readFile(path.join(repositoryRoot, relativePath), "utf8");
     assert.doesNotMatch(source, /repository_root\/target/u, relativePath);
-    assert.match(source, /scripts\/build_cache\.mjs/u, relativePath);
+    assert.match(source, /scripts\/birdcode_cached_command\.mjs/u, relativePath);
   }
 });

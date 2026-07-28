@@ -106,6 +106,12 @@ These instructions apply to the entire repository.
 - Inspect cleanup with `npm run cache:clean`; deletion requires the explicit
   `npm run cache:clean:apply` command. Cleanup may remove only the configured
   directory after both the BirdCode marker and Cargo `CACHEDIR.TAG` validate.
-- Stale-cache deletion is never implicit during a build. The wrapper reuses the
-  one marked cache and refuses to start Cargo when less than 20 GiB remains.
-  Do not bypass either guard to make a build pass.
+- A cache becomes a cleanup candidate after 72 inactive hours or at 30 GiB of
+  logical file data. The portable scan never follows symlinks and incomplete
+  scans refuse deletion.
+- Cargo and desktop/Tauri build paths must hold the shared cache lease for the
+  complete foreground process. Cleanup fails closed while any lease entry or
+  cleanup gate exists; never delete or age-guess an orphaned control entry.
+- Cache deletion is never implicit during a build. The wrapper reuses the one
+  marked cache and refuses to start Cargo when less than 20 GiB remains. Do not
+  bypass either guard to make a build pass.
