@@ -3055,7 +3055,7 @@ mod tests {
         let capture_completed_at = RuntimeClockReading {
             runtime_instance_id: prior_clock.runtime_instance_id,
             monotonic_nanos: prior_clock.monotonic_nanos + 10,
-            observed_at: prior_clock.observed_at + chrono::Duration::milliseconds(10),
+            observed_at: prior_clock.observed_at,
         };
         writer.prepared.claim_cursor.capture_clock = Some(capture_completed_at.clone());
         let stdout = retained(COMMAND_STDOUT_MEDIA_TYPE, b"create stdout");
@@ -3126,7 +3126,7 @@ mod tests {
         let lease_observed_at = RuntimeClockReading {
             runtime_instance_id: prior_clock.runtime_instance_id,
             monotonic_nanos: prior_clock.monotonic_nanos + 10,
-            observed_at: prior_clock.observed_at + chrono::Duration::milliseconds(10),
+            observed_at: prior_clock.observed_at,
         };
         captured.writer.prepared.claim_cursor.capture_clock = Some(lease_observed_at.clone());
         let request = &captured.writer.prepared.request;
