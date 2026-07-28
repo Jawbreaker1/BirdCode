@@ -62,6 +62,30 @@ test("a valid marker-only cache is upgraded without losing compiled artifacts", 
   assert.equal((await inspectCache({ cachePath })).valid, true);
 });
 
+test("marker and Cargo tag contracts reject appended or unknown content", async (context) => {
+  const root = await temporaryRoot(context);
+  const markerCache = path.join(root, "marker-cache");
+  await prepareCache({ cachePath: markerCache, minFreeBytes: 0 });
+  const markerPath = path.join(markerCache, MARKER_NAME);
+  const marker = JSON.parse(await readFile(markerPath, "utf8"));
+  marker.unexpected = true;
+  await writeFile(markerPath, `${JSON.stringify(marker)}\n`);
+  await assert.rejects(
+    inspectCache({ cachePath: markerCache }),
+    /marker does not match its closed contract/,
+  );
+
+  const tagCache = path.join(root, "tag-cache");
+  await prepareCache({ cachePath: tagCache, minFreeBytes: 0 });
+  const tagPath = path.join(tagCache, CARGO_CACHE_TAG);
+  const tag = await readFile(tagPath, "utf8");
+  await writeFile(tagPath, `${tag}unexpected\n`);
+  await assert.rejects(
+    inspectCache({ cachePath: tagCache }),
+    /tag does not match its closed contract/,
+  );
+});
+
 test("stale cleanup is dry-run by default and deletes only after apply", async (context) => {
   const root = await temporaryRoot(context);
   const cachePath = path.join(root, "shared-target");
@@ -84,6 +108,24 @@ test("stale cleanup is dry-run by default and deletes only after apply", async (
   });
   assert.equal(applied.action, "deleted");
   assert.equal((await inspectCache({ cachePath })).exists, false);
+});
+
+test("preparing a stale cache reuses it and never performs implicit deletion", async (context) => {
+  const root = await temporaryRoot(context);
+  const cachePath = path.join(root, "shared-target");
+  const createdAt = 1_000_000_000_000;
+  await prepareCache({ cachePath, minFreeBytes: 0, nowUnixMs: createdAt });
+  await writeFile(path.join(cachePath, "compiled-artifact"), "preserved");
+
+  const prepared = await prepareCache({
+    cachePath,
+    minFreeBytes: 0,
+    staleHours: 72,
+    nowUnixMs: createdAt + 73 * HOUR_MS,
+  });
+
+  assert.equal(prepared.prior_cleanup, "stale_reused");
+  assert.equal(await readFile(path.join(cachePath, "compiled-artifact"), "utf8"), "preserved");
 });
 
 test("unmarked directories and symbolic links are never adopted or removed", async (context) => {
@@ -140,4 +182,19 @@ test("cache path rejects a filesystem root and low free space fails before Cargo
   );
   const marker = JSON.parse(await readFile(path.join(root, "shared-target", MARKER_NAME), "utf8"));
   assert.equal(marker.kind, "birdcode_cargo_target");
+});
+
+test("desktop build scripts never allocate a repository-local Cargo target", async () => {
+  const repositoryRoot = path.dirname(scriptsRoot);
+  const desktopScripts = [
+    "apps/desktop/scripts/prepare-daemon.sh",
+    "apps/desktop/scripts/tauri-dev.sh",
+    "apps/desktop/scripts/tauri-build.sh",
+  ];
+
+  for (const relativePath of desktopScripts) {
+    const source = await readFile(path.join(repositoryRoot, relativePath), "utf8");
+    assert.doesNotMatch(source, /repository_root\/target/u, relativePath);
+    assert.match(source, /scripts\/build_cache\.mjs/u, relativePath);
+  }
 });

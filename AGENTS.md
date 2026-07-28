@@ -106,6 +106,6 @@ These instructions apply to the entire repository.
 - Inspect cleanup with `npm run cache:clean`; deletion requires the explicit
   `npm run cache:clean:apply` command. Cleanup may remove only the configured
   directory after both the BirdCode marker and Cargo `CACHEDIR.TAG` validate.
-- The wrapper removes a marked cache after 72 hours of inactivity and refuses
-  to start Cargo when less than 20 GiB remains. Do not bypass either guard to
-  make a build pass.
+- Stale-cache deletion is never implicit during a build. The wrapper reuses the
+  one marked cache and refuses to start Cargo when less than 20 GiB remains.
+  Do not bypass either guard to make a build pass.

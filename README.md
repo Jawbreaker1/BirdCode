@@ -675,12 +675,13 @@ node --test scripts/build_cache.test.mjs scripts/codegen_calibration.test.mjs
 ```
 
 All repository Cargo commands go through the checked-in wrapper. It shares one
-marked cache across worktrees, removes it after 72 hours of inactivity, and
-refuses a new build when less than 20 GiB is free. The first wrapper invocation
+marked cache across worktrees and refuses a new build when less than 20 GiB is
+free. The first wrapper invocation
 safely upgrades a legacy BirdCode-marked cache with Cargo's cache tag before
 inspection. `npm run cache:clean` is a dry-run inspection;
 `npm run cache:clean:apply` removes only a stale cache whose BirdCode marker and
-Cargo cache tag both validate.
+Cargo cache tag both validate. Cache deletion is always explicit and never runs
+implicitly while preparing a build.
 
 Create a native bundle for the current host with:
 

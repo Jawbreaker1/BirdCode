@@ -34,6 +34,12 @@ function cacheTagPath(cachePath) {
 function validMarker(value) {
   return value !== null
     && typeof value === "object"
+    && !Array.isArray(value)
+    && Object.keys(value).length === 4
+    && Object.hasOwn(value, "schema_version")
+    && Object.hasOwn(value, "kind")
+    && Object.hasOwn(value, "created_at_unix_ms")
+    && Object.hasOwn(value, "last_used_at_unix_ms")
     && value.schema_version === CACHE_SCHEMA_VERSION
     && value.kind === "birdcode_cargo_target"
     && Number.isSafeInteger(value.created_at_unix_ms)
@@ -87,7 +93,7 @@ async function readValidatedMarker(cachePath) {
     throw new Error(`Cargo cache tag is unsafe: ${cachePath}`);
   }
   const rawTag = await readFile(cacheTagPath(cachePath), "utf8");
-  if (!rawTag.startsWith(`${CARGO_CACHE_SIGNATURE}\n`)) {
+  if (rawTag !== CARGO_CACHE_TAG_BYTES) {
     throw new Error(`Cargo cache tag does not match its closed contract: ${cachePath}`);
   }
   return marker;
@@ -174,12 +180,17 @@ export async function prepareCache({
   minFreeBytes = DEFAULT_MIN_FREE_BYTES,
   nowUnixMs = Date.now(),
 } = {}) {
+  if (!Number.isFinite(staleHours) || staleHours < 0) {
+    throw new Error("staleHours must be a non-negative finite number");
+  }
   await migrateMarkerOnlyCache(cachePath);
-  const cleanup = await cleanStaleCache({ apply: true, cachePath, staleHours, nowUnixMs });
+  const beforePrepare = await inspectCache({ cachePath, nowUnixMs });
+  const priorCleanup = beforePrepare.exists && beforePrepare.age_hours >= staleHours
+    ? "stale_reused"
+    : "kept";
   let createdAt = nowUnixMs;
-  const afterCleanup = await inspectCache({ cachePath, nowUnixMs });
-  if (afterCleanup.exists) {
-    createdAt = afterCleanup.marker.created_at_unix_ms;
+  if (beforePrepare.exists) {
+    createdAt = beforePrepare.marker.created_at_unix_ms;
   } else {
     await mkdir(cachePath, { recursive: true, mode: 0o700 });
     const directory = await lstat(cachePath);
@@ -197,7 +208,7 @@ export async function prepareCache({
         throw error;
       }
       const existingTag = await readFile(cacheTagPath(cachePath), "utf8");
-      if (!existingTag.startsWith(`${CARGO_CACHE_SIGNATURE}\n`)) {
+      if (existingTag !== CARGO_CACHE_TAG_BYTES) {
         throw new Error(`BirdCode build cache tag is unsafe: ${cachePath}`);
       }
     }
@@ -216,7 +227,7 @@ export async function prepareCache({
       `Refusing Cargo build: only ${availableBytes} bytes are available; ${minFreeBytes} required`,
     );
   }
-  return { cache_path: cachePath, available_bytes: availableBytes, prior_cleanup: cleanup.action };
+  return { cache_path: cachePath, available_bytes: availableBytes, prior_cleanup: priorCleanup };
 }
 
 function parseArguments(argv) {
@@ -246,6 +257,9 @@ async function main() {
     result = await cleanStaleCache({ apply, staleHours });
   } else if (command === "prepare") {
     result = await prepareCache({ staleHours });
+  } else if (command === "path") {
+    process.stdout.write(`${resolveCachePath()}\n`);
+    return;
   } else {
     throw new Error(`Unknown build-cache command: ${command}`);
   }

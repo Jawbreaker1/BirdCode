@@ -5,7 +5,9 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 desktop_dir=$(dirname "$script_dir")
 repository_root=$(CDPATH= cd -- "$desktop_dir/../.." && pwd)
 
-export CARGO_TARGET_DIR="$repository_root/target"
+export CARGO_TARGET_DIR
+CARGO_TARGET_DIR=$(node "$repository_root/scripts/build_cache.mjs" path)
+export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
 export CARGO_BUILD_TARGET="$(rustc --print host-tuple)"
 
 sh "$script_dir/prepare-daemon.sh" release
@@ -18,8 +20,8 @@ tauri build --target "$CARGO_BUILD_TARGET" --config src-tauri/tauri.sidecar.conf
 # bytes successfully. Remove it only from the generated bundle, then verify the
 # standalone app and disk image rather than treating file creation as success.
 if [ "$(uname -s)" = "Darwin" ]; then
-  app_bundle="$repository_root/target/$CARGO_BUILD_TARGET/release/bundle/macos/BirdCode.app"
-  dmg_dir="$repository_root/target/$CARGO_BUILD_TARGET/release/bundle/dmg"
+  app_bundle="$CARGO_TARGET_DIR/$CARGO_BUILD_TARGET/release/bundle/macos/BirdCode.app"
+  dmg_dir="$CARGO_TARGET_DIR/$CARGO_BUILD_TARGET/release/bundle/dmg"
 
   if [ -d "$app_bundle" ]; then
     xattr -cr "$app_bundle"

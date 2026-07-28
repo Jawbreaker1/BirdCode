@@ -14,7 +14,12 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 desktop_dir=$(dirname "$script_dir")
 repository_root=$(CDPATH= cd -- "$desktop_dir/../.." && pwd)
 target_triple=$(rustc --print host-tuple)
-target_dir="$repository_root/target"
+target_dir=$(node "$repository_root/scripts/build_cache.mjs" path)
+
+node "$repository_root/scripts/repository_health.mjs" >/dev/null
+node "$repository_root/scripts/build_cache.mjs" prepare >/dev/null
+export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
+export CARGO_TARGET_DIR="$target_dir"
 
 if [ "$profile" = "release" ]; then
   cargo build \
