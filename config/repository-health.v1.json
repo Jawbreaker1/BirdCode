@@ -126,10 +126,6 @@
       "ceiling_lines": 1959
     },
     {
-      "path": "crates/workspace/src/manager.rs",
-      "ceiling_lines": 1596
-    },
-    {
       "path": "crates/workspace/src/recovery.rs",
       "ceiling_lines": 1824
     },
