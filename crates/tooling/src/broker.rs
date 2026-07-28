@@ -1,8 +1,8 @@
 use crate::model::{
     ObservedRepositoryToolCallV2, PreparedRepositoryToolCallV2, RepositoryBrokerErrorV2,
-    RepositoryToolExecuteInputV2, RepositoryToolInterruptionInputV2, RepositoryToolPrepareInputV2,
-    RepositoryToolRestartReconciliationInputV2, RepositoryToolTerminalV2, RetainedArtifactV2,
-    UnknownRepositoryToolCallV2, digest,
+    RepositoryToolExecuteErrorV2, RepositoryToolExecuteInputV2, RepositoryToolInterruptionInputV2,
+    RepositoryToolPrepareInputV2, RepositoryToolRestartReconciliationInputV2,
+    RepositoryToolTerminalV2, RetainedArtifactV2, UnknownRepositoryToolCallV2, digest,
 };
 use birdcode_protocol::{
     ChildToolObservedV2, ChildToolOperation, ChildToolOutcomeUnknownV2, ChildToolPreparedV2,
@@ -275,66 +275,103 @@ impl RepositoryToolBroker {
     /// Authorization denial returns a canonical Observed-v2 denial without a
     /// filesystem access attempt. Authorized calls use only descriptor-relative
     /// Unix operations and return result bytes separately from the small receipt.
+    /// The finish-clock callback is invoked exactly once after that effect
+    /// boundary and its reading is bound into the terminal receipt. It is not
+    /// invoked when validation or consumption rejects the Prepared record.
     ///
     /// # Errors
     ///
     /// Rejects substituted, unissued, cross-epoch or consumed Prepared records,
     /// unavailable broker state, and any canonical encoding/cap violation.
-    pub fn execute(
+    pub fn execute<F>(
         &self,
         input: RepositoryToolExecuteInputV2,
-    ) -> Result<RepositoryToolTerminalV2, RepositoryBrokerErrorV2> {
-        self.validate_active_prepared(&input.prepared)?;
-        self.consume(&input.prepared)?;
+        runtime_finished_at: F,
+    ) -> Result<RepositoryToolTerminalV2, RepositoryBrokerErrorV2>
+    where
+        F: FnOnce() -> birdcode_protocol::RuntimeClockReading,
+    {
+        self.execute_classified(input, runtime_finished_at)
+            .map_err(RepositoryToolExecuteErrorV2::into_broker_error)
+    }
+
+    /// Executes one exact Prepared call while preserving whether a failure
+    /// occurred before or after the one-shot effect boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepositoryToolExecuteErrorV2::NotStarted`] only while the
+    /// Prepared call remains safe to close through `record_interruption`.
+    /// [`RepositoryToolExecuteErrorV2::OutcomeIndeterminate`] means the call
+    /// was consumed and must be reconciled by a different runtime.
+    pub fn execute_classified<F>(
+        &self,
+        input: RepositoryToolExecuteInputV2,
+        runtime_finished_at: F,
+    ) -> Result<RepositoryToolTerminalV2, RepositoryToolExecuteErrorV2>
+    where
+        F: FnOnce() -> birdcode_protocol::RuntimeClockReading,
+    {
+        let RepositoryToolExecuteInputV2 {
+            prepared,
+            prepared_event_id,
+        } = input;
+        self.validate_active_prepared(&prepared)
+            .map_err(RepositoryToolExecuteErrorV2::NotStarted)?;
+        self.consume(&prepared)
+            .map_err(RepositoryToolExecuteErrorV2::NotStarted)?;
 
         if let RepositoryToolAuthorizationDecisionV2::Denied { denial } =
-            &input.prepared.receipt.authorization
+            &prepared.receipt.authorization
         {
             let effect = RepositoryFilesystemEffectV1::NoFilesystemAccessAttempted;
+            let runtime_finished_at = runtime_finished_at();
             let evidence = retained_protocol_evidence(
                 REPOSITORY_TOOL_DENIAL_EVIDENCE_V2_MEDIA_TYPE,
                 encode_repository_tool_denial_evidence_v2(&RepositoryToolDenialEvidenceV1 {
-                    call_id: input.prepared.receipt.tool_call_id,
+                    call_id: prepared.receipt.tool_call_id,
                     denial: denial.clone(),
                     effect,
                 }),
                 "authorization denial evidence",
-            )?;
+            )
+            .map_err(RepositoryToolExecuteErrorV2::OutcomeIndeterminate)?;
             let terminal = RepositoryToolObservedTerminalV2::AuthorizationDenied {
                 denial: denial.clone(),
                 evidence_artifact: evidence.artifact.clone(),
             };
-            return self.observed(
-                &input.prepared,
-                input.prepared_event_id,
-                input.runtime_finished_at,
-                terminal,
-                effect,
-                vec![evidence],
-            );
+            return self
+                .observed(
+                    &prepared,
+                    prepared_event_id,
+                    runtime_finished_at,
+                    terminal,
+                    effect,
+                    vec![evidence],
+                )
+                .map_err(RepositoryToolExecuteErrorV2::OutcomeIndeterminate);
         }
 
         #[cfg(unix)]
-        let result = self.execute_unix(&input.prepared.receipt.operation);
+        let result = self.execute_unix(&prepared.receipt.operation);
         #[cfg(not(unix))]
         let result = Err(RepositoryToolFailureV1::UnsupportedPlatform);
+        let runtime_finished_at = runtime_finished_at();
 
-        match result {
-            Ok(result) => self.observed_success(
-                &input.prepared,
-                input.prepared_event_id,
-                input.runtime_finished_at,
-                &result,
-            ),
+        let terminal = match result {
+            Ok(result) => {
+                self.observed_success(&prepared, prepared_event_id, runtime_finished_at, &result)
+            }
             Err(failure) => self.observed_failure(
-                &input.prepared,
-                input.prepared_event_id,
-                input.runtime_finished_at,
+                &prepared,
+                prepared_event_id,
+                runtime_finished_at,
                 failure,
                 RepositoryFilesystemEffectV1::ReadOnlyFilesystemAccessAttempted,
                 None,
             ),
-        }
+        };
+        terminal.map_err(RepositoryToolExecuteErrorV2::OutcomeIndeterminate)
     }
 
     /// Closes one exact, durable Prepared call before execution in this active
@@ -351,12 +388,11 @@ impl RepositoryToolBroker {
     ) -> Result<RepositoryToolTerminalV2, RepositoryBrokerErrorV2> {
         validate_interruption_metadata(input.boundary, input.cancellation.as_ref())?;
         self.validate_active_prepared(&input.prepared)?;
-        self.consume(&input.prepared)?;
         let recorded_at = self.moment();
         let elapsed_nanoseconds = recorded_at
             .monotonic_nanos
             .saturating_sub(input.prepared.receipt.broker_prepared_at.monotonic_nanos);
-        Self::unknown(
+        let terminal = Self::unknown(
             &input.prepared,
             input.prepared_event_id,
             input.boundary,
@@ -372,7 +408,9 @@ impl RepositoryToolBroker {
                 persistent_resources_created: 0,
                 temporary_resources_created: 0,
             },
-        )
+        )?;
+        self.consume(&input.prepared)?;
+        Ok(terminal)
     }
 
     /// Reconciles a Prepared call from an explicitly closed broker epoch.

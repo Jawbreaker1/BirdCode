@@ -28,6 +28,7 @@ use birdcode_tooling::{
     verify_terminal_output_v2,
 };
 use serde_json::json;
+use std::cell::Cell;
 use std::fs;
 use std::os::unix::ffi::OsStringExt as _;
 use std::os::unix::fs::{MetadataExt as _, symlink};
@@ -254,11 +255,13 @@ fn execute(
     prepared: &PreparedRepositoryToolCallV2,
     index: u128,
 ) -> Result<RepositoryToolTerminalV2, RepositoryBrokerErrorV2> {
-    broker.execute(RepositoryToolExecuteInputV2 {
-        prepared: prepared.clone(),
-        prepared_event_id: EventId::from_uuid(uuid(6_000 + index)),
-        runtime_finished_at: runtime_clock(100 + index),
-    })
+    broker.execute(
+        RepositoryToolExecuteInputV2 {
+            prepared: prepared.clone(),
+            prepared_event_id: EventId::from_uuid(uuid(6_000 + index)),
+        },
+        || runtime_clock(100 + index),
+    )
 }
 
 fn successful_result_artifact(terminal: &RepositoryToolTerminalV2) -> &RetainedArtifactV2 {
@@ -417,6 +420,121 @@ fn all_operations_use_protocol_v7_results_and_lossless_unix_paths() {
     };
     assert_eq!(search_result.matches.len(), 1);
     assert_eq!(search_result.matches[0].byte_offset, 7);
+}
+
+#[test]
+fn execute_samples_finish_clock_once_after_descriptor_confined_read() {
+    let root = TempDir::new().expect("temp root");
+    let file = root.path().join("clock-ordering.txt");
+    fs::write(&file, b"read-before-clock").expect("initial file");
+    let grant = RepositoryToolGrantId::from_uuid(uuid(10_001));
+    let broker = RepositoryToolBroker::open(
+        root.path(),
+        authority(root.path(), vec![read_grant(grant)]),
+        epoch(10_002, &[]),
+    )
+    .expect("broker");
+    let prepared = prepare(
+        &broker,
+        10,
+        grant,
+        ChildToolOperation::RepositoryFileRead {
+            path: path(&[b"clock-ordering.txt"]),
+            offset_bytes: 0,
+            max_bytes: 64,
+        },
+    )
+    .expect("read prepares");
+    let clock_calls = Cell::new(0_u32);
+    let expected_finished_at = runtime_clock(10_003);
+
+    let terminal = broker
+        .execute(
+            RepositoryToolExecuteInputV2 {
+                prepared: prepared.clone(),
+                prepared_event_id: EventId::from_uuid(uuid(10_004)),
+            },
+            || {
+                clock_calls.set(clock_calls.get() + 1);
+                fs::write(&file, b"clock-ran-after-read").expect("clock ordering marker");
+                expected_finished_at.clone()
+            },
+        )
+        .expect("read executes");
+
+    assert_eq!(clock_calls.get(), 1, "finish clock is sampled exactly once");
+    let RepositoryToolResultV2::RepositoryFileRead(result) = successful_result(&terminal) else {
+        panic!("expected read result");
+    };
+    assert_eq!(
+        result.bytes, b"read-before-clock",
+        "the descriptor-confined read completed before the clock callback mutated the file"
+    );
+    let RepositoryToolTerminalV2::Observed(observed) = terminal else {
+        panic!("expected observed terminal");
+    };
+    assert_eq!(observed.receipt.runtime_finished_at, expected_finished_at);
+    assert_eq!(
+        fs::read(file).expect("ordering marker remains"),
+        b"clock-ran-after-read"
+    );
+}
+
+#[test]
+fn authorization_denial_samples_finish_clock_exactly_once() {
+    let root = TempDir::new().expect("temp root");
+    let granted = RepositoryToolGrantId::from_uuid(uuid(10_101));
+    let ungranted = RepositoryToolGrantId::from_uuid(uuid(10_102));
+    let broker = RepositoryToolBroker::open(
+        root.path(),
+        authority(root.path(), vec![read_grant(granted)]),
+        epoch(10_103, &[]),
+    )
+    .expect("broker");
+    let prepared = prepare(
+        &broker,
+        11,
+        ungranted,
+        ChildToolOperation::RepositoryFileRead {
+            path: path(&[b"never-opened"]),
+            offset_bytes: 0,
+            max_bytes: 1,
+        },
+    )
+    .expect("denial prepares");
+    assert!(matches!(
+        prepared.receipt.authorization,
+        RepositoryToolAuthorizationDecisionV2::Denied { .. }
+    ));
+    let clock_calls = Cell::new(0_u32);
+    let expected_finished_at = runtime_clock(10_104);
+
+    let terminal = broker
+        .execute(
+            RepositoryToolExecuteInputV2 {
+                prepared: prepared.clone(),
+                prepared_event_id: EventId::from_uuid(uuid(10_105)),
+            },
+            || {
+                clock_calls.set(clock_calls.get() + 1);
+                expected_finished_at.clone()
+            },
+        )
+        .expect("denial closes");
+
+    assert_eq!(clock_calls.get(), 1, "finish clock is sampled exactly once");
+    let RepositoryToolTerminalV2::Observed(observed) = terminal else {
+        panic!("expected observed terminal");
+    };
+    assert!(matches!(
+        observed.receipt.terminal,
+        RepositoryToolObservedTerminalV2::AuthorizationDenied { .. }
+    ));
+    assert_eq!(
+        observed.receipt.effect,
+        RepositoryFilesystemEffectV1::NoFilesystemAccessAttempted
+    );
+    assert_eq!(observed.receipt.runtime_finished_at, expected_finished_at);
 }
 
 #[test]

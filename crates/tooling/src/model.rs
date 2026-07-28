@@ -66,12 +66,17 @@ pub struct PreparedRepositoryToolCallV2 {
     pub prepared_receipt: RetainedArtifactV2,
 }
 
-/// Caller-owned durable Prepared event identity and runtime finish reading.
+/// Caller-owned durable Prepared event identity.
+///
+/// The runtime finish reading is deliberately supplied separately as a clock
+/// callback to [`crate::RepositoryToolBroker::execute`]. This prevents callers
+/// from observing a finish boundary before the broker has completed the
+/// descriptor-confined filesystem operation (or established a no-effect
+/// authorization denial).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositoryToolExecuteInputV2 {
     pub prepared: PreparedRepositoryToolCallV2,
     pub prepared_event_id: EventId,
-    pub runtime_finished_at: RuntimeClockReading,
 }
 
 /// Caller-owned information for closing an unexecuted Prepared call in the
@@ -180,6 +185,29 @@ pub enum RepositoryBrokerErrorV2 {
     InvalidDurableProjection,
     #[error("unknown event reason/boundary does not match the broker interruption receipt")]
     UnknownProjectionMismatch,
+}
+
+/// Closed execution phase attached to every repository broker failure.
+///
+/// `NotStarted` proves the broker did not consume the Prepared call and no
+/// repository operation began. `OutcomeIndeterminate` means the broker crossed
+/// its one-shot consumption boundary; callers must retain/reconcile the
+/// Prepared call and must never dispatch it again in the same runtime.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum RepositoryToolExecuteErrorV2 {
+    #[error("repository effect was not started: {0}")]
+    NotStarted(#[source] RepositoryBrokerErrorV2),
+    #[error("repository effect outcome is indeterminate: {0}")]
+    OutcomeIndeterminate(#[source] RepositoryBrokerErrorV2),
+}
+
+impl RepositoryToolExecuteErrorV2 {
+    #[must_use]
+    pub fn into_broker_error(self) -> RepositoryBrokerErrorV2 {
+        match self {
+            Self::NotStarted(error) | Self::OutcomeIndeterminate(error) => error,
+        }
+    }
 }
 
 pub(crate) fn digest(bytes: &[u8]) -> Sha256Digest {

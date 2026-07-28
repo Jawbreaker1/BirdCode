@@ -1513,15 +1513,21 @@ impl<J: RepositoryAgentJournal + ?Sized> RepositoryAgentWorker<J> {
             };
             let execution_lane = Arc::clone(&authority.broker_lane);
             let execution_prepared = prepared.clone();
-            let runtime_finished_at = self.clock();
+            let runtime_instance_id = self.runtime_instance_id;
+            let runtime_started_at = self.started_at;
             let terminal = tokio::task::spawn_blocking(move || {
-                execution_lane
-                    .broker()
-                    .execute(RepositoryToolExecuteInputV2 {
+                execution_lane.broker().execute(
+                    RepositoryToolExecuteInputV2 {
                         prepared: execution_prepared,
                         prepared_event_id,
-                        runtime_finished_at,
-                    })
+                    },
+                    move || RuntimeClockReading {
+                        runtime_instance_id,
+                        monotonic_nanos: u64::try_from(runtime_started_at.elapsed().as_nanos())
+                            .unwrap_or(u64::MAX),
+                        observed_at: Utc::now(),
+                    },
+                )
             })
             .await
             .map_err(|error| {
