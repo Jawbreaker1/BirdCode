@@ -1,7 +1,16 @@
 import { spawnSync } from "node:child_process";
 import { prepareCache } from "./build_cache.mjs";
+import { inspectRepositoryHealth, resolveRepositoryRoot } from "./repository_health.mjs";
 
 async function main() {
+  const repositoryHealth = await inspectRepositoryHealth({
+    root: resolveRepositoryRoot(),
+  });
+  if (!repositoryHealth.healthy) {
+    throw new Error(
+      `Repository health check failed:\n${repositoryHealth.violations.map((violation) => `- ${violation}`).join("\n")}`,
+    );
+  }
   const prepared = await prepareCache();
   const cargo = process.env.BIRDCODE_CARGO_BIN ?? "cargo";
   const result = spawnSync(cargo, process.argv.slice(2), {

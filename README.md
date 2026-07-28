@@ -665,6 +665,7 @@ Run the portable deterministic foundation gate from the repository root:
 
 ```sh
 npm run cargo -- fmt --all -- --check
+npm run repo:health
 npm run cache:inspect
 npm run cargo -- test --workspace --all-targets
 npm run cargo -- clippy --workspace --all-targets

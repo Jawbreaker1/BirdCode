@@ -88,6 +88,10 @@ These instructions apply to the entire repository.
 
 - Add tests with every behavior change.
 - Run formatting, static checks, unit tests, and the relevant end-to-end path.
+- Run `npm run repo:health` before committing. Existing oversized source files
+  have exact debt ceilings that must be lowered whenever a file shrinks and
+  must never be raised to accommodate growth. New Rust files are limited to
+  1,500 lines; new TypeScript and JavaScript module files to 800 lines.
 - Record known platform gaps explicitly; do not silently label macOS-only code
   as cross-platform.
 

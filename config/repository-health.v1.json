@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "source_limits": {
+    "mjs": 800,
+    "rs": 1500,
+    "ts": 800,
+    "tsx": 800
+  },
+  "debt": [
+    {
+      "path": "apps/cli/src/main.rs",
+      "ceiling_lines": 1825
+    },
+    {
+      "path": "apps/daemon/src/recon.rs",
+      "ceiling_lines": 2684
+    },
+    {
+      "path": "apps/daemon/src/repository_agent_worker.rs",
+      "ceiling_lines": 3164
+    },
+    {
+      "path": "apps/daemon/src/repository_implementation_worker.rs",
+      "ceiling_lines": 4172
+    },
+    {
+      "path": "apps/daemon/src/repository_reviewer_worker.rs",
+      "ceiling_lines": 3590
+    },
+    {
+      "path": "apps/daemon/src/supervisor.rs",
+      "ceiling_lines": 11456
+    },
+    {
+      "path": "apps/daemon/src/worktree_write_lane.rs",
+      "ceiling_lines": 1966
+    },
+    {
+      "path": "apps/daemon/src/writable_agent_step.rs",
+      "ceiling_lines": 1575
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/runtime.rs",
+      "ceiling_lines": 3816
+    },
+    {
+      "path": "crates/backends/src/lmstudio.rs",
+      "ceiling_lines": 1548
+    },
+    {
+      "path": "crates/client/src/lib.rs",
+      "ceiling_lines": 2096
+    },
+    {
+      "path": "crates/orchestrator/src/actor_graph.rs",
+      "ceiling_lines": 2976
+    },
+    {
+      "path": "crates/orchestrator/src/planner.rs",
+      "ceiling_lines": 3526
+    },
+    {
+      "path": "crates/orchestrator/tests/actor_graph.rs",
+      "ceiling_lines": 1877
+    },
+    {
+      "path": "crates/orchestrator/tests/planner.rs",
+      "ceiling_lines": 1612
+    },
+    {
+      "path": "crates/prompting/examples/lmstudio_router_eval.rs",
+      "ceiling_lines": 1953
+    },
+    {
+      "path": "crates/prompting/src/planner_replanner.rs",
+      "ceiling_lines": 1579
+    },
+    {
+      "path": "crates/prompting/src/planner_replanner_v2.rs",
+      "ceiling_lines": 3113
+    },
+    {
+      "path": "crates/prompting/src/repository_explorer.rs",
+      "ceiling_lines": 2195
+    },
+    {
+      "path": "crates/protocol/src/lib.rs",
+      "ceiling_lines": 15226
+    },
+    {
+      "path": "crates/runtime/src/runtime.rs",
+      "ceiling_lines": 1997
+    },
+    {
+      "path": "crates/store/src/cleanup_preflight.rs",
+      "ceiling_lines": 1752
+    },
+    {
+      "path": "crates/store/src/lib.rs",
+      "ceiling_lines": 50390
+    },
+    {
+      "path": "crates/tooling/src/broker.rs",
+      "ceiling_lines": 1532
+    },
+    {
+      "path": "crates/validation/src/validation.rs",
+      "ceiling_lines": 2271
+    },
+    {
+      "path": "crates/validation/tests/adversarial.rs",
+      "ceiling_lines": 1959
+    },
+    {
+      "path": "crates/workspace/src/manager.rs",
+      "ceiling_lines": 4532
+    },
+    {
+      "path": "crates/workspace/src/recovery.rs",
+      "ceiling_lines": 1824
+    },
+    {
+      "path": "crates/workspace/src/worktree.rs",
+      "ceiling_lines": 2465
+    }
+  ]
+}
