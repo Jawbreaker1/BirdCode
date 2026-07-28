@@ -59,6 +59,48 @@ These instructions apply to the entire repository.
 - Do not read or copy Codex implementation source. Public documentation and
   externally observable behavior may inform clean-room compatibility work.
 
+## Code health and integration discipline
+
+- Architecture and code health are acceptance criteria, not optional cleanup.
+  Follow the normative [code-health policy](docs/code-health.md).
+- Each module owns one cohesive responsibility, exposes the narrowest practical
+  surface, and is named after that responsibility. Do not create catch-all
+  helpers, numbered `part` modules, or move unrelated code merely to satisfy a
+  line limit.
+- Healthy targets are at most 800 lines for Rust modules and 500 lines for
+  TypeScript/TSX/JavaScript modules. Repository-health hard limits remain 1,500
+  and 800 lines respectively. Existing debt files may never grow; their exact
+  ceilings must fall whenever they shrink. New debt exceptions and raised
+  limits or ceilings are forbidden by the baseline ratchet.
+- `lib.rs`, `main.rs`, `mod.rs`, application roots, and public facades should
+  contain composition, exports, and wiring. Extract domain behavior into
+  responsibility-specific modules. Do not add new feature behavior to a file
+  above its hard limit before extracting the affected responsibility in a
+  separate preceding commit, except for an urgent correctness or security fix.
+- Define one bounded writable milestone before editing: one behavior slice or
+  one behavior-preserving mechanical refactor, its owner, owned paths,
+  acceptance checks, and expected scope. A normal milestone touches at most ten
+  production paths and 2,500 semantic added-plus-deleted production lines.
+  Verified unchanged moves, generated files, and lockfiles do not count toward
+  the semantic-line budget. Split larger work before implementation.
+- Keep mechanical extraction, renaming, and relocation separate from behavior,
+  schema, protocol, permission, or dependency changes. Mechanical-refactor
+  commits must preserve behavior and avoid unrelated formatting.
+- Begin and end every writable milestone with a clean worktree. One path has
+  one writer at a time. Parallel writable agents require isolated worktrees and
+  declared disjoint path ownership; one integrator alone owns shared facades,
+  manifests, schemas, generated outputs, lockfiles, the Git index, and commits.
+- Reassess after 60 minutes without a reviewable, testable increment. Stop and
+  split or re-scope after 120 minutes, after twice the estimated scope, or when
+  the path/patch limits are crossed. Continuing one autonomous milestone beyond
+  three hours requires an explicit user decision; long-running validation may
+  continue when implementation has stopped and status is reported.
+- Commit only complete, reviewable, validated milestones. Push each validated
+  commit before starting the next writable milestone; never retain more than
+  one validated milestone locally. A topic branch must be integrated or
+  refreshed before it exceeds one working day, five validated commits, or 50
+  changed production paths relative to its integration target.
+
 ## Quality policy
 
 - Use targeted subagents when parallel work materially improves speed or
@@ -90,8 +132,10 @@ These instructions apply to the entire repository.
 - Run formatting, static checks, unit tests, and the relevant end-to-end path.
 - Run `npm run repo:health` before committing. Existing oversized source files
   have exact debt ceilings that must be lowered whenever a file shrinks and
-  must never be raised to accommodate growth. New Rust files are limited to
-  1,500 lines; new TypeScript and JavaScript module files to 800 lines.
+  must never be raised to accommodate growth. The guard compares its config
+  with committed `HEAD` locally and with the integration baseline in CI, so it
+  cannot authorize its own relaxation. Every newly authored source language
+  must add a hard limit in the same commit.
 - Record known platform gaps explicitly; do not silently label macOS-only code
   as cross-platform.
 

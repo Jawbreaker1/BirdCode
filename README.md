@@ -661,6 +661,11 @@ foundation already enforces several important boundaries:
 
 ## Development and verification
 
+BirdCode treats architecture and integration hygiene as acceptance criteria.
+The normative [code-health and integration policy](docs/code-health.md)
+defines module targets, the legacy-debt ratchet, bounded milestones, parallel
+ownership, and commit/push cadence.
+
 Run the portable deterministic foundation gate from the repository root:
 
 ```sh

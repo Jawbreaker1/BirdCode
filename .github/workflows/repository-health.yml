@@ -1,0 +1,46 @@
+name: Repository health
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repository-health-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository-health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the complete comparison history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Use the repository Node version
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.12.0
+
+      - name: Select the immutable policy baseline
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            baseline="$PULL_REQUEST_BASE_SHA"
+          elif [ -n "$PUSH_BEFORE_SHA" ] &&
+               [ "$PUSH_BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            baseline="$PUSH_BEFORE_SHA"
+          else
+            baseline="$(git merge-base HEAD origin/main)"
+          fi
+          echo "BIRDCODE_REPOSITORY_HEALTH_BASE_REF=$baseline" >> "$GITHUB_ENV"
+
+      - name: Enforce repository policy and cache safety
+        run: npm run verify:repository

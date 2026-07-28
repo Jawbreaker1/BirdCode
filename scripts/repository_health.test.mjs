@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import {
   countSourceLines,
   evaluateRepositoryHealth,
+  evaluateRepositoryHealthRatchet,
+  inspectRepositoryHealth,
   validateRepositoryHealthConfig,
 } from "./repository_health.mjs";
 
@@ -20,6 +26,14 @@ function config() {
       },
     ],
   };
+}
+
+function runGit(root, arguments_) {
+  const result = spawnSync("git", arguments_, {
+    cwd: root,
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr);
 }
 
 test("line counting handles empty, terminated, and unterminated sources", () => {
@@ -117,4 +131,96 @@ test("duplicate debt paths and unknown fields are rejected", () => {
     () => validateRepositoryHealthConfig(unknown),
     /must contain exactly/,
   );
+});
+
+test("the baseline ratchet permits only tighter limits and lower or removed debt", () => {
+  const current = config();
+  current.source_limits.rs = 9;
+  current.source_limits.ts = 8;
+  current.debt[0].ceiling_lines = 14;
+
+  assert.deepEqual(
+    evaluateRepositoryHealthRatchet({
+      baselineConfig: config(),
+      currentConfig: current,
+    }),
+    [],
+  );
+
+  current.debt = [];
+  assert.deepEqual(
+    evaluateRepositoryHealthRatchet({
+      baselineConfig: config(),
+      currentConfig: current,
+    }),
+    [],
+  );
+});
+
+test("the baseline ratchet rejects removed or raised limits", () => {
+  const current = config();
+  delete current.source_limits.mjs;
+  current.source_limits.rs = 14;
+
+  assert.deepEqual(
+    evaluateRepositoryHealthRatchet({
+      baselineConfig: config(),
+      currentConfig: current,
+    }),
+    [
+      "source limit for .mjs was removed",
+      "source limit for .rs increased from 10 to 14",
+    ],
+  );
+});
+
+test("the baseline ratchet rejects raised ceilings and new debt exceptions", () => {
+  const current = config();
+  current.debt[0].ceiling_lines = 50_000;
+  current.debt.push({
+    path: "src/new-monolith.rs",
+    ceiling_lines: 50_000,
+  });
+
+  assert.deepEqual(
+    evaluateRepositoryHealthRatchet({
+      baselineConfig: config(),
+      currentConfig: current,
+    }),
+    [
+      "new repository-health debt exception is forbidden: src/new-monolith.rs",
+      "src/existing.rs debt ceiling increased from 15 to 50000",
+    ],
+  );
+});
+
+test("repository inspection rejects a self-raised ceiling against committed HEAD", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "birdcode-repository-health-test-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(path.join(root, "config"));
+  await mkdir(path.join(root, "src"));
+  await writeFile(
+    path.join(root, "config/repository-health.v1.json"),
+    `${JSON.stringify(config(), null, 2)}\n`,
+  );
+  await writeFile(path.join(root, "src/existing.rs"), "line\n".repeat(15));
+  runGit(root, ["init", "-q"]);
+  runGit(root, ["config", "user.email", "repository-health@example.invalid"]);
+  runGit(root, ["config", "user.name", "Repository Health Test"]);
+  runGit(root, ["add", "config/repository-health.v1.json", "src/existing.rs"]);
+  runGit(root, ["commit", "-qm", "baseline"]);
+
+  const raised = config();
+  raised.debt[0].ceiling_lines = 16;
+  await writeFile(
+    path.join(root, "config/repository-health.v1.json"),
+    `${JSON.stringify(raised, null, 2)}\n`,
+  );
+  await writeFile(path.join(root, "src/existing.rs"), "line\n".repeat(16));
+
+  const report = await inspectRepositoryHealth({ root });
+  assert.equal(report.healthy, false);
+  assert.deepEqual(report.violations, [
+    "src/existing.rs debt ceiling increased from 15 to 16",
+  ]);
 });

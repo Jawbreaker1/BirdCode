@@ -1,10 +1,24 @@
 {
   "schema_version": 1,
   "source_limits": {
+    "cjs": 800,
+    "css": 800,
+    "cts": 800,
+    "go": 1200,
+    "js": 800,
+    "jsx": 800,
+    "kt": 1200,
+    "kts": 1200,
     "mjs": 800,
+    "mts": 800,
+    "py": 800,
     "rs": 1500,
+    "sh": 400,
+    "swift": 1200,
     "ts": 800,
-    "tsx": 800
+    "tsx": 800,
+    "yaml": 500,
+    "yml": 500
   },
   "debt": [
     {

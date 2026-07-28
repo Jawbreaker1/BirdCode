@@ -87,6 +87,39 @@ export function validateRepositoryHealthConfig(config) {
   return config;
 }
 
+export function evaluateRepositoryHealthRatchet({ baselineConfig, currentConfig }) {
+  validateRepositoryHealthConfig(baselineConfig);
+  validateRepositoryHealthConfig(currentConfig);
+
+  const violations = [];
+  for (const [extension, baselineLimit] of Object.entries(baselineConfig.source_limits)) {
+    const currentLimit = currentConfig.source_limits[extension];
+    if (currentLimit === undefined) {
+      violations.push(`source limit for .${extension} was removed`);
+    } else if (currentLimit > baselineLimit) {
+      violations.push(
+        `source limit for .${extension} increased from ${baselineLimit} to ${currentLimit}`,
+      );
+    }
+  }
+
+  const baselineDebt = new Map(
+    baselineConfig.debt.map((entry) => [entry.path, entry.ceiling_lines]),
+  );
+  for (const entry of currentConfig.debt) {
+    const baselineCeiling = baselineDebt.get(entry.path);
+    if (baselineCeiling === undefined) {
+      violations.push(`new repository-health debt exception is forbidden: ${entry.path}`);
+    } else if (entry.ceiling_lines > baselineCeiling) {
+      violations.push(
+        `${entry.path} debt ceiling increased from ${baselineCeiling} to ${entry.ceiling_lines}`,
+      );
+    }
+  }
+
+  return violations.toSorted((left, right) => left.localeCompare(right));
+}
+
 export function countSourceLines(bytes) {
   if (!(bytes instanceof Uint8Array)) {
     throw new TypeError("source bytes must be a Uint8Array");
@@ -202,6 +235,51 @@ function runGit(root, arguments_) {
   return result.stdout;
 }
 
+function readConfigAtGitRef(root, configPath, baselineRef) {
+  if (baselineRef === null || baselineRef === "") {
+    return null;
+  }
+  if (
+    typeof baselineRef !== "string"
+    || baselineRef.startsWith("-")
+    || baselineRef.includes(":")
+    || baselineRef.includes("\\")
+    || baselineRef.length > 256
+  ) {
+    throw new TypeError("repository-health baseline ref is invalid");
+  }
+  requireRepositoryPath(configPath, "repository-health config path");
+  const commit = spawnSync("git", ["rev-parse", "--verify", `${baselineRef}^{commit}`], {
+    cwd: root,
+    encoding: null,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  if (commit.status !== 0) {
+    throw new Error(
+      `repository-health baseline ref does not resolve: ${baselineRef}`,
+    );
+  }
+  const objectName = `${baselineRef}:${configPath}`;
+  const existsAtBaseline = spawnSync("git", ["cat-file", "-e", objectName], {
+    cwd: root,
+    encoding: null,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  if (existsAtBaseline.status !== 0) {
+    return null;
+  }
+  try {
+    return validateRepositoryHealthConfig(
+      JSON.parse(runGit(root, ["show", objectName]).toString("utf8")),
+    );
+  } catch (error) {
+    throw new Error(
+      `repository-health baseline config is invalid at ${baselineRef}: ${error.message}`,
+      { cause: error },
+    );
+  }
+}
+
 export function resolveRepositoryRoot(cwd = process.cwd()) {
   return runGit(cwd, ["rev-parse", "--show-toplevel"]).toString("utf8").trim();
 }
@@ -221,10 +299,12 @@ async function exists(filePath) {
 export async function inspectRepositoryHealth({
   root,
   configPath = DEFAULT_CONFIG_PATH,
+  baselineRef = process.env.BIRDCODE_REPOSITORY_HEALTH_BASE_REF ?? "HEAD",
 }) {
   const config = validateRepositoryHealthConfig(
     JSON.parse(await readFile(path.join(root, configPath), "utf8")),
   );
+  const baselineConfig = readConfigAtGitRef(root, configPath, baselineRef);
   const trackedAndUntracked = runGit(
     root,
     ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
@@ -234,7 +314,12 @@ export async function inspectRepositoryHealth({
     .split("\0")
     .filter((candidate) => candidate.length > 0);
   const files = [];
-  const inspectionViolations = [];
+  const inspectionViolations = baselineConfig === null
+    ? []
+    : evaluateRepositoryHealthRatchet({
+        baselineConfig,
+        currentConfig: config,
+      });
 
   for (const repositoryPath of repositoryPaths) {
     const extension = path.posix.extname(repositoryPath).slice(1);
