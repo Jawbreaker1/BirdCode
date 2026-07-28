@@ -127,7 +127,7 @@
     },
     {
       "path": "crates/workspace/src/manager.rs",
-      "ceiling_lines": 2326
+      "ceiling_lines": 1596
     },
     {
       "path": "crates/workspace/src/recovery.rs",
