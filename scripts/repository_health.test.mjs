@@ -218,7 +218,7 @@ test("repository inspection rejects a self-raised ceiling against committed HEAD
   );
   await writeFile(path.join(root, "src/existing.rs"), "line\n".repeat(16));
 
-  const report = await inspectRepositoryHealth({ root });
+  const report = await inspectRepositoryHealth({ root, baselineRef: "HEAD" });
   assert.equal(report.healthy, false);
   assert.deepEqual(report.violations, [
     "src/existing.rs debt ceiling increased from 15 to 16",
