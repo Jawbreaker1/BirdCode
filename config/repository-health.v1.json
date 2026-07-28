@@ -111,7 +111,7 @@
     },
     {
       "path": "crates/store/src/lib.rs",
-      "ceiling_lines": 50211
+      "ceiling_lines": 49679
     },
     {
       "path": "crates/tooling/src/broker.rs",
