@@ -183,6 +183,7 @@ pub(crate) fn child_history(
                     'child_tool_observed',
                     'child_tool_outcome_unknown',
                     'child_tool_prepared_v2',
+                    'child_tool_dispatch_started_v2',
                     'child_tool_observed_v2',
                     'child_tool_outcome_unknown_v2',
                     'child_handoff_committed',

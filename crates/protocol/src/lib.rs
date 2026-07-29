@@ -24,12 +24,11 @@ pub use repository_tool_terminal_v2::*;
 
 /// Canonical request/response protocol version.
 ///
-/// Version 8 adds an inert, additive two-phase repository-snapshot recovery
-/// vocabulary. Protocol-v7 and recovery-v1 records remain decodable through
-/// their original closed DTOs; v8 introduces distinct cleanup authority,
-/// recovery-v2 closure, and workspace-finalization records rather than
-/// changing any v1 wire in place.
-pub const PROTOCOL_VERSION: u32 = 8;
+/// Version 9 adds an inert, additive child repository-tool dispatch-start
+/// fence. Protocol-v7 and v8 records remain decodable through their original
+/// closed DTOs; v9 introduces a distinct pre-effect record rather than
+/// changing any prior wire in place.
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Version of the durable child-reconnaissance contract nested inside v6
 /// records. This can evolve independently from the outer transport protocol.
@@ -9352,7 +9351,7 @@ mod tests {
 
     #[test]
     fn cleanup_v2_candidate_wire_is_additive_closed_and_not_an_event() {
-        assert_eq!(PROTOCOL_VERSION, 8);
+        assert_eq!(PROTOCOL_VERSION, 9);
         assert_eq!(WORKSPACE_SNAPSHOT_CLEANUP_JOURNAL_CONTRACT_VERSION, 1);
         assert_eq!(WORKSPACE_SNAPSHOT_CLEANUP_CANDIDATE_CONTRACT_VERSION, 1);
         assert_eq!(REPOSITORY_SNAPSHOT_CLEANUP_V2_CONTRACT_VERSION, 2);
@@ -10692,7 +10691,7 @@ mod tests {
         let input_wire_digest = sha256_hex_for_test(&input_wire_bytes);
         let compiler_corpus_digest = sha256_hex_for_test(&compiler_corpus_bytes);
         let manifest_digest = sha256_hex_for_test(&manifest_bytes);
-        assert_eq!(PROTOCOL_VERSION, 8);
+        assert_eq!(PROTOCOL_VERSION, 9);
         assert_eq!(
             CHILD_REPOSITORY_EXPLORER_V1_INTRODUCTION_PROTOCOL_VERSION,
             7
@@ -11440,8 +11439,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_v8_preserves_the_explicit_plan_acceptance_contract() {
-        assert_eq!(PROTOCOL_VERSION, 8);
+    fn protocol_v9_preserves_the_explicit_plan_acceptance_contract() {
+        assert_eq!(PROTOCOL_VERSION, 9);
         let spec = RunSpec {
             session_id: SessionId::new(),
             purpose: RunPurpose::PlanOnly,

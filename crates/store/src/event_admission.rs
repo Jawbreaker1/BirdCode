@@ -48,6 +48,7 @@ pub(crate) fn child_work_order_id(payload: &EventPayload) -> Option<ChildWorkOrd
         EventPayload::ChildToolObserved(observed) => Some(observed.binding.work_order_id),
         EventPayload::ChildToolOutcomeUnknown(unknown) => Some(unknown.binding.work_order_id),
         EventPayload::ChildToolPreparedV2(prepared) => Some(prepared.binding.work_order_id),
+        EventPayload::ChildToolDispatchStartedV2(started) => Some(started.binding.work_order_id),
         EventPayload::ChildToolObservedV2(observed) => Some(observed.binding.work_order_id),
         EventPayload::ChildToolOutcomeUnknownV2(unknown) => Some(unknown.binding.work_order_id),
         EventPayload::ChildHandoffCommitted(handoff) => Some(handoff.binding.work_order_id),
@@ -114,6 +115,7 @@ pub(crate) fn is_child_terminal_reconciliation(payload: &EventPayload) -> bool {
         | EventPayload::ChildModelInferencePreparedV2(_)
         | EventPayload::ChildToolPrepared(_)
         | EventPayload::ChildToolPreparedV2(_)
+        | EventPayload::ChildToolDispatchStartedV2(_)
         | EventPayload::ChildHandoffCommitted(_)
         | EventPayload::BackendEvent { .. }
         | EventPayload::ArtifactStored { .. } => false,
@@ -140,7 +142,8 @@ pub(crate) fn validate_generic_event(
         | EventPayload::RepositorySnapshotCleanupGrantedV1(_)
         | EventPayload::RepositorySnapshotCaptureAbandonedV2(_)
         | EventPayload::RepositorySnapshotReleaseReconciledV2(_)
-        | EventPayload::WorkspaceRecoveryFinalizedV1(_) => Err(StoreError::InvalidStateEvent),
+        | EventPayload::WorkspaceRecoveryFinalizedV1(_)
+        | EventPayload::ChildToolDispatchStartedV2(_) => Err(StoreError::InvalidStateEvent),
         EventPayload::RunStateChanged { from, to } => {
             validate_run_state_change(transaction, event, *from, *to, artifact_root)
         }
@@ -301,6 +304,7 @@ pub(crate) fn pending_cleanup_blocks_payload(payload: &EventPayload) -> bool {
             | EventPayload::ChildToolObserved(_)
             | EventPayload::ChildToolOutcomeUnknown(_)
             | EventPayload::ChildToolPreparedV2(_)
+            | EventPayload::ChildToolDispatchStartedV2(_)
             | EventPayload::ChildToolObservedV2(_)
             | EventPayload::ChildToolOutcomeUnknownV2(_)
             | EventPayload::ChildHandoffCommitted(_)

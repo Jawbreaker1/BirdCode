@@ -221,6 +221,9 @@ pub(crate) fn validate_typed_artifact_refs(
             cost.add(&prepared.prepared_receipt_artifact)?;
             cost.add(&prepared.action_binding.validated_action_artifact)?;
         }
+        EventPayload::ChildToolDispatchStartedV2(started) => {
+            cost.add(&started.action_binding.validated_action_artifact)?;
+        }
         EventPayload::ChildToolObservedV2(observed) => {
             cost.add(&observed.terminal_receipt_artifact)?;
             cost.add(&observed.action_binding.validated_action_artifact)?;
@@ -525,6 +528,10 @@ pub(crate) fn validate_typed_artifact_refs(
                 &prepared.action_binding.validated_action_artifact,
             )
         }
+        EventPayload::ChildToolDispatchStartedV2(started) => verify_artifact_at_root(
+            artifact_root,
+            &started.action_binding.validated_action_artifact,
+        ),
         EventPayload::ChildToolObservedV2(observed) => {
             verify_artifact_at_root(artifact_root, &observed.terminal_receipt_artifact)?;
             verify_artifact_at_root(
