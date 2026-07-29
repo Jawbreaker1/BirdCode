@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use syn::{Attribute, Fields, GenericArgument, Item, PathArguments, Type};
 
 const ROOT_TYPE: &str = "ChildRepositoryExplorerTurnInputV1";
+const MODEL_VISIBLE_SOURCE_PATHS: &[&str] = &["src/lib.rs", "src/repository_tool_terminal_v2.rs"];
 
 /// Exact outer event vocabulary visible to the frozen repository-explorer-v1
 /// compiler. New protocol event variants remain decodable by `EventPayload`,
@@ -327,37 +328,72 @@ fn fields_shape(
         .collect()
 }
 
+fn register_model_visible_type(
+    declarations: &mut BTreeMap<String, &'static str>,
+    name: &str,
+    source_path: &'static str,
+) {
+    if let Some(previous_path) = declarations.insert(name.to_owned(), source_path) {
+        panic!(
+            "duplicate model-visible Rust type `{name}` in `{previous_path}` and `{source_path}`"
+        );
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the build-time graph walk keeps discovery, closure checking, and canonical emission auditable in one pass"
 )]
 fn main() {
-    println!("cargo:rerun-if-changed=src/lib.rs");
+    for path in MODEL_VISIBLE_SOURCE_PATHS {
+        println!("cargo:rerun-if-changed={path}");
+    }
     println!("cargo:rerun-if-changed=build.rs");
 
-    let source = fs::read_to_string("src/lib.rs").expect("protocol source must be readable");
-    let syntax = syn::parse_file(&source).expect("protocol source must parse");
+    let syntax_files = MODEL_VISIBLE_SOURCE_PATHS
+        .iter()
+        .map(|path| {
+            let source = fs::read_to_string(path).expect("protocol source must be readable");
+            syn::parse_file(&source).expect("protocol source must parse")
+        })
+        .collect::<Vec<_>>();
     let mut structs = BTreeMap::new();
     let mut enums = BTreeMap::new();
     let mut aliases = BTreeMap::new();
     let mut uuid_types = BTreeSet::new();
-    for item in &syntax.items {
-        match item {
-            Item::Struct(value) => {
-                structs.insert(value.ident.to_string(), value);
+    let mut declarations = BTreeMap::new();
+    for (source_path, syntax) in MODEL_VISIBLE_SOURCE_PATHS
+        .iter()
+        .copied()
+        .zip(&syntax_files)
+    {
+        for item in &syntax.items {
+            match item {
+                Item::Struct(value) => {
+                    let name = value.ident.to_string();
+                    register_model_visible_type(&mut declarations, &name, source_path);
+                    structs.insert(name, value);
+                }
+                Item::Enum(value) => {
+                    let name = value.ident.to_string();
+                    register_model_visible_type(&mut declarations, &name, source_path);
+                    enums.insert(name, value);
+                }
+                Item::Type(value) => {
+                    let name = value.ident.to_string();
+                    register_model_visible_type(&mut declarations, &name, source_path);
+                    aliases.insert(name, value);
+                }
+                Item::Macro(value)
+                    if value.mac.path.is_ident("uuid_id")
+                        || value.mac.path.is_ident("uuid_v7_id") =>
+                {
+                    let name = value.mac.tokens.to_string().replace(' ', "");
+                    register_model_visible_type(&mut declarations, &name, source_path);
+                    uuid_types.insert(name);
+                }
+                _ => {}
             }
-            Item::Enum(value) => {
-                enums.insert(value.ident.to_string(), value);
-            }
-            Item::Type(value) => {
-                aliases.insert(value.ident.to_string(), value);
-            }
-            Item::Macro(value)
-                if value.mac.path.is_ident("uuid_id") || value.mac.path.is_ident("uuid_v7_id") =>
-            {
-                uuid_types.insert(value.mac.tokens.to_string().replace(' ', ""));
-            }
-            _ => {}
         }
     }
     let known_types = structs
