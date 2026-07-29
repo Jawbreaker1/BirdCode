@@ -7,7 +7,11 @@ use std::path::PathBuf;
 use syn::{Attribute, Fields, GenericArgument, Item, PathArguments, Type};
 
 const ROOT_TYPE: &str = "ChildRepositoryExplorerTurnInputV1";
-const MODEL_VISIBLE_SOURCE_PATHS: &[&str] = &["src/lib.rs", "src/repository_tool_terminal_v2.rs"];
+const MODEL_VISIBLE_SOURCE_PATHS: &[&str] = &[
+    "src/lib.rs",
+    "src/event_payload.rs",
+    "src/repository_tool_terminal_v2.rs",
+];
 
 /// Exact outer event vocabulary visible to the frozen repository-explorer-v1
 /// compiler. New protocol event variants remain decodable by `EventPayload`,
