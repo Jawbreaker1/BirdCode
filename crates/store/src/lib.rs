@@ -118,7 +118,10 @@ pub use parallel_recon_bootstrap::{
 pub(crate) use parallel_recon_bootstrap::{
     ParallelReconExactPairIssuanceOutcome, ParallelReconExactPairRecovery,
 };
-pub use store_child_agent_api::ChildRepositoryExplorerAttemptStartAuthority;
+pub use store_child_agent_api::{
+    ChildModelDispatchHandoff, ChildModelDispatchPreparationOutcome, ChildModelPreparedEvidence,
+    ChildRepositoryExplorerAttemptStartAuthority,
+};
 use store_child_agent_api::{child_execution_binding, reject_parallel_recon_public_attempt_start};
 use store_core_api::expected_run_deadline;
 
@@ -1757,25 +1760,21 @@ pub struct ChildRepositoryExplorerPreparationAuthority {
     pub prepared_at: RuntimeClockReading,
 }
 
-/// Exact provider-neutral material reconstructed from one committed child
-/// model Prepared-v2 boundary.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ChildRepositoryExplorerPreparedMaterial {
-    pub prepared_event: EventEnvelope,
-    pub turn_input: ChildRepositoryExplorerTurnInputV1,
-    pub prompt: ChildModelPromptDocument,
-    pub request: ChildModelRequestDocument,
+pub(crate) struct ChildRepositoryExplorerPreparedMaterial {
+    pub(crate) prepared_event: EventEnvelope,
+    pub(crate) turn_input: ChildRepositoryExplorerTurnInputV1,
+    pub(crate) prompt: ChildModelPromptDocument,
+    pub(crate) request: ChildModelRequestDocument,
     /// Equality-attested backend request ready for direct adapter dispatch.
     /// Daemon code must not remap protocol messages, schemas, or reasoning.
-    pub backend_request: StructuredInferenceRequest,
+    pub(crate) backend_request: StructuredInferenceRequest,
 }
 
-/// Idempotent result of deriving, retaining, and committing a child model
-/// preparation before the model effect is allowed to begin.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ChildRepositoryExplorerPreparationOutcome {
-    pub append: IdempotentAppendOutcome,
-    pub material: ChildRepositoryExplorerPreparedMaterial,
+pub(crate) struct ChildRepositoryExplorerPreparationOutcome {
+    pub(crate) append: IdempotentAppendOutcome,
+    pub(crate) material: ChildRepositoryExplorerPreparedMaterial,
 }
 
 /// Exact post-adapter evidence for one child repository-explorer model turn.
@@ -15924,13 +15923,13 @@ fn read_json<T: serde::de::DeserializeOwned>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     mod event_append_identity;
     mod filesystem_health_and_event_reads;
     mod historical_event_validation;
     mod legacy_causality_migrations;
     mod legacy_schema_migrations;
-    mod parallel_recon_bootstrap;
+    pub(crate) mod parallel_recon_bootstrap;
     mod projection_migrations;
     mod schema_and_artifact_integrity;
     mod semantic_producer_validation;
@@ -30528,8 +30527,8 @@ mod tests {
 
     pub(crate) struct ExactPairFixture {
         _directory: TempDir,
-        database: PathBuf,
-        artifacts: PathBuf,
+        pub(crate) database: PathBuf,
+        pub(crate) artifacts: PathBuf,
         pub(crate) store: Store,
         session: Session,
         pub(crate) run: Run,

@@ -57,6 +57,18 @@ fn appended_material(outcome: ParallelReconBootstrapOutcome) -> ParallelReconBoo
     material
 }
 
+pub(crate) fn bootstrap_default_exact_pair(
+    fixture: &mut ExactPairFixture,
+) -> ParallelReconBootstrapMaterial {
+    let authority = default_bootstrap_authority(fixture);
+    appended_material(
+        fixture
+            .store
+            .bootstrap_parallel_recon_exact_pair(fixture.run.id, authority)
+            .expect("default exact-pair bootstrap commits"),
+    )
+}
+
 #[test]
 fn fresh_bootstrap_commits_exact_contiguous_six_and_store_derived_starts() {
     let mut fixture = default_exact_pair_fixture();
