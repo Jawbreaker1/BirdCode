@@ -55,7 +55,7 @@
     },
     {
       "path": "apps/desktop/src-tauri/src/runtime.rs",
-      "ceiling_lines": 3816
+      "ceiling_lines": 3215
     },
     {
       "path": "crates/backends/src/lmstudio.rs",
