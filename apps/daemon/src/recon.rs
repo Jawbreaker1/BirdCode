@@ -231,7 +231,7 @@ impl ReconRuntimeClock {
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |previous| {
                 Some(elapsed.max(previous.saturating_add(1)))
             })
-            .unwrap_or(u64::MAX);
+            .map_or(u64::MAX, |previous| elapsed.max(previous.saturating_add(1)));
         RuntimeClockReading {
             runtime_instance_id,
             monotonic_nanos,
@@ -2571,7 +2571,7 @@ mod tests {
         let first = clock.reading(runtime);
         let second = clock.reading(runtime);
         assert_eq!(first.runtime_instance_id, second.runtime_instance_id);
-        assert!(second.monotonic_nanos > first.monotonic_nanos);
+        assert!(first.monotonic_nanos != 0 && second.monotonic_nanos > first.monotonic_nanos);
     }
 
     #[test]
