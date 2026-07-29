@@ -1,6 +1,6 @@
 //! Store-owned child model dispatch and recovery APIs.
 
-use super::{
+use super::super::{
     CHILD_REPOSITORY_EXPLORER_PREPARATION_PRODUCER, ChildPendingEffectProjection,
     ChildRecoveryState, ChildRepositoryExplorerPreparationAuthority,
     ChildRepositoryExplorerPreparedMaterial, ChildWorkOrderId, EventEnvelope, EventPayload,
@@ -9,7 +9,7 @@ use super::{
     child_repository_explorer_current_prepared_material, load_event_by_id,
 };
 #[cfg(test)]
-use super::{ChildRepositoryExplorerUnknownAuthority, EventId};
+use super::super::{ChildRepositoryExplorerUnknownAuthority, EventId};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ChildRepositoryExplorerPreparationOutcome {
@@ -417,5 +417,5 @@ impl Store {
 }
 
 #[cfg(test)]
-#[path = "tests/child_model_dispatch_authority.rs"]
+#[path = "../tests/child_model_dispatch_authority.rs"]
 mod tests;
