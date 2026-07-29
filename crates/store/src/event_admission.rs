@@ -29,6 +29,22 @@ pub(crate) enum EventAdmission {
     PublicAppend,
     ParallelReconBootstrap,
     ParallelReconClaimRefresh,
+    ChildToolDispatchStart,
+}
+
+pub(super) fn reject_public_store_owned_event(payload: &EventPayload) -> Result<(), StoreError> {
+    if matches!(
+        payload,
+        EventPayload::RepositorySnapshotCleanupGrantedV1(_)
+            | EventPayload::RepositorySnapshotCaptureAbandonedV2(_)
+            | EventPayload::RepositorySnapshotReleaseReconciledV2(_)
+            | EventPayload::WorkspaceRecoveryFinalizedV1(_)
+            | EventPayload::ChildToolDispatchStartedV2(_)
+    ) {
+        Err(StoreError::InvalidStateEvent)
+    } else {
+        Ok(())
+    }
 }
 
 pub(crate) fn child_work_order_id(payload: &EventPayload) -> Option<ChildWorkOrderId> {
@@ -142,8 +158,7 @@ pub(crate) fn validate_generic_event(
         | EventPayload::RepositorySnapshotCleanupGrantedV1(_)
         | EventPayload::RepositorySnapshotCaptureAbandonedV2(_)
         | EventPayload::RepositorySnapshotReleaseReconciledV2(_)
-        | EventPayload::WorkspaceRecoveryFinalizedV1(_)
-        | EventPayload::ChildToolDispatchStartedV2(_) => Err(StoreError::InvalidStateEvent),
+        | EventPayload::WorkspaceRecoveryFinalizedV1(_) => Err(StoreError::InvalidStateEvent),
         EventPayload::RunStateChanged { from, to } => {
             validate_run_state_change(transaction, event, *from, *to, artifact_root)
         }
@@ -259,6 +274,12 @@ pub(crate) fn validate_generic_event(
         | EventPayload::ChildToolOutcomeUnknownV2(_)
         | EventPayload::ChildHandoffCommitted(_)
         | EventPayload::ChildExecutionFinished(_) => {
+            validate_child_reconnaissance_event(transaction, event, artifact_root)
+        }
+        EventPayload::ChildToolDispatchStartedV2(_) => {
+            if admission != EventAdmission::ChildToolDispatchStart {
+                return Err(StoreError::InvalidStateEvent);
+            }
             validate_child_reconnaissance_event(transaction, event, artifact_root)
         }
         EventPayload::BackendEvent { .. } => {

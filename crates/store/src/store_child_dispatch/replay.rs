@@ -3,16 +3,18 @@
 use super::super::{
     ChildPreviousToolContextV1, ChildReplay, EventEnvelope, EventPayload, StoreError,
     binding_matches_order, child_attempt_clock_accepts, child_tool_call_seen,
-    latest_broker_epoch_before, require_child_event_provenance, validate_child_broker_sequence_v2,
+    latest_broker_epoch_before, latest_cancellation_generation_before, latest_claim_for_run_before,
+    require_child_event_provenance, validate_child_broker_sequence_v2,
     validate_child_cancellation_cause, validate_child_tool_observed_document_v2,
     validate_child_tool_prepared_document_v2, validate_child_tool_unknown_document_v2,
 };
+use super::CHILD_TOOL_DISPATCH_START_PRODUCER;
 use birdcode_protocol::{
-    ArtifactRef, ChildToolCallId, ChildToolObservedV2, ChildToolOperation,
-    ChildToolOutcomeUnknownV2, ChildToolPreparedV2, ChildValidatedActionBindingV1,
-    RepositoryBrokerClockV1, RepositoryBrokerInstanceId, RepositoryToolAuthorizationDecisionV1,
-    RepositoryToolAuthorizationDecisionV2, RepositoryToolObservedTerminalV2, RuntimeClockReading,
-    Sha256Digest,
+    ArtifactRef, ChildToolCallId, ChildToolDispatchStartedV2, ChildToolObservedV2,
+    ChildToolOperation, ChildToolOutcomeUnknownV2, ChildToolPreparedV2,
+    ChildValidatedActionBindingV1, RepositoryBrokerClockV1, RepositoryBrokerInstanceId,
+    RepositoryToolAuthorizationDecisionV1, RepositoryToolAuthorizationDecisionV2,
+    RepositoryToolObservedTerminalV2, RuntimeClockReading, Sha256Digest,
 };
 use rusqlite::Connection;
 use std::path::Path;
@@ -35,6 +37,8 @@ pub(crate) struct PendingChildTool {
     pub(crate) broker_prepared_at: RepositoryBrokerClockV1,
     pub(crate) prepared_receipt_digest: Sha256Digest,
     pub(crate) prepared_at: RuntimeClockReading,
+    pub(crate) broker_epoch_activation_event_id: Option<super::super::EventId>,
+    pub(crate) started_event_id: Option<super::super::EventId>,
 }
 
 pub(crate) fn replay_child_tool_prepared_v2(
@@ -86,7 +90,7 @@ pub(crate) fn replay_child_tool_prepared_v2(
     {
         return Err(StoreError::InvalidStateEvent);
     }
-    let pending = validate_child_tool_prepared_document_v2(
+    let mut pending = validate_child_tool_prepared_document_v2(
         connection,
         artifact_root,
         event,
@@ -101,6 +105,7 @@ pub(crate) fn replay_child_tool_prepared_v2(
     let EventPayload::RepositoryBrokerEpochActivatedV1(epoch) = epoch_event.payload else {
         return Err(StoreError::InvalidStateEvent);
     };
+    pending.broker_epoch_activation_event_id = Some(epoch_event.id);
     validate_child_broker_sequence_v2(attempt, prepared, &epoch.state)?;
     if attempt.last_broker_terminal_clock.is_some_and(|last| {
         last.broker_instance_id != pending.broker_prepared_at.broker_instance_id
@@ -116,6 +121,93 @@ pub(crate) fn replay_child_tool_prepared_v2(
     attempt.pending_tool = Some(pending);
     attempt.tail_event_id = event.id;
     attempt.tail_clock = prepared.prepared_at.clone();
+    Ok(())
+}
+
+pub(crate) fn replay_child_tool_dispatch_started_v2(
+    connection: &Connection,
+    replay: &mut Option<ChildReplay>,
+    event: &EventEnvelope,
+    started: &ChildToolDispatchStartedV2,
+) -> Result<(), StoreError> {
+    let replay = replay.as_mut().ok_or(StoreError::InvalidStateEvent)?;
+    if !binding_matches_order(&started.binding, &replay.issued)
+        || event.provenance.producer != CHILD_TOOL_DISPATCH_START_PRODUCER
+        || started.runtime_instance_id != replay.active_claim.runtime_instance_id
+        || started.started_at.runtime_instance_id != started.runtime_instance_id
+        || started.started_at.observed_at > event.occurred_at
+        || replay.issued.spec.run_deadline.is_some_and(|deadline| {
+            event.occurred_at > deadline || started.started_at.observed_at > deadline
+        })
+    {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    require_child_event_provenance(event, &replay.issued, None)?;
+    let run_id = event.run_id.ok_or(StoreError::InvalidStateEvent)?;
+    let claim_event =
+        latest_claim_for_run_before(connection, event.session_id, run_id, event.sequence)?
+            .ok_or(StoreError::InvalidStateEvent)?;
+    let EventPayload::RunClaimed(claim) = &claim_event.payload else {
+        return Err(StoreError::InvalidStateEvent);
+    };
+    let epoch_event =
+        latest_broker_epoch_before(connection, event.session_id, run_id, event.sequence)?
+            .ok_or(StoreError::InvalidStateEvent)?;
+    let EventPayload::RepositoryBrokerEpochActivatedV1(epoch) = &epoch_event.payload else {
+        return Err(StoreError::InvalidStateEvent);
+    };
+    let attempt = replay
+        .attempts
+        .last_mut()
+        .ok_or(StoreError::InvalidStateEvent)?;
+    let clock_accepted = child_attempt_clock_accepts(attempt, &started.started_at);
+    let pending = attempt
+        .pending_tool
+        .as_mut()
+        .ok_or(StoreError::InvalidStateEvent)?;
+    if started.binding.attempt_id != attempt.projection.attempt_id
+        || attempt.projection.outcome.is_some()
+        || attempt.pending_effect_requires_unknown
+        || pending.started_event_id.is_some()
+        || event.causal_parent != Some(attempt.tail_event_id)
+        || started.tool_call_id != pending.tool_call_id
+        || started.prepared_event_id != pending.prepared_event_id
+        || started.action_binding != pending.action_binding
+        || started.prepared_receipt_digest != pending.prepared_receipt_digest
+        || started.claim_event_id != replay.active_claim.event_id
+        || started.claim_id != replay.active_claim.claim_id
+        || started.claim_generation != replay.active_claim.generation
+        || started.cancellation_generation != replay.active_claim.cancellation_generation
+        || claim_event.id != started.claim_event_id
+        || claim.claim_id != started.claim_id
+        || claim.claim_generation != started.claim_generation
+        || claim.runtime_instance_id != started.runtime_instance_id
+        || claim.cancellation_generation != started.cancellation_generation
+        || claim.lease_expires_at <= event.occurred_at
+        || claim.lease_expires_at <= started.started_at.observed_at
+        || latest_cancellation_generation_before(
+            connection,
+            event.session_id,
+            run_id,
+            event.sequence,
+        )? != started.cancellation_generation
+        || pending.broker_epoch_activation_event_id
+            != Some(started.broker_epoch_activation_event_id)
+        || epoch_event.id != started.broker_epoch_activation_event_id
+        || epoch.state.active_broker_instance_id != started.broker_instance_id
+        || pending.broker_instance_id != started.broker_instance_id
+        || epoch
+            .state
+            .closed_broker_instance_ids
+            .contains(&started.broker_instance_id)
+        || epoch.activated_at.runtime_instance_id != started.runtime_instance_id
+        || !clock_accepted
+    {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    pending.started_event_id = Some(event.id);
+    attempt.tail_event_id = event.id;
+    attempt.tail_clock = started.started_at.clone();
     Ok(())
 }
 

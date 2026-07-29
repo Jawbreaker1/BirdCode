@@ -11,7 +11,7 @@ use super::{
     initialize_or_migrate_schema, load_event_by_id, new_event_from_envelope,
     new_run_acceptance_contract_is_valid, params, preallocate_event_envelope,
     preallocate_identified_event_envelope, prepare_private_directory, probe_artifact_root,
-    put_artifact_at, read_json, read_verified_artifact, reject_public_store_owned_cleanup_event,
+    put_artifact_at, read_json, read_verified_artifact, reject_public_store_owned_event,
     reject_shared_writable_directory, schema_version, secure_sqlite_family,
     set_private_directory_permissions, set_private_file_permissions, validate_current_schema,
     validate_real_directory,
@@ -226,7 +226,7 @@ impl Store {
     /// Returns an error when the session or run does not exist, serialization
     /// fails, the sequence overflows, or the transaction cannot commit.
     pub fn append_event(&mut self, event: NewEvent) -> Result<EventEnvelope, StoreError> {
-        reject_public_store_owned_cleanup_event(&event.payload)?;
+        reject_public_store_owned_event(&event.payload)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -260,7 +260,7 @@ impl Store {
         &mut self,
         identified: IdentifiedNewEvent,
     ) -> Result<IdempotentAppendOutcome, StoreError> {
-        reject_public_store_owned_cleanup_event(&identified.event.payload)?;
+        reject_public_store_owned_event(&identified.event.payload)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -306,7 +306,7 @@ impl Store {
         event: NewEvent,
         deadline: DateTime<Utc>,
     ) -> Result<DeadlineAppendOutcome, StoreError> {
-        reject_public_store_owned_cleanup_event(&event.payload)?;
+        reject_public_store_owned_event(&event.payload)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;

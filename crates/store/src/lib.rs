@@ -116,7 +116,8 @@ pub use cleanup_preflight::{
 #[cfg(test)]
 use event_admission::pending_cleanup_blocks_payload;
 use event_admission::{
-    EventAdmission, child_work_order_id, is_child_terminal_reconciliation, validate_generic_event,
+    EventAdmission, child_work_order_id, is_child_terminal_reconciliation,
+    reject_public_store_owned_event, validate_generic_event,
 };
 pub(crate) use parallel_recon_bootstrap::ParallelReconExactPairIssuedChild;
 pub use parallel_recon_bootstrap::{
@@ -135,8 +136,8 @@ use store_child_dispatch::{
     PendingChildTool, PendingChildToolAuthorization, child_claim_matches, child_history,
     child_recovery_state, durable_run_for_claim_refresh, load_child_replay,
     nonterminal_child_replays_for_claim_refresh, project_child_work_order,
-    replay_child_tool_observed_v2, replay_child_tool_prepared_v2, replay_child_tool_unknown_v2,
-    work_order_for_execution,
+    replay_child_tool_dispatch_started_v2, replay_child_tool_observed_v2,
+    replay_child_tool_prepared_v2, replay_child_tool_unknown_v2, work_order_for_execution,
 };
 use store_core_api::expected_run_deadline;
 use typed_artifact_validation::validate_typed_artifact_refs;
@@ -2372,7 +2373,7 @@ const MAX_CHILD_REPLAY_EVENTS: u32 = 1
     + PARALLEL_RECONNAISSANCE_V1_MAX_CLAIM_ADOPTIONS_PER_CHILD
     + CHILD_RECONNAISSANCE_MAX_ATTEMPTS
         * (3 + 2 * CHILD_RECONNAISSANCE_MAX_MODEL_CALLS_PER_ATTEMPT
-            + 2 * CHILD_RECONNAISSANCE_MAX_TOOL_CALLS_PER_ATTEMPT);
+            + 3 * CHILD_RECONNAISSANCE_MAX_TOOL_CALLS_PER_ATTEMPT);
 
 #[derive(Clone)]
 struct PendingChildModel {
@@ -7209,6 +7210,8 @@ fn validate_child_tool_prepared_document(
         broker_prepared_at: receipt.broker_prepared_at,
         prepared_receipt_digest: prepared.prepared_receipt_digest.clone(),
         prepared_at: prepared.prepared_at.clone(),
+        broker_epoch_activation_event_id: None,
+        started_event_id: None,
     })
 }
 
@@ -7348,6 +7351,8 @@ fn validate_child_tool_prepared_document_v2(
         broker_prepared_at: receipt.broker_prepared_at,
         prepared_receipt_digest: prepared.prepared_receipt_digest.clone(),
         prepared_at: prepared.prepared_at.clone(),
+        broker_epoch_activation_event_id: None,
+        started_event_id: None,
     })
 }
 
@@ -9421,6 +9426,9 @@ fn replay_child_event(
         }
         EventPayload::ChildToolPreparedV2(prepared) => {
             replay_child_tool_prepared_v2(connection, artifact_root, replay, event, prepared)
+        }
+        EventPayload::ChildToolDispatchStartedV2(started) => {
+            replay_child_tool_dispatch_started_v2(connection, replay, event, started)
         }
         EventPayload::ChildToolObserved(observed) => {
             let replay = replay.as_mut().ok_or(StoreError::InvalidStateEvent)?;
@@ -13738,20 +13746,6 @@ fn apply_exact_event_envelope(
         envelope,
         EventAdmission::PublicAppend,
     )
-}
-
-fn reject_public_store_owned_cleanup_event(payload: &EventPayload) -> Result<(), StoreError> {
-    if matches!(
-        payload,
-        EventPayload::RepositorySnapshotCleanupGrantedV1(_)
-            | EventPayload::RepositorySnapshotCaptureAbandonedV2(_)
-            | EventPayload::RepositorySnapshotReleaseReconciledV2(_)
-            | EventPayload::WorkspaceRecoveryFinalizedV1(_)
-    ) {
-        Err(StoreError::InvalidStateEvent)
-    } else {
-        Ok(())
-    }
 }
 
 fn apply_exact_event_envelope_with_admission(

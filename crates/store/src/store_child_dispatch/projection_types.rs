@@ -4,8 +4,13 @@ use super::super::{ArtifactRef, ChildExecutionOutcome, ChildToolCallId, EventEnv
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ChildPendingEffectProjection {
-    Model { prepared_event: EventEnvelope },
-    Tool { prepared_event: EventEnvelope },
+    Model {
+        prepared_event: EventEnvelope,
+    },
+    Tool {
+        prepared_event: EventEnvelope,
+        started_event: Option<Box<EventEnvelope>>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

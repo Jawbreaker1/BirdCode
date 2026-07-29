@@ -1,7 +1,8 @@
 use super::*;
 use crate::{
-    ChildModelDispatchPreparationOutcome, ChildRepositoryExplorerObservationAuthority,
-    ChildRepositoryExplorerObservedEvidence, ChildRepositoryExplorerPreparationAuthority,
+    ChildModelDispatchPreparationOutcome, ChildRecoveryState,
+    ChildRepositoryExplorerObservationAuthority, ChildRepositoryExplorerObservedEvidence,
+    ChildRepositoryExplorerPreparationAuthority, ChildToolDispatchRecovery,
     backend_instance_from_protocol_identity,
     tests::{
         ExactPairFixture, default_exact_pair_fixture,
@@ -26,7 +27,10 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
-fn clock(runtime_instance_id: RuntimeInstanceId, monotonic_nanos: u64) -> RuntimeClockReading {
+pub(crate) fn clock(
+    runtime_instance_id: RuntimeInstanceId,
+    monotonic_nanos: u64,
+) -> RuntimeClockReading {
     RuntimeClockReading {
         runtime_instance_id,
         monotonic_nanos,
@@ -34,7 +38,7 @@ fn clock(runtime_instance_id: RuntimeInstanceId, monotonic_nanos: u64) -> Runtim
     }
 }
 
-fn provenance() -> Provenance {
+pub(crate) fn provenance() -> Provenance {
     Provenance {
         producer: "child-tool-dispatch-fixture".to_owned(),
         backend: None,
@@ -153,7 +157,7 @@ impl RepositoryToolPreparer for MockPreparer {
     }
 }
 
-fn mock_lane(
+pub(crate) fn mock_lane(
     authority: RepositoryToolReceiptAuthorityV2,
     epoch: RepositoryBrokerEpochStateV1,
     corrupt_parameters: bool,
@@ -168,13 +172,13 @@ fn mock_lane(
     (lane, calls)
 }
 
-pub(super) struct ReadyToolFixture {
-    pub(super) fixture: ExactPairFixture,
-    pub(super) work_order_id: ChildWorkOrderId,
+pub(crate) struct ReadyToolFixture {
+    pub(crate) fixture: ExactPairFixture,
+    pub(crate) work_order_id: ChildWorkOrderId,
     other_work_order_id: ChildWorkOrderId,
-    tail_event_id: EventId,
-    pub(super) epoch: RepositoryBrokerEpochStateV1,
-    pub(super) receipt_authority: RepositoryToolReceiptAuthorityV2,
+    pub(crate) tail_event_id: EventId,
+    pub(crate) epoch: RepositoryBrokerEpochStateV1,
+    pub(crate) receipt_authority: RepositoryToolReceiptAuthorityV2,
 }
 
 fn model_response(
@@ -240,7 +244,7 @@ fn model_response(
     }
 }
 
-pub(super) fn ready_tool_fixture() -> ReadyToolFixture {
+pub(crate) fn ready_tool_fixture() -> ReadyToolFixture {
     let mut fixture = default_exact_pair_fixture();
     let bootstrap = bootstrap_default_exact_pair(&mut fixture);
     let child = bootstrap.children[0].projection.clone();
@@ -331,7 +335,7 @@ pub(super) fn ready_tool_fixture() -> ReadyToolFixture {
     }
 }
 
-pub(super) fn tool_authority(
+pub(crate) fn tool_authority(
     runtime_instance_id: RuntimeInstanceId,
 ) -> ChildRepositoryExplorerToolPreparationAuthority {
     ChildRepositoryExplorerToolPreparationAuthority {
@@ -422,7 +426,10 @@ fn fresh_prepare_issues_one_affine_handoff_while_replay_and_recovery_are_evidenc
                 ready.work_order_id,
             )
             .expect("pending tool recovery validates"),
-        Some(evidence.clone())
+        Some(ChildToolDispatchRecovery {
+            prepared: evidence.clone(),
+            started: None,
+        })
     );
     let reopened = Store::open(&ready.fixture.database, &ready.fixture.artifacts)
         .expect("recovery Store reopens");
@@ -433,7 +440,10 @@ fn fresh_prepare_issues_one_affine_handoff_while_replay_and_recovery_are_evidenc
                 ready.work_order_id,
             )
             .expect("reopened recovery validates"),
-        Some(evidence)
+        Some(ChildToolDispatchRecovery {
+            prepared: evidence,
+            started: None,
+        })
     );
 }
 
