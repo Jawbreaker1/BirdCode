@@ -6,8 +6,8 @@ use super::{
     ChildValidatedActionBindingV1, EventEnvelope, EventId, RepositoryBrokerClockV1,
     RepositoryBrokerInstanceId, RepositoryCleanupReportV2, RepositoryFilesystemEffectV1,
     RepositoryInterruptionBoundaryV1, RepositoryToolFailureV1, RepositoryToolPreparationDenialV2,
-    RepositoryToolResultV2, RepositoryUnretainedEvidenceDigestV1, RuntimeClockReading,
-    Sha256Digest,
+    RepositoryToolResultV2, RepositoryUnretainedEvidenceDigestV1, RunClaimId, RuntimeClockReading,
+    RuntimeInstanceId, Sha256Digest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -166,4 +166,27 @@ pub struct ChildToolOutcomeUnknownV2 {
     pub boundary: ChildToolUnknownBoundary,
     pub cancellation: Option<ChildCancellationCauseV1>,
     pub timing: RepositoryToolUnknownTimingV2,
+}
+
+/// Protocol-v9 durable pre-effect fence for one exact broker-v2 tool call.
+///
+/// The record repeats only query-critical identities from the authoritative
+/// Prepared receipt and active Store state. It proves that Store admitted one
+/// dispatch start; it is evidence, not independently executable authority.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildToolDispatchStartedV2 {
+    pub binding: ChildExecutionBinding,
+    pub tool_call_id: ChildToolCallId,
+    pub prepared_event_id: EventId,
+    pub action_binding: ChildValidatedActionBindingV1,
+    pub prepared_receipt_digest: Sha256Digest,
+    pub claim_event_id: EventId,
+    pub claim_id: RunClaimId,
+    pub claim_generation: u64,
+    pub runtime_instance_id: RuntimeInstanceId,
+    pub cancellation_generation: u64,
+    pub broker_epoch_activation_event_id: EventId,
+    pub broker_instance_id: RepositoryBrokerInstanceId,
+    pub started_at: RuntimeClockReading,
 }

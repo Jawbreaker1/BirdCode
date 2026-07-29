@@ -99,7 +99,7 @@
     },
     {
       "path": "crates/protocol/src/lib.rs",
-      "ceiling_lines": 14564
+      "ceiling_lines": 14563
     },
     {
       "path": "crates/runtime/src/runtime.rs",

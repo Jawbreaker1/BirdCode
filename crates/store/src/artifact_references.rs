@@ -265,6 +265,9 @@ pub(crate) fn child_event_references_artifact(
             &prepared.prepared_receipt_artifact == artifact
                 || &prepared.action_binding.validated_action_artifact == artifact
         }
+        EventPayload::ChildToolDispatchStartedV2(started) => {
+            &started.action_binding.validated_action_artifact == artifact
+        }
         EventPayload::ChildToolObservedV2(observed) => {
             &observed.terminal_receipt_artifact == artifact
                 || &observed.action_binding.validated_action_artifact == artifact

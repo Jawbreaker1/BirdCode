@@ -497,6 +497,15 @@ pub(super) fn project_event(event: &EventEnvelope) -> PlanEventView {
                 ),
             ),
         },
+        EventPayload::ChildToolDispatchStartedV2(started) => (
+            "child_tool_dispatch_started_v2",
+            "active",
+            "Explorer repository tool dispatch started",
+            format!(
+                "Call {} · broker {} · claim generation {}",
+                started.tool_call_id, started.broker_instance_id, started.claim_generation
+            ),
+        ),
         EventPayload::ChildToolObserved(observed) => (
             "child_tool_observed",
             "active",
