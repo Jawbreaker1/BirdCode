@@ -11,6 +11,53 @@ use super::super::{
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
+fn pending_tool_recovery_state(
+    connection: &Connection,
+    session_id: SessionId,
+    run_id: RunId,
+    attempt: &ReplayedChildAttempt,
+    pending: &super::replay::PendingChildTool,
+) -> Result<ChildRecoveryState, StoreError> {
+    let prepared_event =
+        stored_event_for_run(connection, session_id, run_id, pending.prepared_event_id)?;
+    let exact = match &prepared_event.payload {
+        EventPayload::ChildToolPrepared(prepared) => {
+            prepared.binding.attempt_id == attempt.projection.attempt_id
+                && prepared.tool_call_id == pending.tool_call_id
+        }
+        EventPayload::ChildToolPreparedV2(prepared) => {
+            prepared.binding.attempt_id == attempt.projection.attempt_id
+                && prepared.tool_call_id == pending.tool_call_id
+        }
+        _ => false,
+    };
+    if !exact {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    let started_event = pending
+        .started_event_id
+        .map(|event_id| stored_event_for_run(connection, session_id, run_id, event_id))
+        .transpose()?
+        .map(Box::new);
+    if started_event.as_ref().is_some_and(|event| {
+        !matches!(
+            &event.payload,
+            EventPayload::ChildToolDispatchStartedV2(started)
+                if started.binding.attempt_id == attempt.projection.attempt_id
+                    && started.tool_call_id == pending.tool_call_id
+                    && started.prepared_event_id == pending.prepared_event_id
+        )
+    }) {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    Ok(ChildRecoveryState::PendingEffect(
+        ChildPendingEffectProjection::Tool {
+            prepared_event,
+            started_event,
+        },
+    ))
+}
+
 pub(crate) fn child_recovery_state(
     connection: &Connection,
     session_id: SessionId,
@@ -75,27 +122,7 @@ pub(crate) fn child_recovery_state(
         ));
     }
     if let Some(pending) = &attempt.pending_tool {
-        let event =
-            stored_event_for_run(connection, session_id, run_id, pending.prepared_event_id)?;
-        let exact = match &event.payload {
-            EventPayload::ChildToolPrepared(prepared) => {
-                prepared.binding.attempt_id == attempt.projection.attempt_id
-                    && prepared.tool_call_id == pending.tool_call_id
-            }
-            EventPayload::ChildToolPreparedV2(prepared) => {
-                prepared.binding.attempt_id == attempt.projection.attempt_id
-                    && prepared.tool_call_id == pending.tool_call_id
-            }
-            _ => false,
-        };
-        if !exact {
-            return Err(StoreError::InvalidStateEvent);
-        }
-        return Ok(ChildRecoveryState::PendingEffect(
-            ChildPendingEffectProjection::Tool {
-                prepared_event: event,
-            },
-        ));
+        return pending_tool_recovery_state(connection, session_id, run_id, attempt, pending);
     }
     if attempt.projection.handoff_event_id.is_some()
         || attempt.required_model_terminal_retry.is_some()

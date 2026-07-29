@@ -411,7 +411,7 @@ fn child_replay_bounds_reject_the_prospective_overflow_before_insertion() {
         1 + PARALLEL_RECONNAISSANCE_V1_MAX_CLAIM_ADOPTIONS_PER_CHILD
             + CHILD_RECONNAISSANCE_MAX_ATTEMPTS
                 * (3 + 2 * CHILD_RECONNAISSANCE_MAX_MODEL_CALLS_PER_ATTEMPT
-                    + 2 * CHILD_RECONNAISSANCE_MAX_TOOL_CALLS_PER_ATTEMPT)
+                    + 3 * CHILD_RECONNAISSANCE_MAX_TOOL_CALLS_PER_ATTEMPT)
     );
     assert!(
         validate_child_replay_admission(MAX_CHILD_REPLAY_EVENTS as usize - 1, 0, 0, None,).is_ok()

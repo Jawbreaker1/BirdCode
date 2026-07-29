@@ -1,15 +1,14 @@
 //! Store-owned child repository-tool preparation and dispatch authority.
 
 use super::super::{
-    CHILD_RECONNAISSANCE_CONTRACT_VERSION, CHILD_VALIDATED_ACTION_MEDIA_TYPE, ChildRecoveryState,
-    ChildToolCallId, ChildValidatedActionBindingV1, ChildValidatedActionDocumentV1,
-    ChildWorkOrderId, EventEnvelope, EventId, EventPayload, IdentifiedNewEvent,
-    MAX_SQLITE_INTEGER_U64, NewEvent, Provenance, RunId, Store, StoreError,
-    apply_exact_event_envelope, artifact_digest, child_attempt_clock_accepts,
+    CHILD_RECONNAISSANCE_CONTRACT_VERSION, CHILD_VALIDATED_ACTION_MEDIA_TYPE, ChildToolCallId,
+    ChildValidatedActionBindingV1, ChildValidatedActionDocumentV1, ChildWorkOrderId, EventEnvelope,
+    EventId, EventPayload, IdentifiedNewEvent, MAX_SQLITE_INTEGER_U64, NewEvent, Provenance, RunId,
+    Store, StoreError, apply_exact_event_envelope, artifact_digest, child_attempt_clock_accepts,
     child_execution_binding, current_run_state, decode_canonical_event,
     durable_run_for_claim_refresh, latest_broker_epoch_before, latest_cancellation_generation,
     latest_claim_for_run, load_child_replay, load_event_by_id,
-    preallocate_identified_event_envelope, project_child_work_order, put_artifact_at,
+    preallocate_identified_event_envelope, put_artifact_at,
     validate_child_action_against_authority,
 };
 use birdcode_protocol::{
@@ -51,7 +50,7 @@ pub struct ChildToolPreparedEvidence {
     pub prepared_event: EventEnvelope,
 }
 
-trait RepositoryToolPreparer: Send + Sync {
+pub(super) trait RepositoryToolPreparer: Send + Sync {
     fn authority(&self) -> &RepositoryToolReceiptAuthorityV2;
     fn epoch(&self) -> &RepositoryBrokerEpochStateV1;
     fn prepare(
@@ -78,14 +77,14 @@ impl RepositoryToolPreparer for RepositoryToolBroker {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ToolLaneState {
+pub(super) enum ToolLaneState {
     Active,
     Tainted,
 }
 
-struct ChildRepositoryToolLaneInner {
-    broker: Box<dyn RepositoryToolPreparer>,
-    publication: Mutex<ToolLaneState>,
+pub(super) struct ChildRepositoryToolLaneInner {
+    pub(super) broker: Box<dyn RepositoryToolPreparer>,
+    pub(super) publication: Mutex<ToolLaneState>,
 }
 
 /// Shared broker-epoch preparation lane.
@@ -97,7 +96,7 @@ struct ChildRepositoryToolLaneInner {
 /// parallel.
 #[derive(Clone)]
 pub struct ChildRepositoryToolLane {
-    inner: Arc<ChildRepositoryToolLaneInner>,
+    pub(super) inner: Arc<ChildRepositoryToolLaneInner>,
 }
 
 impl ChildRepositoryToolLane {
@@ -130,17 +129,18 @@ impl ChildRepositoryToolLane {
     }
 }
 
-struct ChildToolDispatchMaterial {
-    prepared_event: EventEnvelope,
-    prepared: PreparedRepositoryToolCallV2,
+pub(super) struct ChildToolDispatchMaterial {
+    pub(super) prepared_event: EventEnvelope,
+    pub(super) prepared: PreparedRepositoryToolCallV2,
+    pub(super) lane: ChildRepositoryToolLane,
 }
 
-/// Fresh, affine authority for one Store-committed child tool call.
+/// Fresh, affine authority for one Store-committed child tool dispatch start.
 ///
 /// The raw cloneable broker bundle remains private. This handoff deliberately
-/// has no execution method until the Store terminal contracts generation-fence
-/// closed epochs and agree with Tooling's active-epoch interruption semantics.
-/// Exact replay and recovery never recreate this authority.
+/// has no execution method and can only be consumed by Store's durable
+/// dispatch-start admission. Exact replay and recovery never recreate this
+/// authority.
 ///
 /// ```compile_fail
 /// use birdcode_store::ChildToolDispatchHandoff;
@@ -169,16 +169,30 @@ struct ChildToolDispatchMaterial {
 ///
 /// let _decoded: ChildToolDispatchHandoff = serde_json::from_str("{}").unwrap();
 /// ```
-#[must_use = "a fresh child tool dispatch handoff must be consumed by the guarded execution slice"]
+#[must_use = "a fresh child tool dispatch handoff must be consumed by durable dispatch-start admission"]
 pub struct ChildToolDispatchHandoff {
-    material: Box<ChildToolDispatchMaterial>,
+    pub(super) material: Box<ChildToolDispatchMaterial>,
 }
 
 const _: () =
     assert!(std::mem::size_of::<ChildToolDispatchHandoff>() == std::mem::size_of::<usize>());
 
 impl ChildToolDispatchHandoff {
-    /// Returns the exact durable boundary that authorizes future execution.
+    fn from_prepared(
+        prepared_event: EventEnvelope,
+        prepared: PreparedRepositoryToolCallV2,
+        lane: ChildRepositoryToolLane,
+    ) -> Self {
+        Self {
+            material: Box::new(ChildToolDispatchMaterial {
+                prepared_event,
+                prepared,
+                lane,
+            }),
+        }
+    }
+
+    /// Returns the exact durable Prepared boundary consumed by dispatch-start admission.
     #[must_use]
     pub const fn prepared_event(&self) -> &EventEnvelope {
         &self.material.prepared_event
@@ -195,8 +209,8 @@ impl ChildToolDispatchHandoff {
     }
 }
 
-/// Closed preparation result separating fresh effect authority from replay.
-#[must_use = "child tool preparation must dispatch once or reconcile durable evidence"]
+/// Closed preparation result separating fresh dispatch-start authority from replay.
+#[must_use = "child tool preparation must start once or reconcile durable evidence"]
 pub enum ChildToolDispatchPreparationOutcome {
     Appended {
         evidence: ChildToolPreparedEvidence,
@@ -743,48 +757,18 @@ impl Store {
         };
         Ok(ChildToolDispatchPreparationOutcome::Appended {
             evidence,
-            dispatch: ChildToolDispatchHandoff {
-                material: Box::new(ChildToolDispatchMaterial {
-                    prepared_event,
-                    prepared,
-                }),
-            },
+            dispatch: ChildToolDispatchHandoff::from_prepared(
+                prepared_event,
+                prepared,
+                lane.clone(),
+            ),
         })
-    }
-
-    /// Returns evidence for the current pending broker-v2 tool effect.
-    ///
-    /// Recovery never recreates broker execution authority.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for contradictory replay or retained artifact drift.
-    pub fn recover_child_repository_explorer_tool_dispatch(
-        &self,
-        run_id: RunId,
-        work_order_id: ChildWorkOrderId,
-    ) -> Result<Option<ChildToolPreparedEvidence>, StoreError> {
-        let Some(projection) =
-            project_child_work_order(&self.connection, &self.artifact_root, run_id, work_order_id)?
-        else {
-            return Ok(None);
-        };
-        let ChildRecoveryState::PendingEffect(super::super::ChildPendingEffectProjection::Tool {
-            prepared_event,
-        }) = projection.recovery
-        else {
-            return Ok(None);
-        };
-        if !matches!(prepared_event.payload, EventPayload::ChildToolPreparedV2(_)) {
-            return Ok(None);
-        }
-        Ok(Some(ChildToolPreparedEvidence { prepared_event }))
     }
 }
 
 #[cfg(test)]
 #[path = "../tests/child_tool_dispatch_authority.rs"]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 #[path = "../tests/child_tool_dispatch_real_broker.rs"]
