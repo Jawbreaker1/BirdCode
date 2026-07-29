@@ -1,10 +1,10 @@
 //! Durable run discovery, admission, scheduling, and task publication.
 
+use super::run_execution::{purpose_has_executable_supervisor, supervise_run_with_registry};
 use super::{
     BackendRegistry, DiscoveryCommand, ModelBackend, ModelCallScheduler, RunCompletion, RunId,
     RunSupervisorConfig, RunSupervisorEvent, RuntimePaths, SubmitCommand, SupervisorRunError,
-    discover_for_protocol, purpose_has_executable_supervisor, store_phase,
-    supervise_run_with_registry,
+    discover_for_protocol, store_phase,
 };
 use birdcode_store::RunRecoveryPage;
 use std::collections::{BTreeMap, HashMap, VecDeque};
