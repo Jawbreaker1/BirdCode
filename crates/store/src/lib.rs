@@ -24,6 +24,7 @@ mod root_planning_v1_state;
 mod schema_support;
 mod schema_validation;
 mod store_child_agent_api;
+mod store_child_model_dispatch;
 mod store_core_api;
 mod store_parallel_recon_api;
 mod store_planner_v2_api;
@@ -118,11 +119,11 @@ pub use parallel_recon_bootstrap::{
 pub(crate) use parallel_recon_bootstrap::{
     ParallelReconExactPairIssuanceOutcome, ParallelReconExactPairRecovery,
 };
-pub use store_child_agent_api::{
-    ChildModelDispatchHandoff, ChildModelDispatchPreparationOutcome, ChildModelPreparedEvidence,
-    ChildRepositoryExplorerAttemptStartAuthority,
-};
+pub use store_child_agent_api::ChildRepositoryExplorerAttemptStartAuthority;
 use store_child_agent_api::{child_execution_binding, reject_parallel_recon_public_attempt_start};
+pub use store_child_model_dispatch::{
+    ChildModelDispatchHandoff, ChildModelDispatchPreparationOutcome, ChildModelPreparedEvidence,
+};
 use store_core_api::expected_run_deadline;
 
 use migration_coordinator::initialize_or_migrate_schema;
@@ -1769,12 +1770,6 @@ pub(crate) struct ChildRepositoryExplorerPreparedMaterial {
     /// Equality-attested backend request ready for direct adapter dispatch.
     /// Daemon code must not remap protocol messages, schemas, or reasoning.
     pub(crate) backend_request: StructuredInferenceRequest,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ChildRepositoryExplorerPreparationOutcome {
-    pub(crate) append: IdempotentAppendOutcome,
-    pub(crate) material: ChildRepositoryExplorerPreparedMaterial,
 }
 
 /// Exact post-adapter evidence for one child repository-explorer model turn.
