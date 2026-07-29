@@ -25,6 +25,7 @@ mod schema_support;
 mod schema_validation;
 mod store_child_agent_api;
 mod store_child_model_dispatch;
+mod store_child_projection_types;
 mod store_core_api;
 mod store_parallel_recon_api;
 mod store_planner_v2_api;
@@ -124,6 +125,7 @@ use store_child_agent_api::{child_execution_binding, reject_parallel_recon_publi
 pub use store_child_model_dispatch::{
     ChildModelDispatchHandoff, ChildModelDispatchPreparationOutcome, ChildModelPreparedEvidence,
 };
+pub use store_child_projection_types::ChildSuppliedResultProjection;
 use store_core_api::expected_run_deadline;
 
 use migration_coordinator::initialize_or_migrate_schema;
@@ -1702,14 +1704,6 @@ fn contiguous_adoption_leases_cover(
 pub enum ChildPendingEffectProjection {
     Model { prepared_event: EventEnvelope },
     Tool { prepared_event: EventEnvelope },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ChildSuppliedResultProjection {
-    pub tool_call_id: ChildToolCallId,
-    pub supplied_on_model_call_ordinal: u32,
-    pub supplied_on_prepared_event_id: EventId,
-    pub result_artifact: ArtifactRef,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
