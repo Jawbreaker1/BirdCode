@@ -3,22 +3,126 @@
 use super::{
     CHILD_MODEL_EVIDENCE_MEDIA_TYPE, CHILD_MODEL_UNKNOWN_MEDIA_TYPE,
     CHILD_REPOSITORY_EXPLORER_OBSERVATION_PRODUCER, CHILD_REPOSITORY_EXPLORER_PREPARATION_PRODUCER,
-    CHILD_REPOSITORY_EXPLORER_UNKNOWN_PRODUCER, ChildAttemptId, ChildExecutionId,
-    ChildExecutionOverlap, ChildPendingEffectProjection, ChildRecoveryState,
+    CHILD_REPOSITORY_EXPLORER_UNKNOWN_PRODUCER, ChildAttemptId, ChildExecutionBinding,
+    ChildExecutionId, ChildExecutionOverlap, ChildPendingEffectProjection, ChildRecoveryState,
     ChildRepositoryExplorerObservationAuthority, ChildRepositoryExplorerPreparationAuthority,
     ChildRepositoryExplorerPreparationOutcome, ChildRepositoryExplorerPreparedMaterial,
     ChildRepositoryExplorerTerminalOutcome, ChildRepositoryExplorerUnknownAuthority,
-    ChildWorkOrderId, ChildWorkOrderProjection, EventId, EventPayload, IdempotentAppendOutcome,
-    IdentifiedNewEvent, MAX_SQLITE_INTEGER_U64, NewEvent, Provenance, RunId, Store, StoreError,
-    append_outcome_event, build_child_repository_explorer_prepared_event,
-    child_model_observed_payload, child_model_terminal_context, child_model_unknown_payload,
+    ChildWorkOrderId, ChildWorkOrderProjection, EventAdmission, EventEnvelope, EventId,
+    EventPayload, IdempotentAppendOutcome, IdentifiedNewEvent, MAX_SQLITE_INTEGER_U64, NewEvent,
+    Provenance, RunId, RunPurpose, SessionId, Store, StoreError, append_outcome_event,
+    build_child_repository_explorer_prepared_event, child_model_observed_payload,
+    child_model_terminal_context, child_model_unknown_payload,
     child_repository_explorer_committed_material,
     child_repository_explorer_current_prepared_material, derive_child_model_evidence_record,
-    derive_child_model_unknown_record, derive_child_overlap, load_event_by_id,
-    project_child_work_order, put_json_artifact,
+    derive_child_model_unknown_record, derive_child_overlap, durable_run_for_claim_refresh,
+    load_event_by_id, project_child_work_order, put_json_artifact,
     validate_existing_child_repository_explorer_observation,
     validate_existing_child_repository_explorer_unknown, work_order_for_execution,
 };
+#[cfg(test)]
+use super::{
+    apply_exact_event_envelope_with_admission, load_child_replay,
+    preallocate_identified_event_envelope,
+};
+use rusqlite::Connection;
+#[cfg(test)]
+use rusqlite::TransactionBehavior;
+
+const CHILD_REPOSITORY_EXPLORER_ATTEMPT_START_PRODUCER: &str =
+    "birdcode-store-child-repository-explorer-attempt-start-v1";
+
+/// Runtime-owned identities and clock authority for starting one bounded
+/// repository-explorer attempt. Store derives the complete execution binding,
+/// retry ancestry, actor, backend/model identity, and provenance.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChildRepositoryExplorerAttemptStartAuthority {
+    pub event_id: EventId,
+    pub attempt_id: ChildAttemptId,
+    pub local_plan_id: birdcode_protocol::ChildLocalPlanId,
+    pub started_at: birdcode_protocol::RuntimeClockReading,
+}
+
+pub(super) fn child_execution_binding(
+    replay: &super::ChildReplay,
+    attempt: &super::ReplayedChildAttempt,
+) -> ChildExecutionBinding {
+    ChildExecutionBinding {
+        work_order_id: replay.issued.spec.work_order_id,
+        execution_id: replay.issued.spec.execution_id,
+        attempt_id: attempt.projection.attempt_id,
+        child_actor_id: replay.issued.spec.child_actor_id,
+        context_id: replay.issued.spec.context_id,
+        work_order_digest: replay.issued.work_order_digest.clone(),
+        context_manifest_digest: replay.issued.context_manifest_digest.clone(),
+    }
+}
+
+pub(super) fn reject_parallel_recon_public_attempt_start(
+    connection: &Connection,
+    event: &EventEnvelope,
+    admission: EventAdmission,
+) -> Result<(), StoreError> {
+    let run_id = event.run_id.ok_or(StoreError::InvalidStateEvent)?;
+    let run = durable_run_for_claim_refresh(connection, run_id)?;
+    if run.spec.purpose == RunPurpose::ParallelRepositoryReconnaissanceV1
+        && admission != EventAdmission::ParallelReconBootstrap
+    {
+        Err(StoreError::InvalidStateEvent)
+    } else {
+        Ok(())
+    }
+}
+
+pub(super) fn child_repository_explorer_attempt_start_event(
+    session_id: SessionId,
+    run_id: RunId,
+    replay: &super::ChildReplay,
+    attempt_index: usize,
+    attempt_id: ChildAttemptId,
+    local_plan_id: birdcode_protocol::ChildLocalPlanId,
+    started_at: birdcode_protocol::RuntimeClockReading,
+) -> Result<NewEvent, StoreError> {
+    if attempt_index > replay.attempts.len() {
+        return Err(StoreError::InvalidStateEvent);
+    }
+    let (causal_parent, parent_attempt_id) = if attempt_index == 0 {
+        (replay.pre_attempt_tail_event_id, None)
+    } else {
+        let previous = replay
+            .attempts
+            .get(attempt_index - 1)
+            .ok_or(StoreError::InvalidStateEvent)?;
+        (previous.tail_event_id, Some(previous.projection.attempt_id))
+    };
+    Ok(NewEvent {
+        session_id,
+        run_id: Some(run_id),
+        actor_id: replay.issued.spec.child_event_actor_id,
+        causal_parent: Some(causal_parent),
+        provenance: Provenance {
+            producer: CHILD_REPOSITORY_EXPLORER_ATTEMPT_START_PRODUCER.to_owned(),
+            backend: Some(replay.issued.spec.backend.clone()),
+            raw_artifact: None,
+        },
+        payload: EventPayload::ChildExecutionStarted(birdcode_protocol::ChildExecutionStarted {
+            binding: ChildExecutionBinding {
+                work_order_id: replay.issued.spec.work_order_id,
+                execution_id: replay.issued.spec.execution_id,
+                attempt_id,
+                child_actor_id: replay.issued.spec.child_actor_id,
+                context_id: replay.issued.spec.context_id,
+                work_order_digest: replay.issued.work_order_digest.clone(),
+                context_manifest_digest: replay.issued.context_manifest_digest.clone(),
+            },
+            parent_attempt_id,
+            local_plan_id,
+            backend_model: replay.issued.spec.resolved_model.clone(),
+            model_lineage: replay.issued.spec.model_lineage.clone(),
+            started_at,
+        }),
+    })
+}
 
 impl Store {
     /// Replays the bounded typed history for one child work order.
@@ -37,6 +141,42 @@ impl Store {
         work_order_id: ChildWorkOrderId,
     ) -> Result<Option<ChildWorkOrderProjection>, StoreError> {
         project_child_work_order(&self.connection, &self.artifact_root, run_id, work_order_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_child_repository_explorer_attempt(
+        &mut self,
+        run_id: RunId,
+        work_order_id: ChildWorkOrderId,
+        authority: ChildRepositoryExplorerAttemptStartAuthority,
+    ) -> Result<EventEnvelope, StoreError> {
+        let artifact_root = self.artifact_root.clone();
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let run = durable_run_for_claim_refresh(&transaction, run_id)?;
+        let (replay, _, _, _) =
+            load_child_replay(&transaction, &artifact_root, run_id, work_order_id)?;
+        let replay = replay.ok_or(StoreError::InvalidStateEvent)?;
+        let event = child_repository_explorer_attempt_start_event(
+            run.spec.session_id,
+            run_id,
+            &replay,
+            replay.attempts.len(),
+            authority.attempt_id,
+            authority.local_plan_id,
+            authority.started_at,
+        )?;
+        let envelope =
+            preallocate_identified_event_envelope(&transaction, authority.event_id, event)?;
+        apply_exact_event_envelope_with_admission(
+            &transaction,
+            &artifact_root,
+            &envelope,
+            EventAdmission::ParallelReconBootstrap,
+        )?;
+        transaction.commit()?;
+        Ok(envelope)
     }
 
     /// Derives the complete repository-explorer turn from authoritative child

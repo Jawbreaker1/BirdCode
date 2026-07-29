@@ -5,6 +5,9 @@ mod cleanup_v2;
 mod inference_identity;
 mod legacy_migration;
 mod migration_coordinator;
+mod parallel_recon_bootstrap;
+#[cfg(test)]
+mod parallel_recon_legacy_test_api;
 mod planner_v2_decision;
 mod planner_v2_evidence;
 mod planner_v2_preparation;
@@ -105,6 +108,19 @@ pub use cleanup_preflight::{
     RepositorySnapshotCleanupPreflightNoAuthorityV1, RepositorySnapshotCleanupPreflightOutcomeV1,
     RepositorySnapshotCleanupPreflightPermitV1, RepositorySnapshotCleanupPreflightViewV1,
 };
+pub(crate) use parallel_recon_bootstrap::ParallelReconExactPairIssuedChild;
+pub use parallel_recon_bootstrap::{
+    ParallelReconBootstrapAuthority, ParallelReconBootstrapMaterial, ParallelReconBootstrapOutcome,
+    ParallelReconBootstrapRecovery, ParallelReconBootstrappedChild,
+    ParallelReconExactPairChildIdentityAuthority, ParallelReconExactPairIssuanceAuthority,
+};
+#[cfg(test)]
+pub(crate) use parallel_recon_bootstrap::{
+    ParallelReconExactPairIssuanceOutcome, ParallelReconExactPairRecovery,
+};
+pub use store_child_agent_api::ChildRepositoryExplorerAttemptStartAuthority;
+use store_child_agent_api::{child_execution_binding, reject_parallel_recon_public_attempt_start};
+use store_core_api::expected_run_deadline;
 
 use migration_coordinator::initialize_or_migrate_schema;
 use projection_validation::{validate_event_identity_projection, validate_run_state_projection};
@@ -153,26 +169,25 @@ use birdcode_protocol::{
     CHILD_RECONNAISSANCE_MAX_UNRESOLVED_QUESTIONS, CHILD_TOOL_EVIDENCE_MEDIA_TYPE,
     CHILD_TOOL_UNKNOWN_MEDIA_TYPE, CHILD_VALIDATED_ACTION_MEDIA_TYPE, CHILD_WORK_ORDER_MEDIA_TYPE,
     ChildActionV1, ChildActorId, ChildAttemptId, ChildCancellationCauseV1,
-    ChildClaimAdoptionKindV1, ChildContextId, ChildContextManifest, ChildDelegationAuthorizationId,
-    ChildDelegationAuthorized, ChildExecutionBinding, ChildExecutionFailureCauseV1,
-    ChildExecutionFailureEvidenceV1, ChildExecutionFailureKind, ChildExecutionId,
-    ChildExecutionInterval, ChildExecutionOutcome, ChildExecutionOverlap, ChildHandoffDocument,
-    ChildHandoffStatus, ChildLocalPlanBindingV1, ChildLocalPlanSnapshotV1,
-    ChildLocalPlanStepStatusV1, ChildModelCallId, ChildModelCompleteEvidence,
-    ChildModelContextInventoryV1, ChildModelEvidenceRecord, ChildModelInferenceObservation,
-    ChildModelInferenceOutcomeUnknown, ChildModelInferencePrepared, ChildModelInferencePreparedV2,
-    ChildModelMessageRoleV1, ChildModelOutputContractKindV1, ChildModelPromptContractV1,
-    ChildModelPromptDocument, ChildModelPromptManifest, ChildModelReasoningSettingV1,
-    ChildModelRequestDocument, ChildModelSuppliedToolResultV1, ChildModelUnknownRecord,
-    ChildModelVisibleBytesV1, ChildModelVisibleJsonV1, ChildOverlapUnknownReason,
-    ChildPreviousToolContextV1, ChildPriorPlanContextV1, ChildRepositoryAuthorityV1,
-    ChildRepositoryExplorerContextSourceV1, ChildRepositoryExplorerPreviousToolV1,
-    ChildRepositoryExplorerPriorPlanV1, ChildRepositoryExplorerTurnInputV1, ChildToolCallId,
-    ChildToolObservation, ChildToolOperation, ChildToolOutcomeUnknown, ChildToolPrepared,
-    ChildToolSuccess, ChildToolUnknownBoundary, ChildToolUnknownReason,
-    ChildValidatedActionBindingV1, ChildValidatedActionDocumentV1, ChildWorkOrderId,
-    ChildWorkOrderIssued, ChildWorkOrderSpec, EventEnvelope, EventId, EventPayload,
-    IdempotentAppendOutcome, IdentifiedNewEvent, InferenceAttemptId, InputItem,
+    ChildClaimAdoptionKindV1, ChildContextManifest, ChildDelegationAuthorized,
+    ChildExecutionBinding, ChildExecutionFailureCauseV1, ChildExecutionFailureEvidenceV1,
+    ChildExecutionFailureKind, ChildExecutionId, ChildExecutionInterval, ChildExecutionOutcome,
+    ChildExecutionOverlap, ChildHandoffDocument, ChildHandoffStatus, ChildLocalPlanBindingV1,
+    ChildLocalPlanSnapshotV1, ChildLocalPlanStepStatusV1, ChildModelCallId,
+    ChildModelCompleteEvidence, ChildModelContextInventoryV1, ChildModelEvidenceRecord,
+    ChildModelInferenceObservation, ChildModelInferenceOutcomeUnknown, ChildModelInferencePrepared,
+    ChildModelInferencePreparedV2, ChildModelMessageRoleV1, ChildModelOutputContractKindV1,
+    ChildModelPromptContractV1, ChildModelPromptDocument, ChildModelPromptManifest,
+    ChildModelReasoningSettingV1, ChildModelRequestDocument, ChildModelSuppliedToolResultV1,
+    ChildModelUnknownRecord, ChildModelVisibleBytesV1, ChildModelVisibleJsonV1,
+    ChildOverlapUnknownReason, ChildPreviousToolContextV1, ChildPriorPlanContextV1,
+    ChildRepositoryAuthorityV1, ChildRepositoryExplorerContextSourceV1,
+    ChildRepositoryExplorerPreviousToolV1, ChildRepositoryExplorerPriorPlanV1,
+    ChildRepositoryExplorerTurnInputV1, ChildToolCallId, ChildToolObservation, ChildToolOperation,
+    ChildToolOutcomeUnknown, ChildToolPrepared, ChildToolSuccess, ChildToolUnknownBoundary,
+    ChildToolUnknownReason, ChildValidatedActionBindingV1, ChildValidatedActionDocumentV1,
+    ChildWorkOrderId, ChildWorkOrderIssued, ChildWorkOrderSpec, EventEnvelope, EventId,
+    EventPayload, IdempotentAppendOutcome, IdentifiedNewEvent, InferenceAttemptId, InputItem,
     ModelOutputBudgetV1, NewEvent, PARALLEL_RECONNAISSANCE_V1_CHILD_AGENTS,
     PARALLEL_RECONNAISSANCE_V1_CHILD_MAX_ATTEMPTS,
     PARALLEL_RECONNAISSANCE_V1_CHILD_MAX_TOOL_CALLS_PER_ATTEMPT,
@@ -1061,67 +1076,6 @@ impl RepositorySnapshotLifecycleReplay {
 /// exact-pair reconnaissance product slice. Callers supply identities only;
 /// changing this contract requires a versioned Store API.
 pub const PARALLEL_RECONNAISSANCE_V1_CHILD_COMPLETION_CONTRACT: &str = "Return an evidence-bound repository reconnaissance handoff with relevant structure, findings, uncertainties, and recommended follow-ups; finish only after an evidence-aware second local-plan revision.";
-
-/// Fresh identities for one member of an atomic exact-pair delegation.
-/// The bundle is assigned after Store canonically sorts the two accepted
-/// planner work orders, so callers cannot choose either child's objective,
-/// authority, model, artifacts, claim, or causal ancestry.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ParallelReconExactPairChildIdentityAuthority {
-    pub authorization_event_id: EventId,
-    pub authorization_id: ChildDelegationAuthorizationId,
-    pub issuance_event_id: EventId,
-    pub work_order_id: ChildWorkOrderId,
-    pub execution_id: ChildExecutionId,
-    pub child_actor_id: ChildActorId,
-    pub child_event_actor_id: ActorId,
-    pub context_id: ChildContextId,
-}
-
-/// Mechanical caller authority for one Store-derived two-child delegation.
-/// The three grant identities are ordered as repository tree, file read, and
-/// literal search and are shared by the complete pair.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ParallelReconExactPairIssuanceAuthority {
-    pub accepted_planner_turn_event_id: EventId,
-    pub snapshot_lease_event_id: EventId,
-    pub children: [ParallelReconExactPairChildIdentityAuthority;
-        PARALLEL_RECONNAISSANCE_V1_CHILD_AGENTS as usize],
-    pub repository_tool_grant_ids: [RepositoryToolGrantId; 3],
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ParallelReconExactPairIssuedChild {
-    pub authorization_event: EventEnvelope,
-    pub issuance_event: EventEnvelope,
-    pub projection: ChildWorkOrderProjection,
-}
-
-/// Store-total restart view of one committed exact-pair delegation. Recovery
-/// is keyed by durable planner acceptance rather than caller-minted identity
-/// bundles, and returns the original immutable envelopes plus current child
-/// projections.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ParallelReconExactPairRecovery {
-    pub policy_artifact: ArtifactRef,
-    pub children:
-        [ParallelReconExactPairIssuedChild; PARALLEL_RECONNAISSANCE_V1_CHILD_AGENTS as usize],
-}
-
-/// Closed idempotent result of exact-pair authorization and issuance.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ParallelReconExactPairIssuanceOutcome {
-    Appended {
-        policy_artifact: ArtifactRef,
-        children:
-            [ParallelReconExactPairIssuedChild; PARALLEL_RECONNAISSANCE_V1_CHILD_AGENTS as usize],
-    },
-    AlreadyPresent {
-        policy_artifact: ArtifactRef,
-        children:
-            [ParallelReconExactPairIssuedChild; PARALLEL_RECONNAISSANCE_V1_CHILD_AGENTS as usize],
-    },
-}
 
 /// Mechanical authority for one atomic Parallel Repository Reconnaissance
 /// claim refresh. Store derives the run, claim generation, cancellation
@@ -3068,21 +3022,6 @@ fn project_child_work_order(
         return Err(StoreError::InvalidStateEvent);
     }
     replay.into_projection(connection, run_id).map(Some)
-}
-
-fn child_execution_binding(
-    replay: &ChildReplay,
-    attempt: &ReplayedChildAttempt,
-) -> ChildExecutionBinding {
-    ChildExecutionBinding {
-        work_order_id: replay.issued.spec.work_order_id,
-        execution_id: replay.issued.spec.execution_id,
-        attempt_id: attempt.projection.attempt_id,
-        child_actor_id: replay.issued.spec.child_actor_id,
-        context_id: replay.issued.spec.context_id,
-        work_order_digest: replay.issued.work_order_digest.clone(),
-        context_manifest_digest: replay.issued.context_manifest_digest.clone(),
-    }
 }
 
 #[allow(
@@ -5253,17 +5192,6 @@ fn validate_child_work_order_documents(
         Some(required_context_event_id),
     )?;
     Ok(())
-}
-
-fn expected_run_deadline(run: &Run) -> Result<Option<DateTime<Utc>>, StoreError> {
-    let Some(seconds) = run.spec.limits.max_wall_time_seconds else {
-        return Ok(None);
-    };
-    let seconds = i64::try_from(seconds).map_err(|_| StoreError::InvalidStateEvent)?;
-    run.created_at
-        .checked_add_signed(chrono::TimeDelta::seconds(seconds))
-        .map(Some)
-        .ok_or(StoreError::InvalidStateEvent)
 }
 
 const PARALLEL_RECON_SNAPSHOT_LIFECYCLE_MAX_EVENTS: usize =
@@ -12621,8 +12549,11 @@ fn validate_generic_event(
             reject_parallel_recon_generic_claim_adoption(transaction, event, admission)?;
             validate_child_reconnaissance_event(transaction, event, artifact_root)
         }
-        EventPayload::ChildExecutionStarted(_)
-        | EventPayload::ChildModelInferencePrepared(_)
+        EventPayload::ChildExecutionStarted(_) => {
+            reject_parallel_recon_public_attempt_start(transaction, event, admission)?;
+            validate_child_reconnaissance_event(transaction, event, artifact_root)
+        }
+        EventPayload::ChildModelInferencePrepared(_)
         | EventPayload::ChildModelInferencePreparedV2(_)
         | EventPayload::ChildModelInferenceObserved(_)
         | EventPayload::ChildModelInferenceOutcomeUnknown(_)
@@ -12715,7 +12646,7 @@ fn reject_parallel_recon_generic_child_append(
     event: &EventEnvelope,
     admission: EventAdmission,
 ) -> Result<(), StoreError> {
-    if admission == EventAdmission::ParallelReconExactPair {
+    if admission == EventAdmission::ParallelReconBootstrap {
         return Ok(());
     }
     let run_id = event.run_id.ok_or(StoreError::InvalidStateEvent)?;
@@ -15510,7 +15441,7 @@ fn parallel_recon_exact_pair_grant_ids(
 
 fn parallel_recon_exact_pair_authority_from_committed(
     accepted_event_id: EventId,
-    events: &[EventEnvelope; 4],
+    events: &[EventEnvelope],
 ) -> Result<ParallelReconExactPairIssuanceAuthority, StoreError> {
     let EventPayload::ChildDelegationAuthorizedV2(authorization_left) = &events[0].payload else {
         return Err(StoreError::InvalidStateEvent);
@@ -15702,7 +15633,7 @@ fn reject_public_store_owned_cleanup_event(payload: &EventPayload) -> Result<(),
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EventAdmission {
     PublicAppend,
-    ParallelReconExactPair,
+    ParallelReconBootstrap,
     ParallelReconClaimRefresh,
 }
 
@@ -15999,6 +15930,7 @@ mod tests {
     mod historical_event_validation;
     mod legacy_causality_migrations;
     mod legacy_schema_migrations;
+    mod parallel_recon_bootstrap;
     mod projection_migrations;
     mod schema_and_artifact_integrity;
     mod semantic_producer_validation;
@@ -21237,39 +21169,23 @@ mod tests {
                 .child_work_order_projection(fixture.run.id, work_order_id)
                 .expect("child projection replays")
                 .expect("issued child exists");
-            let binding = ChildExecutionBinding {
-                work_order_id: projection.spec.work_order_id,
-                execution_id: projection.spec.execution_id,
-                attempt_id: ChildAttemptId::new(),
-                child_actor_id: projection.spec.child_actor_id,
-                context_id: projection.spec.context_id,
-                work_order_digest: projection.work_order_digest,
-                context_manifest_digest: projection.context_manifest_digest,
-            };
             let started = fixture
                 .store
-                .append_event(NewEvent {
-                    session_id: fixture.run.spec.session_id,
-                    run_id: Some(fixture.run.id),
-                    actor_id: projection.spec.child_event_actor_id,
-                    causal_parent: Some(projection.issued_event.id),
-                    provenance: Provenance {
-                        producer: "fixture-terminal-child".to_owned(),
-                        backend: Some(projection.spec.backend.clone()),
-                        raw_artifact: None,
+                .start_child_repository_explorer_attempt(
+                    fixture.run.id,
+                    work_order_id,
+                    ChildRepositoryExplorerAttemptStartAuthority {
+                        event_id: EventId::new(),
+                        attempt_id: ChildAttemptId::new(),
+                        local_plan_id: birdcode_protocol::ChildLocalPlanId::new(),
+                        started_at: test_clock(fixture.runtime_instance_id, 10),
                     },
-                    payload: EventPayload::ChildExecutionStarted(
-                        birdcode_protocol::ChildExecutionStarted {
-                            binding: binding.clone(),
-                            parent_attempt_id: None,
-                            local_plan_id: birdcode_protocol::ChildLocalPlanId::new(),
-                            backend_model: projection.spec.resolved_model.clone(),
-                            model_lineage: projection.spec.model_lineage.clone(),
-                            started_at: test_clock(fixture.runtime_instance_id, 10),
-                        },
-                    ),
-                })
+                )
                 .expect("terminal child attempt starts");
+            let EventPayload::ChildExecutionStarted(started_payload) = &started.payload else {
+                panic!("Store start is typed")
+            };
+            let binding = started_payload.binding.clone();
             let evidence = ChildExecutionFailureEvidenceV1 {
                 contract_version: CHILD_RECONNAISSANCE_CONTRACT_VERSION,
                 binding: binding.clone(),
@@ -21405,43 +21321,18 @@ mod tests {
             }
 
             let first = &adoptions[0];
-            let projection = fixture
-                .store
-                .child_work_order_projection(fixture.run.id, first.work_order_id)
-                .expect("child replays")
-                .expect("child exists");
-            let binding = ChildExecutionBinding {
-                work_order_id: projection.spec.work_order_id,
-                execution_id: projection.spec.execution_id,
-                attempt_id: ChildAttemptId::new(),
-                child_actor_id: projection.spec.child_actor_id,
-                context_id: projection.spec.context_id,
-                work_order_digest: projection.work_order_digest,
-                context_manifest_digest: projection.context_manifest_digest,
-            };
             let started = fixture
                 .store
-                .append_event(NewEvent {
-                    session_id: fixture.run.spec.session_id,
-                    run_id: Some(fixture.run.id),
-                    actor_id: projection.spec.child_event_actor_id,
-                    causal_parent: Some(first.event.id),
-                    provenance: Provenance {
-                        producer: "fixture-post-refresh-child".to_owned(),
-                        backend: Some(projection.spec.backend.clone()),
-                        raw_artifact: None,
+                .start_child_repository_explorer_attempt(
+                    fixture.run.id,
+                    first.work_order_id,
+                    ChildRepositoryExplorerAttemptStartAuthority {
+                        event_id: EventId::new(),
+                        attempt_id: ChildAttemptId::new(),
+                        local_plan_id: birdcode_protocol::ChildLocalPlanId::new(),
+                        started_at: test_clock(fixture.runtime_instance_id, 10),
                     },
-                    payload: EventPayload::ChildExecutionStarted(
-                        birdcode_protocol::ChildExecutionStarted {
-                            binding,
-                            parent_attempt_id: None,
-                            local_plan_id: birdcode_protocol::ChildLocalPlanId::new(),
-                            backend_model: projection.spec.resolved_model,
-                            model_lineage: projection.spec.model_lineage,
-                            started_at: test_clock(fixture.runtime_instance_id, 10),
-                        },
-                    ),
-                })
+                )
                 .expect("first attempt parents the latest pre-attempt adoption");
             assert_eq!(started.causal_parent, Some(first.event.id));
         }
@@ -30652,13 +30543,13 @@ mod tests {
     fn exact_pair_identity_authority() -> ParallelReconExactPairIssuanceAuthority {
         let child = || ParallelReconExactPairChildIdentityAuthority {
             authorization_event_id: EventId::new(),
-            authorization_id: ChildDelegationAuthorizationId::new(),
+            authorization_id: birdcode_protocol::ChildDelegationAuthorizationId::new(),
             issuance_event_id: EventId::new(),
             work_order_id: ChildWorkOrderId::new(),
             execution_id: ChildExecutionId::new(),
             child_actor_id: ChildActorId::new(),
             child_event_actor_id: ActorId::new(),
-            context_id: ChildContextId::new(),
+            context_id: birdcode_protocol::ChildContextId::new(),
         };
         ParallelReconExactPairIssuanceAuthority {
             accepted_planner_turn_event_id: EventId::new(),
@@ -30718,6 +30609,7 @@ mod tests {
     fn exact_pair_fixture_at(
         planned_work_orders: Vec<birdcode_prompting::PlannerReplannerV2PlannedWorkOrder>,
         workspace_root: &str,
+        max_wall_time_seconds: u64,
     ) -> ExactPairFixture {
         let (directory, mut store) = test_store();
         let database = directory.path().join("state.sqlite3");
@@ -30748,7 +30640,7 @@ mod tests {
                 max_output_tokens: Some(
                     birdcode_protocol::PARALLEL_RECONNAISSANCE_V1_MIN_TOTAL_RESERVED_OUTPUT_TOKENS,
                 ),
-                max_wall_time_seconds: Some(3_600),
+                max_wall_time_seconds: Some(max_wall_time_seconds),
                 max_subagents: PARALLEL_RECONNAISSANCE_V1_CHILD_AGENTS,
             },
         });
@@ -31161,7 +31053,7 @@ mod tests {
     fn exact_pair_fixture(
         planned_work_orders: Vec<birdcode_prompting::PlannerReplannerV2PlannedWorkOrder>,
     ) -> ExactPairFixture {
-        exact_pair_fixture_at(planned_work_orders, "/tmp/birdcode-source")
+        exact_pair_fixture_at(planned_work_orders, "/tmp/birdcode-source", 3_600)
     }
 
     pub(crate) fn default_exact_pair_fixture() -> ExactPairFixture {
@@ -33049,6 +32941,7 @@ mod tests {
                 exact_pair_planned_work_order("right", "right"),
             ],
             "/tmp/a-different-workspace",
+            3_600,
         );
         assert!(matches!(
             fixture
@@ -33089,7 +32982,7 @@ mod tests {
                 causal_parent: v2.event.causal_parent,
                 provenance: v2.event.provenance.clone(),
                 payload: EventPayload::ChildDelegationAuthorized(ChildDelegationAuthorized {
-                    authorization_id: ChildDelegationAuthorizationId::new(),
+                    authorization_id: birdcode_protocol::ChildDelegationAuthorizationId::new(),
                     issuer_actor_id: v2_payload.issuer_actor_id,
                     claim_event_id: v2_payload.claim_event_id,
                     claim_id: v2_payload.claim_id,
@@ -33152,7 +33045,7 @@ mod tests {
             causal_parent: second.event.causal_parent,
             provenance: second.event.provenance,
             payload: EventPayload::ChildDelegationAuthorized(ChildDelegationAuthorized {
-                authorization_id: ChildDelegationAuthorizationId::new(),
+                authorization_id: birdcode_protocol::ChildDelegationAuthorizationId::new(),
                 issuer_actor_id: second_v2.issuer_actor_id,
                 claim_event_id: second_v2.claim_event_id,
                 claim_id: second_v2.claim_id,

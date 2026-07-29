@@ -17,6 +17,17 @@ use super::{
     validate_real_directory,
 };
 
+pub(super) fn expected_run_deadline(run: &Run) -> Result<Option<DateTime<Utc>>, StoreError> {
+    let Some(seconds) = run.spec.limits.max_wall_time_seconds else {
+        return Ok(None);
+    };
+    let seconds = i64::try_from(seconds).map_err(|_| StoreError::InvalidStateEvent)?;
+    run.created_at
+        .checked_add_signed(chrono::TimeDelta::seconds(seconds))
+        .map(Some)
+        .ok_or(StoreError::InvalidStateEvent)
+}
+
 impl Store {
     /// Opens or creates the local database and artifact directory.
     ///

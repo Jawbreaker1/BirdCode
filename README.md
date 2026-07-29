@@ -25,12 +25,18 @@ strongest available Codex Sol/Ultra baseline under fair clean-room comparison.
 That is a measured product target, not a superiority claim the current
 foundation has earned.
 
-The current branch contains two maturity levels that are deliberately kept
+The current branch contains three maturity levels that are deliberately kept
 distinct:
 
 - **Product-wired:** the native desktop and CLI can discover exact
   already-loaded LM Studio models and submit a durable `PlanOnly` run under an
   explicit producer/critic role-separation policy.
+- **Atomic child bootstrap boundary:** one Store transaction derives and
+  commits the exact two-child reconnaissance bundle—two authorizations, two
+  work orders, and two initial attempt starts—or commits nothing. Exact replay
+  recovers only the complete six-event bundle; partial or mixed history fails
+  closed. This boundary grants no model or repository-tool authority and is
+  not yet invoked by `RunSupervisor`.
 - **Standalone and executable:** Rust agent kernels can plan, use bounded
   repository tools, revise from observations, perform one isolated file
   replacement, retain a diff, publish an immutable candidate, and commission a
@@ -56,7 +62,8 @@ different critique into an acceptance.
 
 The live product root still receives only the user's goal and repository
 identity. It does not yet execute the standalone repository-agent vertical,
-launch child agents, or replan from retained child/tool evidence.
+run the new atomic child bootstrap, or replan from retained child/tool
+evidence.
 
 The configured separation policy requires distinct discovered model IDs and
 distinct declared deployment and independence-domain IDs. A strict versioned
@@ -96,7 +103,12 @@ kernels now also implement a descriptor-confined read-only repository broker,
 macOS snapshot/worktree boundaries, an isolated single-writer lane, immutable
 candidate publication, semantic repository review, and current-generation
 selection. None is connected to GUI/CLI run supervision; durable child
-mailboxes and a merge/promotion gate still do not exist.
+mailboxes and a merge/promotion gate still do not exist. Store now provides a
+bounded exact-two atomic bootstrap: the complete pair and both no-effect
+initial starts become durable together, and recovery accepts only that complete
+history. BirdCode deliberately does not schedule placeholder child tasks at
+this boundary. The capability remains disabled until two real model/tool
+engines, their cancellation paths, and their handoffs execute concurrently.
 
 **Current truth:** the product-wired path performs policy-separated semantic
 review and at most one root-plan repair. The standalone path represents
@@ -105,9 +117,10 @@ directives; a repository explorer can plan, call tree/read/literal-search
 tools, observe their exact results, revise, and hand off evidence. A bounded
 implementation worker can read, replace, inspect the diff, and finish inside an
 isolated temporary Git worktree. A separate no-tool reviewer judges the sealed
-candidate. No model-backed child actor, worktree lease, mailbox, tooling
-session, candidate reviewer, or integration actor executes through the GUI,
-CLI, or `RunSupervisor` today.
+candidate. Store can now bootstrap two initial child attempts atomically, but
+the durable root path does not call that boundary. No model-backed child actor,
+worktree lease, mailbox, tooling session, candidate reviewer, or integration
+actor executes through the GUI, CLI, or `RunSupervisor` today.
 
 The standalone current-generation registry atomically selects a
 journal-verified, lifecycle-ready review subject under private per-work-order
@@ -243,7 +256,7 @@ kernels until they receive their own product-wired, commit-pinned release gate.
 | Tauri 2 + React desktop | Implemented semantic-review PlanOnly slice | Starts the real daemon and forwards explicit policy/backend-manifest paths when configured, discovers the explicit primary LM Studio route, submits/cancels one run, reconciles ambiguous starts, replays typed review/repair events, and verifies every displayed artifact hash |
 | Rust CLI | Implemented semantic-review PlanOnly subset | `doctor`, `session-smoke`, `models`, and `plan`; `plan` requires both `--model-policy` and `--backend-config`, and success prints only the final semantically accepted, hash-verified JSON artifact |
 | Local daemon and client | Implemented exact multi-deployment PlanOnly slice | Bounded JSON-lines/stdio plus a strict versioned backend manifest. Public discovery uses only the explicit producer-primary route; semantic stages resolve exact producer/critic routes with no fallback and bind Prepared, response evidence, and provenance to the full backend instance |
-| Durable store | Implemented foundation | Append-only events, bounded paging, checkpointed upgrades, indexed run state, closed-world schema health, token ledgers, claim leases, and verified content-addressed artifacts |
+| Durable store | Implemented foundation plus atomic exact-two bootstrap | Append-only events, bounded paging, checkpointed upgrades, indexed run state, closed-world schema health, token ledgers, claim leases, verified content-addressed artifacts, and one 0-or-6 event transaction for two authorizations, two issued work orders, and two Store-derived initial starts. Exact replay and read-only recovery grant no dispatch authority; partial history fails closed |
 | Durable root planner | **Product-wired with policy-separated review** | `InitialPlan → InitialReview → optional Repair → FinalReview`; direct acceptance uses two calls, repair uses four, and every prompt/response/candidate/critique/receipt is retained and causally bound |
 | Semantic task router | Implemented standalone | LLM-classified action, access, and delegation strategy with typed collect-all validation and no heuristic fallback |
 | Standalone router executor | Implemented standalone | First-pass routing plus at most one typed, patch-only evidence repair; fake-backend tested and not daemon-wired |
@@ -259,7 +272,7 @@ kernels until they receive their own product-wired, commit-pinned release gate.
 | Agent execution loop | **Standalone repository vertical; product still PlanOnly** | Explorer and implementation workers perform model → tool observation → revised model turns; candidate packaging and independent semantic review follow. The daemon product route still invokes only root producer/critic planning and one bounded repair |
 | Context compilation and compaction | Designed | Architecture and invariants are documented; runtime implementation remains |
 | General Tooling Plane and permission broker | Standalone read-only foundation | Descriptor-confined tree, bounded file-read, and literal-search broker plus macOS snapshot/worktree primitives exist under tests; no product-wired broker coordinator, shell/process, browser, or general platform tool surface yet |
-| Parallel agent runtime | **Standalone kernels; not product-wired** | The scheduler proves real overlap for dependency-ready test workers, and the live reviewer gate submits three model cases concurrently. No root-spawned model child graph, durable mailbox/coordinator, cancellation/recovery, candidate integration, or GUI/CLI timeline executes yet |
+| Parallel agent runtime | **Atomic bootstrap plus standalone kernels; product flag off** | Store can atomically bootstrap exactly two reconnaissance children through `ReadyForModel`, with no split issue/start state and no model or tool authority. No daemon child loop or product execution overlap exists yet. Separately, the scheduler proves overlap for dependency-ready test workers and the live reviewer gate submits three model cases concurrently |
 | Ollama and OpenAI adapters | Planned | Provider contract exists; adapters do not |
 | Local Codex bridge | Planned | Clean-room adapter direction is documented; no product integration exists yet |
 | Windows and Linux | Planned | Core boundaries are portable, but builds and platform behavior are not yet verified |
@@ -744,10 +757,11 @@ the application's eventual license decision.
 
 ## Roadmap
 
-1. Connect accepted root plans to the existing repository explorer through a
-   durable child lifecycle, then launch at least two isolated model-backed
-   explorers concurrently and show their tool calls, handoffs, budgets,
-   cancellation, and overlap truthfully in GUI and CLI.
+1. Invoke the atomic exact-two bootstrap from `RunSupervisor`, then launch two
+   instances of the existing repository explorer's real model/tool/handoff
+   loop before the first join. Prove actual terminal execution overlap and show
+   tool calls, handoffs, budgets, cancellation, and recovery truthfully in GUI
+   and CLI.
 2. Feed retained child/tool evidence into a second root planning turn and wire
    the existing implementation worker, candidate lifecycle, semantic reviewer,
    and current-generation state through Store-backed journals rather than their
