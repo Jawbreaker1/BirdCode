@@ -1,6 +1,6 @@
 //! Public child replay projection value types.
 
-use super::{ArtifactRef, ChildToolCallId, EventId};
+use super::super::{ArtifactRef, ChildToolCallId, EventId};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChildSuppliedResultProjection {
