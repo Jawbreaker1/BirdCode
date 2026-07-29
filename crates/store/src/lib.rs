@@ -12143,15 +12143,10 @@ fn validate_repository_broker_epoch_activated_v1(
             }
         }
     }
-    let reused = transaction.query_row(
-        "SELECT COUNT(*) FROM events
-         WHERE json_extract(value_json, '$.payload.type') IN
-                   ('child_tool_prepared', 'child_tool_prepared_v2')
-           AND json_extract(value_json, '$.payload.data.broker_instance_id') = ?1",
-        [activated.state.active_broker_instance_id.to_string()],
-        |row| row.get::<_, u64>(0),
-    )?;
-    if reused != 0 {
+    if !store_child_dispatch::repository_broker_epoch_identity_is_unused(
+        transaction,
+        activated.state.active_broker_instance_id,
+    )? {
         return Err(StoreError::InvalidStateEvent);
     }
     Ok(())
@@ -15916,6 +15911,7 @@ pub(crate) mod tests {
     mod legacy_schema_migrations;
     pub(crate) mod parallel_recon_bootstrap;
     mod projection_migrations;
+    pub(crate) mod repository_tool_fixture;
     mod schema_and_artifact_integrity;
     mod semantic_producer_validation;
 
@@ -19159,20 +19155,7 @@ pub(crate) mod tests {
             reason = "the fixture spells out the complete repository authority contract"
         )]
         pub(super) fn authority(store: &Store) -> ChildRepositoryAuthorityV1 {
-            let root = RepositoryRootBindingV1 {
-                repository_root_id: "repository-root-v1".to_owned(),
-                descriptor_identity: RepositoryFileIdentityV1::Unix(
-                    birdcode_protocol::RepositoryUnixFileIdentityV1 {
-                        device: 1,
-                        inode: 2,
-                        byte_len: 0,
-                        modified_seconds: 1,
-                        modified_nanoseconds: 0,
-                        changed_seconds: 1,
-                        changed_nanoseconds: 0,
-                    },
-                ),
-            };
+            let root = super::repository_tool_fixture::repository_root_binding(store);
             let snapshot_id = "snapshot-v1".to_owned();
             let source_path: WorkspacePath = PathBuf::from("/tmp/birdcode-source").into();
             let image_path: WorkspacePath = PathBuf::from("/tmp/birdcode-source.dmg").into();

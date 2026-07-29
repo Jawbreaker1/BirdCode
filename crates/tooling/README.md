@@ -32,21 +32,38 @@ working directory resolution occurs in Tooling.
 
 ## Runtime integration API
 
+The Store-backed child repository-explorer path now owns Prepared publication:
+
 1. Construct a `RepositoryToolReceiptAuthorityV2` from the durable child work
-   order and a `RepositoryBrokerEpochStateV1` from Store replay. Call
-   `RepositoryToolBroker::open(root, authority, epoch)`.
-2. Allocate the exact binding, tool-call ID, action binding, grant ID and ordinal
-   in the runtime. Pass them as `RepositoryToolPrepareInputV2`.
-3. Persist both returned artifacts—`canonical_parameters` and
+   order and a `RepositoryBrokerEpochStateV1` from Store replay. Open one
+   `RepositoryToolBroker`, then consume it into
+   `birdcode_store::ChildRepositoryToolLane`.
+2. Call `Store::prepare_child_repository_explorer_tool_dispatch` with only the
+   retry-stable event/action/tool-call IDs and runtime clock authority. Store
+   derives the binding, selected action, grant, operation, ordinal, actor,
+   parent and provenance from replay.
+3. The shared lane serializes broker Prepare, exact artifact retention and the
+   immediate Store transaction. A fresh commit returns durable evidence plus a
+   non-cloneable in-process handoff; an exact retry or restart recovery returns
+   evidence only and cannot recreate effect authority.
+
+The handoff deliberately exposes no execution method yet. Active-epoch
+interruption and Store's Observed/Unknown terminal contracts must be harmonized
+and generation-fenced before product execution is enabled.
+
+The lower-level broker lifecycle used by that boundary is:
+
+1. Pass exact canonical parameters as `RepositoryToolPrepareInputV2`.
+2. Persist both returned artifacts—`canonical_parameters` and
    `prepared_receipt`—then use `project_prepared_event_v2` to append the matching
-   `ChildToolPreparedV2` event. Only after Store acknowledges that event may the
-   runtime call `execute`.
-4. Call `execute(RepositoryToolExecuteInputV2)` with that exact Prepared bundle,
+   `ChildToolPreparedV2` event. Only after Store acknowledges that event may a
+   trusted integration call `execute`.
+3. Call `execute(RepositoryToolExecuteInputV2)` with that exact Prepared bundle,
    its durable event ID and the runtime finish clock. Persist every
    `supporting_artifact`, then `terminal_receipt`, then use
    `project_observed_event_v2` to append the matching `ChildToolObservedV2`
    event.
-5. If execution has not started, close an active-epoch Prepared with
+4. If execution has not started, close an active-epoch Prepared with
    `record_interruption`. After a restart, activate a fresh epoch, place the old
    broker UUID in the closed set and use `reconcile_abandoned_prepared`. Persist
    the returned artifacts before using `project_unknown_event_v2` to append
@@ -77,11 +94,12 @@ integration must still enforce:
 `RepositoryToolBroker` serializes successful in-memory Prepare publication and
 does not advance its sequence for duplicate IDs, encoding/size failures, lock
 failure, or arithmetic exhaustion. That does not by itself order durable
-commits from parallel children: the runtime still needs one broker-epoch
-preparation coordinator (a mutex or actor lane) spanning `prepare`, artifact
-persistence, and Store acknowledgement. Tool execution may resume in parallel
-after each exact Prepared event is acknowledged. Until that coordinator exists,
-callers must not treat an in-memory Prepared bundle as proof of durability.
+commits from parallel children. `ChildRepositoryToolLane` is now that
+coordinator for the Store-backed child repository-explorer Prepared path and
+spans `prepare`, artifact persistence and Store acknowledgement. Other broker
+callers still need an equivalent broker-epoch coordinator. Tool execution may
+resume in parallel only after each exact Prepared event is acknowledged; an
+in-memory Prepared bundle alone is never proof of durability.
 
 The in-process broker consumes each active Prepared once. Restart reconciliation
 also consumes each `(abandoned epoch, call ID, Prepared digest)` once in the new

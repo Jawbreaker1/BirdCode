@@ -59,6 +59,24 @@ execution, child actors, or replanning from tool evidence. The policy-separated
 critic can reject or authorize one repair of the root plan, but it is a fixed
 supervisor role rather than a general child-agent runtime.
 
+### Durable child-tool kernel (not product-wired)
+
+The Store and Tooling crates now contain a narrower Protocol-v7 child
+repository-tool Prepared boundary below the daemon product path. Store replays
+the child work order and model-selected action, derives the exact binding,
+grant, operation, ordinal, actor, parent and provenance, then uses a shared
+broker-epoch lane to serialize broker Prepare, content-addressed artifact
+retention and one immediate Store transaction. Only the fresh committer
+receives a non-cloneable in-process handoff. Exact retries and restart recovery
+return durable evidence without recreating effect authority.
+
+This is kernel capability, not a claim that the desktop, CLI or daemon can run a
+tool. The handoff intentionally has no execution method while active-epoch
+interruption semantics and Store's Observed/Unknown terminal contracts remain
+unharmonized. Epoch/generation fencing, terminal artifact publication and the
+daemon worker loop are separate acceptance milestones before live execution is
+enabled.
+
 ## Backend taxonomy
 
 A model backend gives BirdCode control over the agent loop. Initial examples

@@ -102,13 +102,18 @@ cancellation, and terminal decisions are enforced. Standalone daemon/crate
 kernels now also implement a descriptor-confined read-only repository broker,
 macOS snapshot/worktree boundaries, an isolated single-writer lane, immutable
 candidate publication, semantic repository review, and current-generation
-selection. None is connected to GUI/CLI run supervision; durable child
-mailboxes and a merge/promotion gate still do not exist. Store now provides a
-bounded exact-two atomic bootstrap: the complete pair and both no-effect
-initial starts become durable together, and recovery accepts only that complete
-history. BirdCode deliberately does not schedule placeholder child tasks at
-this boundary. The capability remains disabled until two real model/tool
-engines, their cancellation paths, and their handoffs execute concurrently.
+selection. Store additionally owns the child repository-tool Prepared boundary:
+one shared broker-epoch lane spans broker preparation, artifact retention, and
+the durable commit, while exact replay returns evidence without recreating
+effect authority. None is connected to GUI/CLI run supervision; tool execution
+remains deliberately unavailable until its terminal contracts are closed, and
+durable child mailboxes plus a merge/promotion gate still do not exist. Store
+also provides a bounded exact-two atomic bootstrap: the complete pair and both
+no-effect initial starts become durable together, and recovery accepts only
+that complete history. BirdCode deliberately does not schedule placeholder
+child tasks at this boundary. The capability remains disabled until two real
+model/tool engines, their cancellation paths, and their handoffs execute
+concurrently.
 
 **Current truth:** the product-wired path performs policy-separated semantic
 review and at most one root-plan repair. The standalone path represents
@@ -118,7 +123,9 @@ tools, observe their exact results, revise, and hand off evidence. A bounded
 implementation worker can read, replace, inspect the diff, and finish inside an
 isolated temporary Git worktree. A separate no-tool reviewer judges the sealed
 candidate. Store can now bootstrap two initial child attempts atomically, but
-the durable root path does not call that boundary. No model-backed child actor,
+the durable root path does not call that boundary. The child kernel can commit
+model and repository-tool Prepared boundaries with fresh affine handoffs, but
+the tool handoff intentionally cannot execute yet. No model-backed child actor,
 worktree lease, mailbox, tooling session, candidate reviewer, or integration
 actor executes through the GUI, CLI, or `RunSupervisor` today.
 
@@ -271,8 +278,8 @@ kernels until they receive their own product-wired, commit-pinned release gate.
 | Execution & Validation Plane | Implemented typed foundation | Composite surface/platform targets, immutable run manifests, commands, bounds, hash-linked provenance, evidence policy, and blind review packages; no process or platform adapter executes yet |
 | Agent execution loop | **Standalone repository vertical; product still PlanOnly** | Explorer and implementation workers perform model → tool observation → revised model turns; candidate packaging and independent semantic review follow. The daemon product route still invokes only root producer/critic planning and one bounded repair |
 | Context compilation and compaction | Designed | Architecture and invariants are documented; runtime implementation remains |
-| General Tooling Plane and permission broker | Standalone read-only foundation | Descriptor-confined tree, bounded file-read, and literal-search broker plus macOS snapshot/worktree primitives exist under tests; no product-wired broker coordinator, shell/process, browser, or general platform tool surface yet |
-| Parallel agent runtime | **Atomic bootstrap plus standalone kernels; product flag off** | Store can atomically bootstrap exactly two reconnaissance children through `ReadyForModel`, with no split issue/start state and no model or tool authority. No daemon child loop or product execution overlap exists yet. Separately, the scheduler proves overlap for dependency-ready test workers and the live reviewer gate submits three model cases concurrently |
+| General Tooling Plane and permission broker | Standalone read-only foundation plus durable Prepared boundary | Descriptor-confined tree, bounded file-read, and literal-search operations exist. A Store-owned broker-epoch lane now atomically orders child tool Prepare, exact artifact retention, and durable acknowledgement, returning affine authority only to the fresh committer. Store-backed product tool execution, shell/process, browser, and the general platform surface remain unavailable |
+| Parallel agent runtime | **Atomic bootstrap plus standalone kernels; product flag off** | Store can atomically bootstrap exactly two reconnaissance children through `ReadyForModel`; separate Store APIs can commit fresh model and tool Prepared boundaries without redispatch authority on replay. The tool boundary deliberately cannot execute yet, and no daemon child loop or product execution overlap exists. Separately, the scheduler proves overlap for dependency-ready test workers and the live reviewer gate submits three model cases concurrently |
 | Ollama and OpenAI adapters | Planned | Provider contract exists; adapters do not |
 | Local Codex bridge | Planned | Clean-room adapter direction is documented; no product integration exists yet |
 | Windows and Linux | Planned | Core boundaries are portable, but builds and platform behavior are not yet verified |
