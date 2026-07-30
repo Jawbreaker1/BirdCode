@@ -57,6 +57,10 @@ pub use planner_replanner::{
     PlannerReplannerWorkSelection, planner_replanner_invocation, planner_replanner_key,
     validate_planner_replanner_invocation, validate_planner_replanner_output,
 };
+/// Contract version for source evidence embedded in a planner-v2 prompt turn.
+///
+/// This is independent from the durable planner-evidence envelope version.
+pub use planner_replanner_v2::PLANNER_REPLANNER_V2_SOURCE_CONTRACT_VERSION;
 pub use planner_replanner_v2::{
     PLANNER_REPLANNER_V2_MAX_OUTPUT_TOKENS, PlannerAcceptedRootPlanEvidenceV2,
     PlannerChildCancellationCauseV2, PlannerChildCancelledV2, PlannerChildFailedV2,
