@@ -8,7 +8,10 @@ use super::super::{
     validate_child_cancellation_cause, validate_child_tool_observed_document_v2,
     validate_child_tool_prepared_document_v2, validate_child_tool_unknown_document_v2,
 };
-use super::CHILD_TOOL_DISPATCH_START_PRODUCER;
+use super::{
+    CHILD_REPOSITORY_TOOL_PREPARATION_PRODUCER, CHILD_TOOL_DISPATCH_START_PRODUCER,
+    CHILD_TOOL_OBSERVED_PRODUCER,
+};
 use birdcode_protocol::{
     ArtifactRef, ChildToolCallId, ChildToolDispatchStartedV2, ChildToolObservedV2,
     ChildToolOperation, ChildToolOutcomeUnknownV2, ChildToolPreparedV2,
@@ -39,6 +42,7 @@ pub(crate) struct PendingChildTool {
     pub(crate) prepared_at: RuntimeClockReading,
     pub(crate) broker_epoch_activation_event_id: Option<super::super::EventId>,
     pub(crate) started_event_id: Option<super::super::EventId>,
+    pub(crate) dispatch_start_required: bool,
 }
 
 pub(crate) fn replay_child_tool_prepared_v2(
@@ -98,6 +102,8 @@ pub(crate) fn replay_child_tool_prepared_v2(
         &issued,
         attempt,
     )?;
+    pending.dispatch_start_required =
+        event.provenance.producer == CHILD_REPOSITORY_TOOL_PREPARATION_PRODUCER;
     let run_id = event.run_id.ok_or(StoreError::InvalidStateEvent)?;
     let epoch_event =
         latest_broker_epoch_before(connection, event.session_id, run_id, event.sequence)?
@@ -168,6 +174,7 @@ pub(crate) fn replay_child_tool_dispatch_started_v2(
     if started.binding.attempt_id != attempt.projection.attempt_id
         || attempt.projection.outcome.is_some()
         || attempt.pending_effect_requires_unknown
+        || !pending.dispatch_start_required
         || pending.started_event_id.is_some()
         || event.causal_parent != Some(attempt.tail_event_id)
         || started.tool_call_id != pending.tool_call_id
@@ -238,10 +245,23 @@ pub(crate) fn replay_child_tool_observed_v2(
         .pending_tool
         .clone()
         .ok_or(StoreError::InvalidStateEvent)?;
+    let expected_parent = if pending.dispatch_start_required {
+        pending
+            .started_event_id
+            .ok_or(StoreError::InvalidStateEvent)?
+    } else {
+        attempt.tail_event_id
+    };
+    let store_clock_is_valid = !pending.dispatch_start_required
+        || event.provenance.producer == CHILD_TOOL_OBSERVED_PRODUCER
+            && observed.finished_at.observed_at <= event.occurred_at
+            && child_attempt_clock_accepts(attempt, &observed.finished_at);
     if observed.binding.attempt_id != attempt.projection.attempt_id
         || attempt.projection.outcome.is_some()
         || attempt.pending_effect_requires_unknown
-        || event.causal_parent != Some(attempt.tail_event_id)
+        || observed.tool_call_id != pending.tool_call_id
+        || event.causal_parent != Some(expected_parent)
+        || !store_clock_is_valid
     {
         return Err(StoreError::InvalidStateEvent);
     }

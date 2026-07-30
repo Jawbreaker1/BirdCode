@@ -11,6 +11,7 @@ use super::super::{
 use super::CHILD_TOOL_DISPATCH_START_PRODUCER;
 use super::tool::{
     ChildToolDispatchHandoff, ChildToolDispatchMaterial, ChildToolPreparedEvidence, ToolLaneState,
+    taint_lane,
 };
 use birdcode_protocol::{
     ChildToolDispatchStartedV2, RepositoryBrokerInstanceId, RunState, RuntimeClockReading,
@@ -43,9 +44,9 @@ pub struct ChildToolDispatchRecovery {
     pub started: Option<ChildToolDispatchStartedEvidence>,
 }
 
-struct ChildToolExecutionMaterial {
-    dispatch: Box<ChildToolDispatchMaterial>,
-    started_event: Box<EventEnvelope>,
+pub(super) struct ChildToolExecutionMaterial {
+    pub(super) dispatch: Box<ChildToolDispatchMaterial>,
+    pub(super) started_event: Box<EventEnvelope>,
 }
 
 /// Opaque affine authority released only after the durable Started commit.
@@ -81,28 +82,55 @@ struct ChildToolExecutionMaterial {
 /// ```
 #[must_use = "execution authority must later be consumed by a guarded terminal slice"]
 pub struct ChildToolExecutionHandoff {
-    material: Box<ChildToolExecutionMaterial>,
+    material: Option<Box<ChildToolExecutionMaterial>>,
 }
 
 const _: () =
     assert!(std::mem::size_of::<ChildToolExecutionHandoff>() == std::mem::size_of::<usize>());
 
 impl ChildToolExecutionHandoff {
+    pub(super) fn new(material: ChildToolExecutionMaterial) -> Self {
+        Self {
+            material: Some(Box::new(material)),
+        }
+    }
+
+    pub(super) fn material(&self) -> &ChildToolExecutionMaterial {
+        self.material
+            .as_deref()
+            .expect("execution handoff material exists until consumed")
+    }
+
+    pub(super) fn into_material(mut self) -> ChildToolExecutionMaterial {
+        *self
+            .material
+            .take()
+            .expect("execution handoff material exists until consumed")
+    }
+
     /// Returns the exact durable start boundary for this opaque authority.
     #[must_use]
-    pub const fn started_event(&self) -> &EventEnvelope {
-        &self.material.started_event
+    pub fn started_event(&self) -> &EventEnvelope {
+        &self.material().started_event
     }
 
     /// Returns the broker epoch retained inside the private Prepared bundle.
     #[must_use]
-    pub const fn broker_instance_id(&self) -> RepositoryBrokerInstanceId {
-        self.material
+    pub fn broker_instance_id(&self) -> RepositoryBrokerInstanceId {
+        self.material()
             .dispatch
             .prepared
             .receipt
             .broker_prepared_at
             .broker_instance_id
+    }
+}
+
+impl Drop for ChildToolExecutionHandoff {
+    fn drop(&mut self) {
+        if let Some(material) = &self.material {
+            taint_lane(&material.dispatch.lane);
+        }
     }
 }
 
@@ -232,7 +260,7 @@ fn started_payload(
     }
 }
 
-fn prepared_projection(
+pub(super) fn prepared_projection(
     material: &ChildToolDispatchMaterial,
 ) -> Result<&birdcode_protocol::ChildToolPreparedV2, StoreError> {
     let EventPayload::ChildToolPreparedV2(prepared) = &material.prepared_event.payload else {
@@ -589,12 +617,10 @@ fn commit_derived_start(
     };
     Ok(ChildToolDispatchStartOutcome::Appended {
         evidence,
-        execution: ChildToolExecutionHandoff {
-            material: Box::new(ChildToolExecutionMaterial {
-                dispatch: dispatch.material,
-                started_event: envelope,
-            }),
-        },
+        execution: ChildToolExecutionHandoff::new(ChildToolExecutionMaterial {
+            dispatch: dispatch.material,
+            started_event: envelope,
+        }),
     })
 }
 

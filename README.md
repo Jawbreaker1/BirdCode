@@ -107,12 +107,17 @@ dispatch-start boundaries: one shared broker-epoch lane spans broker
 preparation, artifact retention, and the durable Prepared commit. Its fresh
 affine handoff can then be consumed only by Store admission that commits an
 exact Started pre-effect fence. Only that fresh committer receives an opaque
-execution handoff; exact replay and recovery return evidence without recreating
-authority. The post-commit handoff deliberately exposes no execution method
-yet. None of this is connected to GUI/CLI run supervision; tool execution
-remains unavailable until its terminal contracts are closed, and durable child
-mailboxes plus a merge/promotion gate still do not exist. Store also provides a
-bounded exact-two atomic bootstrap: the complete pair and both no-effect
+execution handoff. Store can now consume that handoff after one short,
+consistent preflight snapshot, run the real descriptor-confined read-only
+broker without holding a database or lane lock, and return an affine known
+result. A separate Store commit retains the exact result/evidence artifacts and
+appends the Store-owned Observed terminal; rollback preserves the result
+without re-executing the tool, while lost or ambiguous authority taints the
+lane. Exact replay and recovery never recreate effect authority. Durable
+Unknown reconciliation is still open, and none of this is connected to GUI/CLI
+run supervision. Durable child mailboxes plus a merge/promotion gate also do
+not exist. Store provides a bounded exact-two atomic bootstrap: the complete
+pair and both no-effect
 initial starts become durable together, and recovery accepts only that complete
 history. BirdCode deliberately does not schedule placeholder child tasks at
 this boundary. The capability remains disabled until two real model/tool
@@ -128,10 +133,12 @@ isolated temporary Git worktree. A separate no-tool reviewer judges the sealed
 candidate. Store can now bootstrap two initial child attempts atomically, but
 the durable root path does not call that boundary. The child kernel can commit
 model Prepared boundaries and the repository-tool `Prepared → Started`
-pre-effect fence with fresh affine handoffs, but the resulting post-commit tool
-handoff has no execution method yet. No model-backed child actor, worktree
-lease, mailbox, tooling session, candidate reviewer, or integration actor
-executes through the GUI, CLI, or `RunSupervisor` today.
+pre-effect fence with fresh affine handoffs. The fresh execution handoff now
+runs the real read-only broker and can durably close a known result as
+`Observed`; restart/ambiguous `Unknown` closure remains unfinished. No
+model-backed child actor, worktree lease, mailbox, tooling session, candidate
+reviewer, or integration actor executes through the GUI, CLI, or
+`RunSupervisor` today.
 
 The standalone current-generation registry atomically selects a
 journal-verified, lifecycle-ready review subject under private per-work-order
@@ -267,7 +274,7 @@ kernels until they receive their own product-wired, commit-pinned release gate.
 | Tauri 2 + React desktop | Implemented semantic-review PlanOnly slice | Starts the real daemon and forwards explicit policy/backend-manifest paths when configured, discovers the explicit primary LM Studio route, submits/cancels one run, reconciles ambiguous starts, replays typed review/repair events, and verifies every displayed artifact hash |
 | Rust CLI | Implemented semantic-review PlanOnly subset | `doctor`, `session-smoke`, `models`, and `plan`; `plan` requires both `--model-policy` and `--backend-config`, and success prints only the final semantically accepted, hash-verified JSON artifact |
 | Local daemon and client | Implemented exact multi-deployment PlanOnly slice | Bounded JSON-lines/stdio plus a strict versioned backend manifest. Public discovery uses only the explicit producer-primary route; semantic stages resolve exact producer/critic routes with no fallback and bind Prepared, response evidence, and provenance to the full backend instance |
-| Durable store | Implemented foundation plus atomic exact-two bootstrap | Append-only events, bounded paging, checkpointed upgrades, indexed run state, closed-world schema health, token ledgers, claim leases, verified content-addressed artifacts, and one 0-or-6 event transaction for two authorizations, two issued work orders, and two Store-derived initial starts. Store also owns the exact child repository-tool `Prepared → Started` pre-effect transition. Exact replay and read-only recovery grant no dispatch or execution authority; partial and contradictory history fails closed |
+| Durable store | Implemented foundation plus atomic exact-two bootstrap | Append-only events, bounded paging, checkpointed upgrades, indexed run state, closed-world schema health, token ledgers, claim leases, verified content-addressed artifacts, and one 0-or-6 event transaction for two authorizations, two issued work orders, and two Store-derived initial starts. Store also owns the exact child repository-tool `Prepared → Started → Observed` known-result path. Exact replay and read-only recovery grant no dispatch or execution authority; partial and contradictory history fails closed |
 | Durable root planner | **Product-wired with policy-separated review** | `InitialPlan → InitialReview → optional Repair → FinalReview`; direct acceptance uses two calls, repair uses four, and every prompt/response/candidate/critique/receipt is retained and causally bound |
 | Semantic task router | Implemented standalone | LLM-classified action, access, and delegation strategy with typed collect-all validation and no heuristic fallback |
 | Standalone router executor | Implemented standalone | First-pass routing plus at most one typed, patch-only evidence repair; fake-backend tested and not daemon-wired |
@@ -282,8 +289,8 @@ kernels until they receive their own product-wired, commit-pinned release gate.
 | Execution & Validation Plane | Implemented typed foundation | Composite surface/platform targets, immutable run manifests, commands, bounds, hash-linked provenance, evidence policy, and blind review packages; no process or platform adapter executes yet |
 | Agent execution loop | **Standalone repository vertical; product still PlanOnly** | Explorer and implementation workers perform model → tool observation → revised model turns; candidate packaging and independent semantic review follow. The daemon product route still invokes only root producer/critic planning and one bounded repair |
 | Context compilation and compaction | Designed | Architecture and invariants are documented; runtime implementation remains |
-| General Tooling Plane and permission broker | Standalone read-only foundation plus durable `Prepared → Started` fence | Descriptor-confined tree, bounded file-read, and literal-search operations exist. A Store-owned broker-epoch lane atomically orders child tool Prepare, exact artifact retention, durable acknowledgement, and a separately committed Started pre-effect boundary. Only the fresh Started committer receives an opaque handoff; replay and recovery are evidence-only, and that handoff cannot execute yet. Store-backed product tool execution, shell/process, browser, and the general platform surface remain unavailable |
-| Parallel agent runtime | **Atomic bootstrap plus standalone kernels; product flag off** | Store can atomically bootstrap exactly two reconnaissance children through `ReadyForModel`; separate Store APIs can commit fresh model boundaries and the tool `Prepared → Started` fence without recreating authority on replay. No tool effect, daemon child loop, or product execution overlap exists yet. Separately, the scheduler proves overlap for dependency-ready test workers and the live reviewer gate submits three model cases concurrently |
+| General Tooling Plane and permission broker | Standalone read-only foundation plus durable known-result path | Descriptor-confined tree, bounded file-read, and literal-search operations exist. A Store-owned broker-epoch lane orders child tool Prepare, durable Started admission, real read-only execution, exact result/evidence retention, and a separately committed Observed terminal. Execution holds no Store transaction or lane lock; rollback retries publication without rerunning the effect. Durable Unknown reconciliation, daemon wiring, shell/process, browser, and the general platform surface remain unavailable |
+| Parallel agent runtime | **Atomic bootstrap plus standalone kernels; product flag off** | Store can atomically bootstrap exactly two reconnaissance children through `ReadyForModel`; separate Store APIs can commit fresh model boundaries and one real repository-tool `Prepared → Started → Observed` turn without recreating authority on replay. The daemon child loop and product execution overlap do not exist yet. Separately, the scheduler proves overlap for dependency-ready test workers and the live reviewer gate submits three model cases concurrently |
 | Ollama and OpenAI adapters | Planned | Provider contract exists; adapters do not |
 | Local Codex bridge | Planned | Clean-room adapter direction is documented; no product integration exists yet |
 | Windows and Linux | Planned | Core boundaries are portable, but builds and platform behavior are not yet verified |

@@ -1,9 +1,12 @@
 //! Child lifecycle identity and append-admission classifiers.
 
 use super::durable_run_for_claim_refresh;
+use super::store_child_dispatch::{
+    CHILD_REPOSITORY_TOOL_PREPARATION_PRODUCER, CHILD_TOOL_OBSERVED_PRODUCER,
+};
 use super::{
     ChildExecutionOutcome, ChildModelInferenceObservation, ChildWorkOrderId, EventEnvelope,
-    EventPayload, RepositorySnapshotLifecycleReplay, RunPurpose, RunState, StoreError,
+    EventPayload, NewEvent, RepositorySnapshotLifecycleReplay, RunPurpose, RunState, StoreError,
     decode_stored_run, reject_parallel_recon_public_attempt_start,
     replay_repository_snapshot_lifecycle, validate_cancellation,
     validate_child_delegation_authorized, validate_child_delegation_authorized_v2,
@@ -29,17 +32,27 @@ pub(crate) enum EventAdmission {
     PublicAppend,
     ParallelReconBootstrap,
     ParallelReconClaimRefresh,
+    ChildToolPreparation,
     ChildToolDispatchStart,
+    ChildToolObserved,
 }
 
-pub(super) fn reject_public_store_owned_event(payload: &EventPayload) -> Result<(), StoreError> {
+pub(super) fn reject_public_store_owned_event(event: &NewEvent) -> Result<(), StoreError> {
     if matches!(
-        payload,
+        &event.payload,
         EventPayload::RepositorySnapshotCleanupGrantedV1(_)
             | EventPayload::RepositorySnapshotCaptureAbandonedV2(_)
             | EventPayload::RepositorySnapshotReleaseReconciledV2(_)
             | EventPayload::WorkspaceRecoveryFinalizedV1(_)
             | EventPayload::ChildToolDispatchStartedV2(_)
+    ) || matches!(
+        &event.payload,
+        EventPayload::ChildToolPreparedV2(_)
+            if event.provenance.producer == CHILD_REPOSITORY_TOOL_PREPARATION_PRODUCER
+    ) || matches!(
+        &event.payload,
+        EventPayload::ChildToolObservedV2(_)
+            if event.provenance.producer == CHILD_TOOL_OBSERVED_PRODUCER
     ) {
         Err(StoreError::InvalidStateEvent)
     } else {
@@ -269,15 +282,28 @@ pub(crate) fn validate_generic_event(
         | EventPayload::ChildToolPrepared(_)
         | EventPayload::ChildToolObserved(_)
         | EventPayload::ChildToolOutcomeUnknown(_)
-        | EventPayload::ChildToolPreparedV2(_)
-        | EventPayload::ChildToolObservedV2(_)
         | EventPayload::ChildToolOutcomeUnknownV2(_)
         | EventPayload::ChildHandoffCommitted(_)
         | EventPayload::ChildExecutionFinished(_) => {
             validate_child_reconnaissance_event(transaction, event, artifact_root)
         }
+        EventPayload::ChildToolPreparedV2(_) => {
+            let store_owned =
+                event.provenance.producer == CHILD_REPOSITORY_TOOL_PREPARATION_PRODUCER;
+            if store_owned != (admission == EventAdmission::ChildToolPreparation) {
+                return Err(StoreError::InvalidStateEvent);
+            }
+            validate_child_reconnaissance_event(transaction, event, artifact_root)
+        }
         EventPayload::ChildToolDispatchStartedV2(_) => {
             if admission != EventAdmission::ChildToolDispatchStart {
+                return Err(StoreError::InvalidStateEvent);
+            }
+            validate_child_reconnaissance_event(transaction, event, artifact_root)
+        }
+        EventPayload::ChildToolObservedV2(_) => {
+            let store_owned = event.provenance.producer == CHILD_TOOL_OBSERVED_PRODUCER;
+            if store_owned != (admission == EventAdmission::ChildToolObserved) {
                 return Err(StoreError::InvalidStateEvent);
             }
             validate_child_reconnaissance_event(transaction, event, artifact_root)
