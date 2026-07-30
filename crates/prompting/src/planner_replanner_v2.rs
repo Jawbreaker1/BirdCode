@@ -34,7 +34,7 @@ const POLICY_CONSTRAINT: &str = "planner_policy";
 const BINDINGS_CONSTRAINT: &str = "planner_turn_bindings";
 const EVIDENCE_DELTA_CONSTRAINT: &str = "planner_turn_evidence_delta";
 const EVIDENCE_PACKET_SCHEMA_VERSION: u32 = 2;
-const SOURCE_CONTRACT_VERSION: u32 = 1;
+pub const PLANNER_REPLANNER_V2_SOURCE_CONTRACT_VERSION: u32 = 1;
 const MAX_EVIDENCE_PACKET_ENTRIES: usize = 256;
 const MAX_EVIDENCE_PACKET_BYTES: usize = 1024 * 1024;
 const MAX_EVIDENCE_ID_BYTES: usize = 512;
@@ -189,7 +189,7 @@ impl PlannerReplannerV2PlanSnapshot {
         acceptance_policy_sha256: impl Into<String>,
     ) -> Self {
         Self {
-            schema_version: SOURCE_CONTRACT_VERSION,
+            schema_version: PLANNER_REPLANNER_V2_SOURCE_CONTRACT_VERSION,
             plan_id: plan_id.into(),
             revision: 0,
             parent_plan_sha256: None,
@@ -270,7 +270,7 @@ impl PlannerReplannerV2ContextCatalog {
     /// Returns an error only if serialization fails.
     pub fn derived_manifest_sha256(&self) -> Result<String, String> {
         wire_sha256(&ContextCatalogHashMaterial {
-            schema_version: SOURCE_CONTRACT_VERSION,
+            schema_version: PLANNER_REPLANNER_V2_SOURCE_CONTRACT_VERSION,
             evidence_bindings: &self.evidence_bindings,
         })
     }
@@ -1697,7 +1697,7 @@ fn base_plan_integrity_violations(
 ) -> Vec<PlannerReplannerV2InvariantViolation> {
     let mut violations = Vec::new();
     authority_check(
-        plan.schema_version == SOURCE_CONTRACT_VERSION,
+        plan.schema_version == PLANNER_REPLANNER_V2_SOURCE_CONTRACT_VERSION,
         "base_plan.schema_version",
         &mut violations,
     );
@@ -2460,7 +2460,7 @@ fn validate_accepted_root_plan(
             field: "accepted_root_plan.plan_artifact.content".to_owned(),
         });
     }
-    if evidence.plan.schema_version != SOURCE_CONTRACT_VERSION
+    if evidence.plan.schema_version != PLANNER_REPLANNER_V2_SOURCE_CONTRACT_VERSION
         || evidence.plan.directive != RootPlannerDirective::Plan
     {
         violations.push(PlannerReplannerV2EvidenceViolation::AcceptedRootPlanShape);
@@ -2696,11 +2696,11 @@ fn validate_contract_version(
     actual: u32,
     violations: &mut Vec<PlannerReplannerV2EvidenceViolation>,
 ) {
-    if actual != SOURCE_CONTRACT_VERSION {
+    if actual != PLANNER_REPLANNER_V2_SOURCE_CONTRACT_VERSION {
         violations.push(
             PlannerReplannerV2EvidenceViolation::InvalidContractVersion {
                 field: field.to_owned(),
-                expected: SOURCE_CONTRACT_VERSION,
+                expected: PLANNER_REPLANNER_V2_SOURCE_CONTRACT_VERSION,
                 actual,
             },
         );

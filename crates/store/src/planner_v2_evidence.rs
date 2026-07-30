@@ -113,6 +113,22 @@ fn root_planner_evidence_pair(
     let EventPayload::PlanSemanticReviewAccepted(review) = &review_event.payload else {
         return Err(StoreError::InvalidStateEvent);
     };
+    let proposal_event = stored_event_for_run(
+        connection,
+        session_id,
+        run_id,
+        review.candidate.proposal_event_id,
+    )?;
+    let EventPayload::PlanProposalAccepted(proposal) = &proposal_event.payload else {
+        return Err(StoreError::InvalidStateEvent);
+    };
+    if proposal_event.sequence >= review_event.sequence
+        || proposal.accepted_plan_revision != review.candidate.plan_revision
+        || proposal.accepted_plan_digest != review.candidate.plan_digest
+        || proposal.accepted_plan_artifact != review.candidate.plan_artifact
+    {
+        return Err(StoreError::InvalidStateEvent);
+    }
     let plan = read_canonical_json_artifact::<RootPlannerOutput>(
         artifact_root,
         &review.candidate.plan_artifact,
@@ -122,7 +138,7 @@ fn root_planner_evidence_pair(
         birdcode_prompting::PlannerReplannerV2EvidenceMaterial::AcceptedRootPlan {
             evidence_id: review_event.id.to_string(),
             accepted_root_plan: birdcode_prompting::PlannerAcceptedRootPlanEvidenceV2 {
-                contract_version: birdcode_protocol::PLANNER_EVIDENCE_CONTRACT_VERSION,
+                contract_version: birdcode_prompting::PLANNER_REPLANNER_V2_SOURCE_CONTRACT_VERSION,
                 review_event_id: review_event.id.to_string(),
                 review_id: review.review_id.to_string(),
                 proposal_event_id: review.candidate.proposal_event_id.to_string(),
@@ -131,7 +147,7 @@ fn root_planner_evidence_pair(
                 plan_artifact: prompt_evidence_artifact_ref(&review.candidate.plan_artifact),
                 critique_artifact: prompt_evidence_artifact_ref(&review.critique_artifact),
                 validation_evidence_artifact: prompt_evidence_artifact_ref(
-                    &review.validation_evidence_artifact,
+                    &proposal.validation_evidence_artifact,
                 ),
                 plan,
             },
@@ -274,7 +290,8 @@ fn child_planner_evidence_pair(
                 birdcode_prompting::PlannerReplannerV2EvidenceMaterial::ChildHandoff {
                     evidence_id,
                     child_handoff: birdcode_prompting::PlannerVerifiedChildHandoffV2 {
-                        contract_version: CHILD_RECONNAISSANCE_CONTRACT_VERSION,
+                        contract_version:
+                            birdcode_prompting::PLANNER_REPLANNER_V2_SOURCE_CONTRACT_VERSION,
                         committed_event_id: handoff_event.id.to_string(),
                         handoff_artifact: prompt_evidence_artifact_ref(&committed.handoff_artifact),
                         handoff: prompt_handoff,
@@ -307,7 +324,8 @@ fn child_planner_evidence_pair(
                 birdcode_prompting::PlannerReplannerV2EvidenceMaterial::ChildFailed {
                     evidence_id,
                     child_failed: birdcode_prompting::PlannerChildFailedV2 {
-                        contract_version: CHILD_RECONNAISSANCE_CONTRACT_VERSION,
+                        contract_version:
+                            birdcode_prompting::PLANNER_REPLANNER_V2_SOURCE_CONTRACT_VERSION,
                         binding: prompting_child_binding(&finished.binding)?,
                         finished_event_id: event.id.to_string(),
                         completed_model_calls: finished.completed_model_calls,
@@ -340,7 +358,8 @@ fn child_planner_evidence_pair(
                 birdcode_prompting::PlannerReplannerV2EvidenceMaterial::ChildCancelled {
                     evidence_id,
                     child_cancelled: birdcode_prompting::PlannerChildCancelledV2 {
-                        contract_version: CHILD_RECONNAISSANCE_CONTRACT_VERSION,
+                        contract_version:
+                            birdcode_prompting::PLANNER_REPLANNER_V2_SOURCE_CONTRACT_VERSION,
                         binding: prompting_child_binding(&finished.binding)?,
                         finished_event_id: event.id.to_string(),
                         completed_model_calls: finished.completed_model_calls,

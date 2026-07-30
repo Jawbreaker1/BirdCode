@@ -1,6 +1,75 @@
 use super::*;
 
 #[test]
+fn accepted_root_plan_prompt_evidence_uses_prompt_domain_contract_version() {
+    let mut fixture = semantic_review_fixture_with_tamper_and_purpose(
+        SemanticResponseFixture::Verdict(PlanCriticVerdict::Accept),
+        SemanticPreparedTamper::None,
+        RunPurpose::ParallelRepositoryReconnaissanceV1,
+    );
+    let (critique, receipt, findings) = semantic_review_artifacts(
+        &fixture.store,
+        &fixture.review,
+        &fixture.observed,
+        &fixture.candidate,
+        &fixture.critic_policy_artifact,
+        PlanCriticVerdict::Accept,
+    );
+    assert!(findings.is_empty());
+    let decision_provenance =
+        semantic_decision_provenance(&fixture.store, &fixture.run, &fixture.observed);
+    fixture
+        .store
+        .append_event(NewEvent {
+            session_id: fixture.session.id,
+            run_id: Some(fixture.run.id),
+            actor_id: fixture.supervisor,
+            causal_parent: Some(fixture.observed.id),
+            provenance: decision_provenance,
+            payload: EventPayload::PlanSemanticReviewAccepted(PlanSemanticReviewAccepted {
+                review_id: PlanSemanticReviewId::new(),
+                inference_attempt_id: fixture.review_attempt,
+                observed_event_id: fixture.observed.id,
+                candidate: fixture.candidate,
+                critique_artifact: critique,
+                validation_evidence_artifact: receipt,
+            }),
+        })
+        .expect("the accepted root plan should persist");
+
+    let evidence = build_planner_evidence(
+        &fixture.store,
+        fixture.session.id,
+        fixture.run.id,
+        birdcode_protocol::PlannerTurnPurposeV1::InitialDelegation,
+        None,
+    )
+    .expect("Store should compile accepted-root evidence for the prompt domain");
+    let [
+        birdcode_prompting::PlannerReplannerV2EvidenceEntry::AcceptedRootPlan {
+            accepted_root_plan,
+            ..
+        },
+    ] = evidence.prompt_packet.entries.as_slice()
+    else {
+        panic!("initial delegation should contain exactly one accepted-root prompt entry")
+    };
+
+    assert_eq!(
+        accepted_root_plan.contract_version,
+        birdcode_prompting::PLANNER_REPLANNER_V2_SOURCE_CONTRACT_VERSION
+    );
+    assert_ne!(
+        accepted_root_plan.contract_version,
+        birdcode_protocol::PLANNER_EVIDENCE_CONTRACT_VERSION
+    );
+    assert_eq!(
+        evidence.durable_packet.schema_version,
+        birdcode_protocol::PLANNER_EVIDENCE_CONTRACT_VERSION
+    );
+}
+
+#[test]
 fn high_reasoning_provenance_rejects_backend_reasoning_and_raw_substitution() {
     let (_directory, store) = test_store();
     let session = Session::new(CreateSessionRequest {
