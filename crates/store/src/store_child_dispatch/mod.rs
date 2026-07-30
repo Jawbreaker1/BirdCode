@@ -5,10 +5,15 @@ mod projection_types;
 mod recovery;
 mod replay;
 mod tool;
+mod tool_observed;
 mod tool_start;
 
+pub(super) const CHILD_REPOSITORY_TOOL_PREPARATION_PRODUCER: &str =
+    "birdcode-store-child-repository-tool-preparation-v1";
 pub(super) const CHILD_TOOL_DISPATCH_START_PRODUCER: &str =
     "birdcode-store-child-repository-tool-dispatch-start-v1";
+pub(super) const CHILD_TOOL_OBSERVED_PRODUCER: &str =
+    "birdcode-store-child-repository-tool-observed-v1";
 
 pub use model::{
     ChildModelDispatchHandoff, ChildModelDispatchPreparationOutcome, ChildModelPreparedEvidence,
@@ -30,6 +35,12 @@ pub use tool::{
     ChildRepositoryExplorerToolPreparationAuthority, ChildRepositoryToolLane,
     ChildToolDispatchError, ChildToolDispatchHandoff, ChildToolDispatchPreparationOutcome,
     ChildToolPreparedEvidence,
+};
+pub use tool_observed::{
+    ChildRepositoryExplorerToolObservedCommitAuthority, ChildToolExecutionError,
+    ChildToolExecutionRecovery, ChildToolExecutionRecoveryReason, ChildToolExecutionRejection,
+    ChildToolObservedCommitError, ChildToolObservedCommitHandoff, ChildToolObservedCommitOutcome,
+    ChildToolObservedEvidence,
 };
 pub use tool_start::{
     ChildRepositoryExplorerToolDispatchStartAuthority, ChildToolDispatchRecovery,

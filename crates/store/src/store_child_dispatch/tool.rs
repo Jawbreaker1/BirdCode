@@ -4,13 +4,14 @@ use super::super::{
     CHILD_RECONNAISSANCE_CONTRACT_VERSION, CHILD_VALIDATED_ACTION_MEDIA_TYPE, ChildToolCallId,
     ChildValidatedActionBindingV1, ChildValidatedActionDocumentV1, ChildWorkOrderId, EventEnvelope,
     EventId, EventPayload, IdentifiedNewEvent, MAX_SQLITE_INTEGER_U64, NewEvent, Provenance, RunId,
-    Store, StoreError, apply_exact_event_envelope, artifact_digest, child_attempt_clock_accepts,
-    child_execution_binding, current_run_state, decode_canonical_event,
-    durable_run_for_claim_refresh, latest_broker_epoch_before, latest_cancellation_generation,
-    latest_claim_for_run, load_child_replay, load_event_by_id,
+    Store, StoreError, apply_exact_event_envelope_with_admission, artifact_digest,
+    child_attempt_clock_accepts, child_execution_binding, current_run_state,
+    decode_canonical_event, durable_run_for_claim_refresh, latest_broker_epoch_before,
+    latest_cancellation_generation, latest_claim_for_run, load_child_replay, load_event_by_id,
     preallocate_identified_event_envelope, put_artifact_at,
     validate_child_action_against_authority,
 };
+use super::CHILD_REPOSITORY_TOOL_PREPARATION_PRODUCER;
 use birdcode_protocol::{
     ArtifactRef, ChildRepositoryAuthorityV1, ChildValidatedActionId,
     REPOSITORY_BROKER_CONTRACT_VERSION, REPOSITORY_TOOL_HARD_MAX_REQUEST_BYTES,
@@ -20,15 +21,13 @@ use birdcode_protocol::{
 };
 use birdcode_tooling::{
     PreparedRepositoryToolCallV2, RepositoryBrokerErrorV2, RepositoryToolBroker,
-    RepositoryToolPrepareInputV2, RetainedArtifactV2, project_prepared_event_v2,
+    RepositoryToolExecuteErrorV2, RepositoryToolExecuteInputV2, RepositoryToolPrepareInputV2,
+    RepositoryToolTerminalV2, RetainedArtifactV2, project_prepared_event_v2,
 };
 use chrono::Utc;
 use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
-
-const CHILD_REPOSITORY_EXPLORER_TOOL_PREPARATION_PRODUCER: &str =
-    "birdcode-store-child-repository-tool-preparation-v1";
 
 /// Runtime-owned retry-stable identities and clock authority for one child
 /// repository-tool preparation.
@@ -57,6 +56,11 @@ pub(super) trait RepositoryToolPreparer: Send + Sync {
         &self,
         input: RepositoryToolPrepareInputV2,
     ) -> Result<PreparedRepositoryToolCallV2, RepositoryBrokerErrorV2>;
+    fn execute_classified(
+        &self,
+        input: RepositoryToolExecuteInputV2,
+        runtime_finished_at: Box<dyn FnOnce() -> RuntimeClockReading + Send>,
+    ) -> Result<RepositoryToolTerminalV2, RepositoryToolExecuteErrorV2>;
 }
 
 impl RepositoryToolPreparer for RepositoryToolBroker {
@@ -74,6 +78,14 @@ impl RepositoryToolPreparer for RepositoryToolBroker {
     ) -> Result<PreparedRepositoryToolCallV2, RepositoryBrokerErrorV2> {
         self.prepare(input)
     }
+
+    fn execute_classified(
+        &self,
+        input: RepositoryToolExecuteInputV2,
+        runtime_finished_at: Box<dyn FnOnce() -> RuntimeClockReading + Send>,
+    ) -> Result<RepositoryToolTerminalV2, RepositoryToolExecuteErrorV2> {
+        self.execute_classified(input, runtime_finished_at)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,6 +97,13 @@ pub(super) enum ToolLaneState {
 pub(super) struct ChildRepositoryToolLaneInner {
     pub(super) broker: Box<dyn RepositoryToolPreparer>,
     pub(super) publication: Mutex<ToolLaneState>,
+}
+
+pub(super) fn taint_lane(lane: &ChildRepositoryToolLane) {
+    match lane.inner.publication.lock() {
+        Ok(mut state) => *state = ToolLaneState::Tainted,
+        Err(poisoned) => *poisoned.into_inner() = ToolLaneState::Tainted,
+    }
 }
 
 /// Shared broker-epoch preparation lane.
@@ -256,7 +275,7 @@ fn receipt_authority(authority: &ChildRepositoryAuthorityV1) -> RepositoryToolRe
     }
 }
 
-fn retained_artifact(
+pub(super) fn retained_artifact(
     artifact_root: &std::path::Path,
     retained: &RetainedArtifactV2,
 ) -> Result<(), StoreError> {
@@ -292,7 +311,7 @@ fn exact_existing_preparation(
         || prepared.action_binding.action_id != authority.action_id
         || prepared.tool_call_id != authority.tool_call_id
         || prepared.prepared_at != authority.prepared_at
-        || existing.provenance.producer != CHILD_REPOSITORY_EXPLORER_TOOL_PREPARATION_PRODUCER
+        || existing.provenance.producer != CHILD_REPOSITORY_TOOL_PREPARATION_PRODUCER
     {
         return Err(StoreError::IdentifiedEventConflict);
     }
@@ -657,6 +676,7 @@ impl Store {
         clippy::needless_pass_by_value,
         reason = "the command boundary intentionally consumes fresh runtime authority"
     )]
+    #[allow(clippy::too_many_lines, reason = "one transactional publication fence")]
     pub fn prepare_child_repository_explorer_tool_dispatch(
         &mut self,
         run_id: RunId,
@@ -729,7 +749,7 @@ impl Store {
                     actor_id: derived.actor_id,
                     causal_parent: Some(derived.causal_parent),
                     provenance: Provenance {
-                        producer: CHILD_REPOSITORY_EXPLORER_TOOL_PREPARATION_PRODUCER.to_owned(),
+                        producer: CHILD_REPOSITORY_TOOL_PREPARATION_PRODUCER.to_owned(),
                         backend: Some(derived.backend),
                         raw_artifact: Some(projected.prepared_receipt_artifact.clone()),
                     },
@@ -741,7 +761,12 @@ impl Store {
                 identified.event_id,
                 identified.event,
             )?;
-            apply_exact_event_envelope(&transaction, &artifact_root, &envelope)?;
+            apply_exact_event_envelope_with_admission(
+                &transaction,
+                &artifact_root,
+                &envelope,
+                super::super::EventAdmission::ChildToolPreparation,
+            )?;
             transaction.commit()?;
             Ok(envelope)
         })();

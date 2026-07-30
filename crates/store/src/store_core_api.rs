@@ -226,7 +226,7 @@ impl Store {
     /// Returns an error when the session or run does not exist, serialization
     /// fails, the sequence overflows, or the transaction cannot commit.
     pub fn append_event(&mut self, event: NewEvent) -> Result<EventEnvelope, StoreError> {
-        reject_public_store_owned_event(&event.payload)?;
+        reject_public_store_owned_event(&event)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -260,7 +260,7 @@ impl Store {
         &mut self,
         identified: IdentifiedNewEvent,
     ) -> Result<IdempotentAppendOutcome, StoreError> {
-        reject_public_store_owned_event(&identified.event.payload)?;
+        reject_public_store_owned_event(&identified.event)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -306,7 +306,7 @@ impl Store {
         event: NewEvent,
         deadline: DateTime<Utc>,
     ) -> Result<DeadlineAppendOutcome, StoreError> {
-        reject_public_store_owned_event(&event.payload)?;
+        reject_public_store_owned_event(&event)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;

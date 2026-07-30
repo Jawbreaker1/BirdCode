@@ -155,6 +155,16 @@ impl RepositoryToolPreparer for MockPreparer {
             prepared_receipt,
         })
     }
+
+    fn execute_classified(
+        &self,
+        _input: RepositoryToolExecuteInputV2,
+        _runtime_finished_at: Box<dyn FnOnce() -> RuntimeClockReading + Send>,
+    ) -> Result<RepositoryToolTerminalV2, RepositoryToolExecuteErrorV2> {
+        Err(RepositoryToolExecuteErrorV2::NotStarted(
+            RepositoryBrokerErrorV2::BrokerStateUnavailable,
+        ))
+    }
 }
 
 pub(crate) fn mock_lane(

@@ -7212,9 +7212,9 @@ fn validate_child_tool_prepared_document(
         prepared_at: prepared.prepared_at.clone(),
         broker_epoch_activation_event_id: None,
         started_event_id: None,
+        dispatch_start_required: false,
     })
 }
-
 #[allow(
     clippy::too_many_lines,
     reason = "broker-v2 Prepared validation deliberately attests the complete receipt in one boundary"
@@ -7353,9 +7353,9 @@ fn validate_child_tool_prepared_document_v2(
         prepared_at: prepared.prepared_at.clone(),
         broker_epoch_activation_event_id: None,
         started_event_id: None,
+        dispatch_start_required: false,
     })
 }
-
 fn repository_completed_cleanup_v2_matches_effect(
     effect: RepositoryFilesystemEffectV1,
     cleanup: &birdcode_protocol::RepositoryCleanupReportV2,
