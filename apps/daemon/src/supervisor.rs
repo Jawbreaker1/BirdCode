@@ -5791,7 +5791,7 @@ fn rejection_reason(error: &PromptError) -> PlanProposalRejectionReason {
     }
 }
 
-async fn transition_run(
+pub(crate) async fn transition_run(
     paths: RuntimePaths,
     run_id: RunId,
     actor_id: ActorId,

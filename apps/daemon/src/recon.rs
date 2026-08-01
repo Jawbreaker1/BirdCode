@@ -7,8 +7,10 @@
 mod planner_terminal;
 
 use self::planner_terminal::{
-    PlannerTurnExecution, accepted_planner_recovery, finalize_planner_turn,
-    rejected_planner_recovery,
+    PlannerFinalizationResolution, PlannerRetryMode, PlannerTerminalResolution,
+    PlannerTurnExecution, accepted_planner_recovery, close_planner_not_dispatched,
+    close_planner_unknown, finalize_planner_turn, rejected_planner_recovery,
+    resolve_planner_cancellation, resolve_planner_terminal_boundary,
 };
 use crate::model_call_scheduler::ModelCallScheduler;
 use crate::supervisor::{
@@ -802,92 +804,6 @@ async fn reconcile_planner_unknown(
     })?
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PlannerRetryMode {
-    Immediate,
-    Deferred,
-}
-
-enum PlannerTerminalResolution {
-    RetryNow,
-    Execution(PlannerTurnExecution),
-}
-
-async fn resolve_planner_terminal_boundary(
-    paths: RuntimePaths,
-    run_id: RunId,
-    terminal_event: EventEnvelope,
-    runtime_instance_id: RuntimeInstanceId,
-    retry_mode: PlannerRetryMode,
-    clock: Arc<ReconRuntimeClock>,
-) -> Result<PlannerTerminalResolution, SupervisorRunError> {
-    let projection = recon_projection(paths.clone(), run_id).await?;
-    if matches!(
-        projection.planner.next_action,
-        birdcode_store::PlannerNextAction::RetryPrepared { .. }
-    ) {
-        return Ok(match retry_mode {
-            PlannerRetryMode::Immediate => PlannerTerminalResolution::RetryNow,
-            PlannerRetryMode::Deferred => {
-                PlannerTerminalResolution::Execution(PlannerTurnExecution::DeferredRetry {
-                    event: terminal_event,
-                })
-            }
-        });
-    }
-    Ok(PlannerTerminalResolution::Execution(
-        finalize_planner_turn(paths, run_id, runtime_instance_id, clock).await?,
-    ))
-}
-
-async fn close_planner_not_dispatched(
-    paths: RuntimePaths,
-    run_id: RunId,
-    prepared_event_id: EventId,
-    runtime_instance_id: RuntimeInstanceId,
-    reason: PlannerV2NotDispatchedReason,
-    retry_mode: PlannerRetryMode,
-    clock: Arc<ReconRuntimeClock>,
-) -> Result<PlannerTerminalResolution, SupervisorRunError> {
-    let event = observe_planner_turn(
-        paths.clone(),
-        run_id,
-        PlannerV2ObservationAuthority {
-            event_id: EventId::new(),
-            prepared_event_id,
-            evidence: PlannerV2ObservedEvidence::NotDispatched { reason },
-            observed_at: clock.reading(runtime_instance_id),
-        },
-    )
-    .await?;
-    resolve_planner_terminal_boundary(paths, run_id, event, runtime_instance_id, retry_mode, clock)
-        .await
-}
-
-async fn close_planner_unknown(
-    paths: RuntimePaths,
-    run_id: RunId,
-    prepared_event_id: EventId,
-    runtime_instance_id: RuntimeInstanceId,
-    boundary: birdcode_protocol::UnknownInferenceBoundary,
-    retry_mode: PlannerRetryMode,
-    clock: Arc<ReconRuntimeClock>,
-) -> Result<PlannerTerminalResolution, SupervisorRunError> {
-    let event = reconcile_planner_unknown(
-        paths.clone(),
-        run_id,
-        PlannerV2UnknownAuthority {
-            event_id: EventId::new(),
-            prepared_event_id,
-            boundary,
-            boundary_at: clock.reading(runtime_instance_id),
-        },
-    )
-    .await?;
-    resolve_planner_terminal_boundary(paths, run_id, event, runtime_instance_id, retry_mode, clock)
-        .await
-}
-
 /// Executes or recovers one planner-v2 turn through Store's total Prepared,
 /// Observed/Unknown and finalization APIs. A recovered Prepared is always
 /// reconciled as restart-unknown; it is never redispatched.
@@ -985,7 +901,8 @@ pub(crate) async fn drive_planner_turn(
                 )
                 .await?
                 {
-                    PlannerTerminalResolution::RetryNow => continue,
+                    PlannerTerminalResolution::RetryPrepared
+                    | PlannerTerminalResolution::Reproject => continue,
                     PlannerTerminalResolution::Execution(execution) => return Ok(execution),
                 }
             }
@@ -1008,9 +925,19 @@ pub(crate) async fn drive_planner_turn(
                     ));
                 };
                 let runtime_instance_id = current_claim_runtime_instance_id(&projection)?;
-                return finalize_planner_turn(paths, run.id, runtime_instance_id, clock).await;
+                match finalize_planner_turn(
+                    paths.clone(),
+                    run.id,
+                    runtime_instance_id,
+                    Arc::clone(&clock),
+                )
+                .await?
+                {
+                    PlannerFinalizationResolution::Reproject => continue,
+                    PlannerFinalizationResolution::Execution(execution) => return Ok(execution),
+                }
             }
-            birdcode_store::PlannerNextAction::ApplyAcceptedDirective { .. } => {
+            action @ birdcode_store::PlannerNextAction::ApplyAcceptedDirective { .. } => {
                 let accepted = projection
                     .planner
                     .accepted_directive
@@ -1020,9 +947,9 @@ pub(crate) async fn drive_planner_turn(
                             "Store requested an accepted directive without its event".to_owned(),
                         )
                     })?;
-                return accepted_planner_recovery(&accepted.event, purpose);
+                return accepted_planner_recovery(action, accepted, purpose);
             }
-            birdcode_store::PlannerNextAction::ResolveRejectedTurn { .. } => {
+            action @ birdcode_store::PlannerNextAction::ResolveRejectedTurn { .. } => {
                 let PlannerTurnRecoveryState::Rejected { rejected_event, .. } =
                     &projection.planner.recovery
                 else {
@@ -1030,7 +957,7 @@ pub(crate) async fn drive_planner_turn(
                         "Store requested rejected-turn resolution without its event".to_owned(),
                     ));
                 };
-                return rejected_planner_recovery(rejected_event, purpose);
+                return rejected_planner_recovery(action, rejected_event, purpose);
             }
             birdcode_store::PlannerNextAction::Terminal { .. } => {
                 return Err(SupervisorRunError::InvalidState(
@@ -1038,31 +965,17 @@ pub(crate) async fn drive_planner_turn(
                 ));
             }
             birdcode_store::PlannerNextAction::CancellationRequested { .. } => {
-                ensure_durable_cancellation(paths.clone(), run.id, config.clone()).await?;
-                let PlannerTurnRecoveryState::Prepared { prepared_event } =
-                    &projection.planner.recovery
-                else {
-                    return Err(SupervisorRunError::InvalidState(
-                        "planner cancellation has no Prepared boundary to close".to_owned(),
-                    ));
-                };
-                let EventPayload::PlannerTurnPreparedV1(prepared) = &prepared_event.payload else {
-                    return Err(SupervisorRunError::InvalidState(
-                        "planner cancellation lost its Prepared event".to_owned(),
-                    ));
-                };
-                let resolution = close_planner_not_dispatched(
+                let resolution = resolve_planner_cancellation(
                     paths.clone(),
                     run.id,
-                    prepared_event.id,
-                    prepared.claim_runtime_instance_id,
-                    PlannerV2NotDispatchedReason::CancellationRequested,
-                    PlannerRetryMode::Immediate,
+                    &projection,
+                    &config,
                     Arc::clone(&clock),
                 )
                 .await?;
                 match resolution {
-                    PlannerTerminalResolution::RetryNow => continue,
+                    PlannerTerminalResolution::RetryPrepared
+                    | PlannerTerminalResolution::Reproject => continue,
                     PlannerTerminalResolution::Execution(execution) => return Ok(execution),
                 }
             }
@@ -1096,22 +1009,25 @@ pub(crate) async fn drive_planner_turn(
             None
         };
         if let Some(reason) = preflight_reason {
-            return match close_planner_not_dispatched(
+            match close_planner_not_dispatched(
                 paths.clone(),
                 run.id,
                 prepared_event_id,
                 runtime_instance_id,
                 reason,
                 PlannerRetryMode::Immediate,
-                clock,
+                Arc::clone(&clock),
             )
             .await?
             {
-                PlannerTerminalResolution::RetryNow => Err(SupervisorRunError::InvalidState(
-                    "Store retried a non-retryable planner preflight rejection".to_owned(),
-                )),
-                PlannerTerminalResolution::Execution(execution) => Ok(execution),
-            };
+                PlannerTerminalResolution::RetryPrepared => {
+                    return Err(SupervisorRunError::InvalidState(
+                        "Store retried a non-retryable planner preflight rejection".to_owned(),
+                    ));
+                }
+                PlannerTerminalResolution::Reproject => continue,
+                PlannerTerminalResolution::Execution(execution) => return Ok(execution),
+            }
         }
 
         let slot = await_model_call_slot(
@@ -1139,7 +1055,8 @@ pub(crate) async fn drive_planner_turn(
                 )
                 .await?;
                 match resolution {
-                    PlannerTerminalResolution::RetryNow => continue,
+                    PlannerTerminalResolution::RetryPrepared
+                    | PlannerTerminalResolution::Reproject => continue,
                     PlannerTerminalResolution::Execution(execution) => return Ok(execution),
                 }
             }
@@ -1155,7 +1072,8 @@ pub(crate) async fn drive_planner_turn(
                 )
                 .await?;
                 match resolution {
-                    PlannerTerminalResolution::RetryNow => continue,
+                    PlannerTerminalResolution::RetryPrepared
+                    | PlannerTerminalResolution::Reproject => continue,
                     PlannerTerminalResolution::Execution(execution) => return Ok(execution),
                 }
             }
@@ -1171,7 +1089,8 @@ pub(crate) async fn drive_planner_turn(
                 )
                 .await?;
                 match resolution {
-                    PlannerTerminalResolution::RetryNow => continue,
+                    PlannerTerminalResolution::RetryPrepared
+                    | PlannerTerminalResolution::Reproject => continue,
                     PlannerTerminalResolution::Execution(execution) => return Ok(execution),
                 }
             }
@@ -1187,7 +1106,8 @@ pub(crate) async fn drive_planner_turn(
                 )
                 .await?;
                 match resolution {
-                    PlannerTerminalResolution::RetryNow => continue,
+                    PlannerTerminalResolution::RetryPrepared
+                    | PlannerTerminalResolution::Reproject => continue,
                     PlannerTerminalResolution::Execution(execution) => return Ok(execution),
                 }
             }
@@ -1203,7 +1123,8 @@ pub(crate) async fn drive_planner_turn(
                 )
                 .await?;
                 match resolution {
-                    PlannerTerminalResolution::RetryNow => continue,
+                    PlannerTerminalResolution::RetryPrepared
+                    | PlannerTerminalResolution::Reproject => continue,
                     PlannerTerminalResolution::Execution(execution) => return Ok(execution),
                 }
             }
@@ -1228,22 +1149,25 @@ pub(crate) async fn drive_planner_turn(
             } else {
                 PlannerV2NotDispatchedReason::BackendInstanceDrift
             };
-            return match close_planner_not_dispatched(
+            match close_planner_not_dispatched(
                 paths.clone(),
                 run.id,
                 prepared_event_id,
                 runtime_instance_id,
                 reason,
                 PlannerRetryMode::Immediate,
-                clock,
+                Arc::clone(&clock),
             )
             .await?
             {
-                PlannerTerminalResolution::RetryNow => Err(SupervisorRunError::InvalidState(
-                    "Store retried a non-retryable backend-attestation rejection".to_owned(),
-                )),
-                PlannerTerminalResolution::Execution(execution) => Ok(execution),
-            };
+                PlannerTerminalResolution::RetryPrepared => {
+                    return Err(SupervisorRunError::InvalidState(
+                        "Store retried a non-retryable backend-attestation rejection".to_owned(),
+                    ));
+                }
+                PlannerTerminalResolution::Reproject => continue,
+                PlannerTerminalResolution::Execution(execution) => return Ok(execution),
+            }
         }
 
         let inference = backend.infer_structured(material.request.inference().clone());
@@ -1355,7 +1279,9 @@ pub(crate) async fn drive_planner_turn(
             }
         };
         match resolution {
-            PlannerTerminalResolution::RetryNow => continue,
+            PlannerTerminalResolution::RetryPrepared | PlannerTerminalResolution::Reproject => {
+                continue;
+            }
             PlannerTerminalResolution::Execution(execution) => return Ok(execution),
         }
     }
