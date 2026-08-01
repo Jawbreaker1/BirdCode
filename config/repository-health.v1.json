@@ -27,7 +27,7 @@
     },
     {
       "path": "apps/daemon/src/recon.rs",
-      "ceiling_lines": 2684
+      "ceiling_lines": 2559
     },
     {
       "path": "apps/daemon/src/repository_agent_worker.rs",

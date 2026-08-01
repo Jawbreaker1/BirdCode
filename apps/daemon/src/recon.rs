@@ -4,6 +4,12 @@
 //! delegation and child actions remain typed model outputs; Store owns all
 //! authoritative reconstruction and validation.
 
+mod planner_terminal;
+
+use self::planner_terminal::{
+    PlannerTurnExecution, accepted_planner_recovery, finalize_planner_turn,
+    rejected_planner_recovery,
+};
 use crate::model_call_scheduler::ModelCallScheduler;
 use crate::supervisor::{
     ModelCallSlotEnd, RunSupervisorConfig, SupervisorRunError, await_model_call_slot,
@@ -38,10 +44,9 @@ use birdcode_store::{
     ParallelReconClaimRefreshAuthority, ParallelReconClaimRefreshOutcome,
     ParallelReconSnapshotClaimHandoffOutcomeV1, ParallelReconSnapshotClaimHandoffV1,
     ParallelReconSnapshotClaimHandoffViewV1, ParallelReconSnapshotRefreshStatus,
-    PlannerTurnRecoveryState, PlannerV2FinalizationAuthority, PlannerV2FinalizationDisposition,
-    PlannerV2NotDispatchedReason, PlannerV2ObservationAuthority, PlannerV2ObservedEvidence,
-    PlannerV2PreparationAuthority, PlannerV2PreparedMaterial, PlannerV2UnknownAuthority,
-    ReconRunProjection, RepositorySnapshotLifecycleProjection, Store,
+    PlannerTurnRecoveryState, PlannerV2NotDispatchedReason, PlannerV2ObservationAuthority,
+    PlannerV2ObservedEvidence, PlannerV2PreparationAuthority, PlannerV2PreparedMaterial,
+    PlannerV2UnknownAuthority, ReconRunProjection, RepositorySnapshotLifecycleProjection, Store,
 };
 use birdcode_workspace::{
     ActiveSnapshotLease, ClockBoundary, ClockBoundaryError, RetainedArtifact,
@@ -711,26 +716,6 @@ fn prepare_planner_turn(
     Ok(store.prepare_planner_v2_turn(run.id, authority)?.material)
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum PlannerTurnExecution {
-    Accepted {
-        event: EventEnvelope,
-        accepted: birdcode_protocol::PlannerTurnAcceptedV1,
-    },
-    Rejected {
-        event: EventEnvelope,
-        reason: birdcode_protocol::PlannerTurnRejectionReasonV1,
-    },
-    Terminal {
-        event: EventEnvelope,
-        state: RunState,
-    },
-    /// The old Prepared boundary is durably terminal and Store authorizes a
-    /// fresh attempt, but the current runtime/claim/scheduler must not launch
-    /// it. A later supervisor pass resumes from `RetryPrepared`.
-    DeferredRetry { event: EventEnvelope },
-}
-
 async fn recon_projection(
     paths: RuntimePaths,
     run_id: RunId,
@@ -815,103 +800,6 @@ async fn reconcile_planner_unknown(
     .map_err(|error| {
         SupervisorRunError::Background(format!("planner reconciliation worker failed: {error}"))
     })?
-}
-
-fn planner_execution_from_finalization(
-    outcome: birdcode_store::PlannerV2FinalizationOutcome,
-) -> Result<PlannerTurnExecution, SupervisorRunError> {
-    match outcome.disposition {
-        PlannerV2FinalizationDisposition::Accepted => {
-            let EventPayload::PlannerTurnAcceptedV1(accepted) = &outcome.event.payload else {
-                return Err(SupervisorRunError::InvalidState(
-                    "Store reported planner acceptance without an accepted event".to_owned(),
-                ));
-            };
-            Ok(PlannerTurnExecution::Accepted {
-                event: outcome.event.clone(),
-                accepted: accepted.clone(),
-            })
-        }
-        PlannerV2FinalizationDisposition::Rejected(reason) => {
-            if !matches!(
-                &outcome.event.payload,
-                EventPayload::PlannerTurnRejectedV1(_)
-            ) {
-                return Err(SupervisorRunError::InvalidState(
-                    "Store reported planner rejection without a rejected event".to_owned(),
-                ));
-            }
-            Ok(PlannerTurnExecution::Rejected {
-                event: outcome.event,
-                reason,
-            })
-        }
-        PlannerV2FinalizationDisposition::RunFailed
-        | PlannerV2FinalizationDisposition::RunCancelled => {
-            let EventPayload::RunStateChanged { to, .. } = &outcome.event.payload else {
-                return Err(SupervisorRunError::InvalidState(
-                    "Store reported planner terminalization without a run-state event".to_owned(),
-                ));
-            };
-            let expected = match outcome.disposition {
-                PlannerV2FinalizationDisposition::RunFailed => RunState::Failed,
-                PlannerV2FinalizationDisposition::RunCancelled => RunState::Cancelled,
-                _ => unreachable!("terminal disposition was matched above"),
-            };
-            if *to != expected {
-                return Err(SupervisorRunError::InvalidState(
-                    "Store planner terminal disposition disagrees with run state".to_owned(),
-                ));
-            }
-            let state = *to;
-            Ok(PlannerTurnExecution::Terminal {
-                event: outcome.event,
-                state,
-            })
-        }
-    }
-}
-
-async fn finalize_planner_turn(
-    paths: RuntimePaths,
-    run_id: RunId,
-    runtime_instance_id: RuntimeInstanceId,
-    clock: Arc<ReconRuntimeClock>,
-) -> Result<PlannerTurnExecution, SupervisorRunError> {
-    tokio::task::spawn_blocking(move || {
-        let outcome = Store::open(paths.database(), paths.artifacts())?.finalize_planner_v2_turn(
-            run_id,
-            PlannerV2FinalizationAuthority {
-                event_id: EventId::new(),
-                finalized_at: clock.reading(runtime_instance_id),
-            },
-        )?;
-        planner_execution_from_finalization(outcome)
-    })
-    .await
-    .map_err(|error| {
-        SupervisorRunError::Background(format!("planner finalization worker failed: {error}"))
-    })?
-}
-
-fn accepted_planner_recovery(
-    event: &EventEnvelope,
-    purpose: PlannerTurnPurposeV1,
-) -> Result<PlannerTurnExecution, SupervisorRunError> {
-    let EventPayload::PlannerTurnAcceptedV1(accepted) = &event.payload else {
-        return Err(SupervisorRunError::InvalidState(
-            "accepted planner recovery carries the wrong event".to_owned(),
-        ));
-    };
-    if accepted.purpose != purpose {
-        return Err(SupervisorRunError::InvalidState(
-            "accepted planner turn has the wrong purpose".to_owned(),
-        ));
-    }
-    Ok(PlannerTurnExecution::Accepted {
-        event: event.clone(),
-        accepted: accepted.clone(),
-    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1142,20 +1030,7 @@ pub(crate) async fn drive_planner_turn(
                         "Store requested rejected-turn resolution without its event".to_owned(),
                     ));
                 };
-                let EventPayload::PlannerTurnRejectedV1(rejected) = &rejected_event.payload else {
-                    return Err(SupervisorRunError::InvalidState(
-                        "rejected planner recovery carries the wrong event".to_owned(),
-                    ));
-                };
-                if rejected.purpose != purpose {
-                    return Err(SupervisorRunError::InvalidState(
-                        "rejected planner turn has the wrong purpose".to_owned(),
-                    ));
-                }
-                return Ok(PlannerTurnExecution::Rejected {
-                    event: rejected_event.clone(),
-                    reason: rejected.reason,
-                });
+                return rejected_planner_recovery(rejected_event, purpose);
             }
             birdcode_store::PlannerNextAction::Terminal { .. } => {
                 return Err(SupervisorRunError::InvalidState(
